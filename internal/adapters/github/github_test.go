@@ -1,0 +1,379 @@
+package github
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/alsiola/open-supervisor/internal/adapter"
+	"github.com/alsiola/open-supervisor/internal/core"
+)
+
+func testConn(t *testing.T, h http.Handler) *conn {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	c, err := newConn(adapter.Values{"auth": "token", "token": "tok", "apiUrl": srv.URL}, adapter.Env{HTTP: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func bound(t *testing.T, h http.Handler) (*Tracker, *Repo) {
+	c := testConn(t, h)
+	tr, err := c.Tracker(adapter.Values{"repo": "octo/widgets"}, adapter.ProjectInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp, err := c.Repo(adapter.Values{"repo": "octo/widgets"}, adapter.ProjectInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tr.(*Tracker), rp.(*Repo)
+}
+
+func TestRegistered(t *testing.T) {
+	s, ok := adapter.Lookup("github")
+	if !ok || !s.Has(adapter.RoleRepo) || !s.Has(adapter.RoleTracker) {
+		t.Fatalf("github not registered with both roles: %+v", s)
+	}
+}
+
+func TestCandidatesPaginatesAndSkipsPRs(t *testing.T) {
+	var pages int32
+	tr, _ := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			t.Errorf("auth header %q", r.Header.Get("Authorization"))
+		}
+		if r.URL.Path != "/repos/octo/widgets/issues" {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		atomic.AddInt32(&pages, 1)
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		var items []map[string]any
+		n := 100
+		if page == 2 {
+			n = 3
+		}
+		for i := 0; i < n; i++ {
+			num := (page-1)*100 + i + 1
+			item := map[string]any{"number": num, "title": fmt.Sprint("t", num), "state": "open", "labels": []map[string]string{{"name": "bug"}}}
+			if num%50 == 0 {
+				item["pull_request"] = map[string]any{"url": "x"}
+			}
+			if num == 7 {
+				item["state_reason"] = "reopened"
+			}
+			items = append(items, item)
+		}
+		_ = json.NewEncoder(w).Encode(items)
+	}))
+	issues, err := tr.Candidates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pages != 2 {
+		t.Errorf("read %d pages, want 2", pages)
+	}
+	if len(issues) != 101 { // 103 minus PRs 50 and 100
+		t.Errorf("got %d issues", len(issues))
+	}
+	if issues[0].Key != "1" || !issues[0].Open || !issues[0].HasLabel("BUG") {
+		t.Errorf("first issue %+v", issues[0])
+	}
+	if !issues[6].Reopened {
+		t.Errorf("issue 7 should be reopened")
+	}
+}
+
+func TestChecksEvaluation(t *testing.T) {
+	runs := `{"check_runs":[{"name":"build","status":"completed","conclusion":"success","html_url":"https://x/build"},{"name":"lint","status":"completed","conclusion":"failure","html_url":"https://x/lint"}]}`
+	statuses := `{"statuses":[{"context":"netlify/site/deploy-preview","state":"success","target_url":"https://preview.example"}]}`
+	_, rp := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/check-runs"):
+			fmt.Fprint(w, runs)
+		case strings.HasSuffix(r.URL.Path, "/status"):
+			fmt.Fprint(w, statuses)
+		default:
+			t.Errorf("unexpected %s", r.URL.Path)
+		}
+	}))
+	c, err := rp.Checks(context.Background(), "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Complete || !c.Any || len(c.Failed) != 1 || c.Failed[0] != "lint" || c.Preview != "https://preview.example" || len(c.Runs) != 3 {
+		t.Errorf("checks %+v", c)
+	}
+
+	pending := rp.evaluate([]checkRun{{Name: "build", Status: "in_progress"}}, nil)
+	if pending.Complete || !pending.Any {
+		t.Errorf("pending %+v", pending)
+	}
+	none := rp.evaluate(nil, nil)
+	if none.Complete || none.Any {
+		t.Errorf("none %+v", none)
+	}
+}
+
+func TestMarkers(t *testing.T) {
+	cases := map[string]*core.AgentMark{
+		withMark("hi", core.AgentMark{From: "12"}): {From: "12"},
+		withMark("hi", core.AgentMark{}):           {From: ""},
+		"done\n\n<!-- claude-agent -->":            {From: ""},
+		"done\n<!-- claude-agent from #34 -->":     {From: "34"},
+		"just a person":                            nil,
+	}
+	for body, want := range cases {
+		got := agentMark(body)
+		if (got == nil) != (want == nil) || (got != nil && got.From != want.From) {
+			t.Errorf("agentMark(%q) = %+v, want %+v", body, got, want)
+		}
+	}
+	tr := &Tracker{&binding{c: &conn{web: "https://github.com"}, repo: "octo/widgets"}}
+	at := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
+	if got, ok := core.RunAtIn(tr.RunAtMarker(at)); !ok || !got.Equal(at) {
+		t.Errorf("runAt marker round trip: %v %v", got, ok)
+	}
+	if got := tr.RefsIn("Closes #12, fixes #3 and refs #12; see #99"); strings.Join(got, ",") != "12,3" {
+		t.Errorf("RefsIn = %v", got)
+	}
+	if len(tr.RefsIn(tr.RefFor("5"))) != 1 {
+		t.Errorf("RefFor isn't read back by RefsIn")
+	}
+}
+
+func TestCommentsFilterSinceAndKinds(t *testing.T) {
+	since := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	_, rp := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/issues/4/comments"):
+			if r.URL.Query().Get("since") == "" {
+				t.Errorf("no since")
+			}
+			fmt.Fprint(w, `[{"id":1,"user":{"login":"a","type":"User"},"body":"old","updated_at":"2026-01-01T12:00:00Z"},{"id":2,"user":{"login":"b","type":"Bot"},"body":"new","updated_at":"2026-01-01T13:00:00Z"}]`)
+		case strings.Contains(r.URL.Path, "/pulls/4/comments"):
+			fmt.Fprint(w, `[{"id":3,"user":{"login":"c","type":"User"},"body":"inline","path":"a.go","original_line":9,"in_reply_to_id":2,"updated_at":"2026-01-01T14:00:00Z"}]`)
+		case strings.Contains(r.URL.Path, "/pulls/4/reviews"):
+			fmt.Fprint(w, `[{"id":3,"user":{"login":"d","type":"User"},"body":"lgtm","state":"APPROVED","submitted_at":"2026-01-01T15:00:00Z"},{"id":5,"user":{"login":"d","type":"User"},"body":"","state":"APPROVED","submitted_at":"2026-01-01T15:00:00Z"},{"id":6,"user":{"login":"d","type":"User"},"body":"draft","state":"PENDING","submitted_at":"2026-01-01T15:00:00Z"}]`)
+		default:
+			t.Errorf("unexpected %s", r.URL.Path)
+			fmt.Fprint(w, `[]`)
+		}
+	}))
+	cs, err := rp.PRComments(context.Background(), 4, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 3 {
+		t.Fatalf("got %d comments: %+v", len(cs), cs)
+	}
+	if cs[0].ID != "2" || !cs[0].Bot || cs[0].Kind != core.OnPR || cs[0].PR != 4 {
+		t.Errorf("conversation %+v", cs[0])
+	}
+	if cs[1].Kind != core.OnInline || cs[1].Line != 9 || cs[1].InReplyTo != "2" || cs[1].Path != "a.go" {
+		t.Errorf("inline %+v", cs[1])
+	}
+	if cs[2].Kind != core.OnReview || cs[2].ID != "review-3" || cs[2].ReviewState != "APPROVED" {
+		t.Errorf("review %+v", cs[2])
+	}
+}
+
+func TestEditLabelsIgnoresMissing(t *testing.T) {
+	var calls []string
+	tr, _ := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.EscapedPath())
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	if err := tr.EditLabels(context.Background(), "7", []string{"agent-in-progress"}, []string{"ready for review"}); err != nil {
+		t.Fatal(err)
+	}
+	want := "POST /repos/octo/widgets/issues/7/labels,DELETE /repos/octo/widgets/issues/7/labels/ready%20for%20review"
+	if strings.Join(calls, ",") != want {
+		t.Errorf("calls %v", calls)
+	}
+}
+
+func TestDetectRepo(t *testing.T) {
+	c := &conn{host: "github.com"}
+	for remote, want := range map[string]string{
+		"git@github.com:Oddsworth/supervisor.git":       "Oddsworth/supervisor",
+		"https://github.com/Oddsworth/supervisor":       "Oddsworth/supervisor",
+		"https://x:y@github.com/Oddsworth/sup.git":      "Oddsworth/sup",
+		"ssh://git@github.com/Oddsworth/supervisor.git": "Oddsworth/supervisor",
+		"git@bitbucket.org:team/repo.git":               "",
+	} {
+		v, ok := c.DetectRepo(remote)
+		if got := v.Get("repo", ""); got != want || ok != (want != "") {
+			t.Errorf("DetectRepo(%q) = %q %v", remote, got, ok)
+		}
+	}
+}
+
+func deliver(t *testing.T, h adapter.Hooked, event, body string) []core.Signal {
+	t.Helper()
+	hdr := http.Header{}
+	hdr.Set("X-GitHub-Event", event)
+	hdr.Set("X-Hub-Signature-256", adapter.Sign("s3cret", []byte(body)))
+	sigs, err := h.ParseWebhook(hdr, []byte(body), "s3cret")
+	if err != nil {
+		t.Fatalf("%s: %v", event, err)
+	}
+	return sigs
+}
+
+func TestWebhookSignature(t *testing.T) {
+	tr, _ := bound(t, http.NotFoundHandler())
+	hdr := http.Header{"X-Github-Event": {"ping"}, "X-Hub-Signature-256": {"sha256=00"}}
+	if _, err := tr.ParseWebhook(hdr, []byte(`{}`), "s3cret"); err == nil {
+		t.Fatal("a bad signature was accepted")
+	}
+}
+
+func TestWebhookSignals(t *testing.T) {
+	tr, rp := bound(t, http.NotFoundHandler())
+	repo := `"repository":{"full_name":"Octo/Widgets"}`
+	issue := `"issue":{"number":5,"title":"T","state":"open","labels":[{"name":"x"}]}`
+	prIssue := `"issue":{"number":8,"title":"P","body":"Closes #5","state":"open","pull_request":{"url":"u"}}`
+	pull := `"pull_request":{"number":8,"state":"closed","merged":true,"head":{"ref":"agent/issue-5","sha":"abc"},"body":"b"}`
+	comment := `"comment":{"id":11,"user":{"login":"al","type":"User"},"body":"hi","updated_at":"2026-01-01T00:00:00Z","path":"f.go","line":3}`
+
+	type want struct {
+		h           adapter.Hooked
+		event, body string
+		typ         core.SignalType
+		key, sha    string
+		pr          int
+		kind        core.CommentKind
+		prState     core.PRState
+	}
+	cases := []want{
+		{tr, "ping", `{` + repo + `}`, core.SigPing, "", "", 0, "", ""},
+		{tr, "issues", `{"action":"opened",` + repo + `,` + issue + `}`, core.SigIssueChanged, "5", "", 0, "", ""},
+		{tr, "issues", `{"action":"labeled",` + repo + `,` + issue + `}`, core.SigIssueChanged, "5", "", 0, "", ""},
+		{tr, "issues", `{"action":"closed",` + repo + `,` + issue + `}`, core.SigIssueClosed, "5", "", 0, "", ""},
+		{tr, "issues", `{"action":"reopened",` + repo + `,` + issue + `}`, core.SigIssueReopened, "5", "", 0, "", ""},
+		{tr, "issue_comment", `{"action":"created",` + repo + `,` + issue + `,` + comment + `}`, core.SigIssueComment, "5", "", 0, core.OnIssue, ""},
+		{rp, "issue_comment", `{"action":"created",` + repo + `,` + prIssue + `,` + comment + `}`, core.SigPRComment, "", "", 8, core.OnPR, core.PROpen},
+		{rp, "pull_request", `{"action":"synchronize",` + repo + `,"pull_request":{"number":8,"state":"open","head":{"ref":"agent/issue-5","sha":"abc"}}}`, core.SigPRChanged, "", "", 8, "", core.PROpen},
+		{rp, "pull_request", `{"action":"closed",` + repo + `,` + pull + `}`, core.SigPRClosed, "", "", 8, "", core.PRMerged},
+		{rp, "pull_request_review_comment", `{"action":"created",` + repo + `,` + pull + `,` + comment + `}`, core.SigPRComment, "", "", 8, core.OnInline, core.PRMerged},
+		{rp, "pull_request_review", `{"action":"submitted",` + repo + `,` + pull + `,"review":{"id":2,"user":{"login":"r","type":"User"},"body":"please fix","state":"CHANGES_REQUESTED","submitted_at":"2026-01-01T00:00:00Z"}}`, core.SigPRComment, "", "", 8, core.OnReview, core.PRMerged},
+		{rp, "check_suite", `{"action":"completed",` + repo + `,"check_suite":{"head_sha":"abc"}}`, core.SigChecks, "", "abc", 0, "", ""},
+		{rp, "check_run", `{"action":"completed",` + repo + `,"check_run":{"head_sha":"def"}}`, core.SigChecks, "", "def", 0, "", ""},
+		{rp, "status", `{"sha":"ghi","state":"success",` + repo + `}`, core.SigChecks, "", "ghi", 0, "", ""},
+	}
+	for i, c := range cases {
+		sigs := deliver(t, c.h, c.event, c.body)
+		if len(sigs) != 1 {
+			t.Errorf("case %d (%s): %d signals", i, c.event, len(sigs))
+			continue
+		}
+		s := sigs[0]
+		if s.Type != c.typ || (c.key != "" && s.Key != c.key) || s.SHA != c.sha {
+			t.Errorf("case %d (%s): %+v", i, c.event, s)
+		}
+		if c.pr != 0 && (s.PR == nil || s.PR.ID != c.pr || s.PR.State != c.prState) {
+			t.Errorf("case %d (%s): pr %+v", i, c.event, s.PR)
+		}
+		if c.kind != "" && (s.Comment == nil || s.Comment.Kind != c.kind) {
+			t.Errorf("case %d (%s): comment %+v", i, c.event, s.Comment)
+		}
+	}
+
+	// Each role takes only its own events; deliveries for another repo and pending statuses are dropped.
+	none := []struct {
+		h           adapter.Hooked
+		event, body string
+	}{
+		{rp, "issues", `{"action":"opened",` + repo + `,` + issue + `}`},
+		{tr, "pull_request", `{"action":"closed",` + repo + `,` + pull + `}`},
+		{tr, "issue_comment", `{"action":"created",` + repo + `,` + prIssue + `,` + comment + `}`},
+		{rp, "issue_comment", `{"action":"created",` + repo + `,` + issue + `,` + comment + `}`},
+		{tr, "issues", `{"action":"opened","repository":{"full_name":"other/repo"},` + issue + `}`},
+		{rp, "status", `{"sha":"ghi","state":"pending",` + repo + `}`},
+		{rp, "pull_request_review", `{"action":"submitted",` + repo + `,` + pull + `,"review":{"id":2,"user":{"login":"r"},"body":"","state":"APPROVED"}}`},
+	}
+	for i, c := range none {
+		if sigs := deliver(t, c.h, c.event, c.body); len(sigs) != 0 {
+			t.Errorf("none case %d (%s): %+v", i, c.event, sigs)
+		}
+	}
+}
+
+func TestEnsureWebhookPatchesOrCreates(t *testing.T) {
+	var method string
+	_, rp := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			fmt.Fprint(w, `[{"id":42}]`)
+		default:
+			method = r.Method + " " + r.URL.Path
+			fmt.Fprint(w, `{"id":43}`)
+		}
+	}))
+	id, err := rp.EnsureWebhook(context.Background(), "https://h/x", "s", "42")
+	if err != nil || id != "42" || method != "PATCH /repos/octo/widgets/hooks/42" {
+		t.Errorf("patch: %v %v %v", id, err, method)
+	}
+	id, err = rp.EnsureWebhook(context.Background(), "https://h/x", "s", "7")
+	if err != nil || id != "43" || method != "POST /repos/octo/widgets/hooks" {
+		t.Errorf("create: %v %v %v", id, err, method)
+	}
+}
+
+func TestAppTokens(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	var mints int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/octo/widgets/installation":
+			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ey") {
+				t.Errorf("no jwt: %q", r.Header.Get("Authorization"))
+			}
+			fmt.Fprint(w, `{"id":9}`)
+		case "/app/installations/9/access_tokens":
+			atomic.AddInt32(&mints, 1)
+			fmt.Fprintf(w, `{"token":"inst","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+		case "/repos/octo/widgets/issues/1/comments":
+			if r.Header.Get("Authorization") != "Bearer inst" {
+				t.Errorf("write didn't use the bot: %q", r.Header.Get("Authorization"))
+			}
+			fmt.Fprint(w, `{"html_url":"https://c"}`)
+		default:
+			t.Errorf("unexpected %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c, err := newConn(adapter.Values{"auth": "token", "token": "tok", "apiUrl": srv.URL, "botAppId": "1", "botPrivateKey": pemText}, adapter.Env{HTTP: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, _ := c.Tracker(adapter.Values{"repo": "octo/widgets"}, adapter.ProjectInfo{})
+	for i := 0; i < 2; i++ {
+		if u, err := tr.Comment(context.Background(), "1", "hi", core.AgentMark{From: "1"}); err != nil || u != "https://c" {
+			t.Fatalf("comment: %v %v", u, err)
+		}
+	}
+	if mints != 1 {
+		t.Errorf("minted %d tokens, want 1 (cached)", mints)
+	}
+}

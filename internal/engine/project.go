@@ -1,0 +1,1525 @@
+package engine
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/alsiola/open-supervisor/internal/adapter"
+	"github.com/alsiola/open-supervisor/internal/config"
+	"github.com/alsiola/open-supervisor/internal/core"
+	"github.com/alsiola/open-supervisor/internal/logx"
+	"github.com/alsiola/open-supervisor/internal/store"
+	"github.com/alsiola/open-supervisor/internal/worktree"
+)
+
+// hub is what a project needs from the supervisor that holds it.
+type hub interface {
+	settings() config.Settings
+	schedule()
+	readUsage()
+	capture(name string, props map[string]any)
+	changed()
+	sessionEnv(p *Project, key string) []string
+	dataDir() string
+}
+
+// Project is one project under the supervisor: it claims the project's open issues, gives each a session,
+// queues what happens on the tracker and the code host for the agent, and sets the issue's status labels from
+// what each turn reports. The supervisor routes webhooks here, decides when a turn may start (one cap across
+// every project) and runs the reconcile.
+type Project struct {
+	Name      string
+	Spec      *config.Project
+	Root      string
+	StateDir  string
+	Tracker   adapter.Tracker
+	Repo      adapter.Repo
+	Agent     adapter.Agent
+	AgentName string
+	Labels    config.Labels
+	Store     *store.Store
+	Jobs      *Jobs
+
+	// connections are the names of the tracker's and the repo's connections, for routing webhooks.
+	trackerConn, repoConn string
+	fingerprint           string
+	branchTmpl            string
+	branchRe              *regexp.Regexp
+	base                  string
+	hub                   hub
+
+	mu            sync.Mutex
+	running       map[string]adapter.Turn
+	sweep         adapter.Turn
+	checkTimers   map[string]*time.Timer
+	lastReconcile time.Time
+	reconciling   bool
+	stopped       bool
+	// begun: start has run (a reload starts only the projects it built).
+	begun bool
+
+	claimMu sync.Mutex
+}
+
+func (p *Project) logf(format string, args ...any) {
+	logx.Default.Write(p.Name, filepath.Join(p.StateDir, "log"), format, args...)
+}
+
+// BranchFor is the issue's branch.
+func (p *Project) BranchFor(key string) string {
+	return strings.ReplaceAll(p.branchTmpl, "{key}", key)
+}
+
+// issueOfBranch reads the issue key back out of a branch name.
+func (p *Project) issueOfBranch(branch string) string {
+	if m := p.branchRe.FindStringSubmatch(branch); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// WorktreePath is where the issue's worktree lives.
+func (p *Project) WorktreePath(key string) string {
+	return worktree.Dir(p.hub.dataDir(), p.Name, key)
+}
+
+// CorrectionsDir is where the agents leave correction notes for the sweep.
+func (p *Project) CorrectionsDir() string { return filepath.Join(p.StateDir, "corrections") }
+
+// InflightFile is the courtesy copy of the in-flight list agents can read.
+func (p *Project) InflightFile() string { return filepath.Join(p.StateDir, "inflight.md") }
+
+// Running returns the issue's running turn, if any.
+func (p *Project) Running(key string) adapter.Turn {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.running[key]
+}
+
+// RunningCount is the number of turns this project has going, the sweep included.
+func (p *Project) RunningCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := len(p.running)
+	if p.sweep != nil {
+		n++
+	}
+	return n
+}
+
+// Sweeping reports whether the project's sweep is running.
+func (p *Project) Sweeping() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sweep != nil
+}
+
+// Reconciled says when the last reconcile finished and whether one is going.
+func (p *Project) Reconciled() (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastReconcile, p.reconciling
+}
+
+func (p *Project) start() {
+	p.begun = true
+	if err := p.Store.Load(); err != nil {
+		p.logf("couldn't read the state file: %v", err)
+	}
+	p.Store.Prune()
+	p.recoverInterrupted()
+	p.logf("watching %s (issues) and %s (code) from %s with %s", p.Tracker.Describe(), p.Repo.Describe(), p.Root, p.AgentName)
+	go func() {
+		if p.hub.settings().DryRun {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := p.Tracker.EnsureLabels(ctx, p.labelSpecs()); err != nil {
+			p.logf("couldn't create the labels: %s", logx.ErrText(err))
+		}
+	}()
+	p.Jobs.start()
+}
+
+func (p *Project) stop() {
+	p.mu.Lock()
+	p.stopped = true
+	for _, t := range p.checkTimers {
+		t.Stop()
+	}
+	sweep := p.sweep
+	p.mu.Unlock()
+	p.Jobs.stop()
+	if sweep != nil {
+		sweep.Kill()
+	}
+}
+
+func (p *Project) labelSpecs() []adapter.Label {
+	l := p.Labels
+	out := []adapter.Label{
+		{Name: l.Claimed, Color: "FBCA04", Description: "An agent has this issue"},
+		{Name: l.Scheduled, Color: "C5DEF5", Description: "Opened on a timer, or held until its runAt time"},
+		{Name: l.Help, Color: "D93F0B", Description: "The agent asked something it cannot go on without"},
+		{Name: l.Review, Color: "0E8A16", Description: "Something is up for the owner"},
+		{Name: l.Done, Color: "BFDADC", Description: "Everything asked is handled; only a merge or close is left"},
+	}
+	for _, s := range l.Skip {
+		out = append(out, adapter.Label{Name: s, Color: "EDEDED", Description: "The supervisor leaves this issue alone"})
+	}
+	return out
+}
+
+// recoverInterrupted adopts the turns the last supervisor left running; one with no process to adopt gets a
+// note and runs again.
+func (p *Project) recoverInterrupted() {
+	for _, r := range p.Store.All() {
+		switch r.State {
+		case store.Running:
+			if r.LastTurn != nil && r.LastTurn.Handle != nil && r.LastTurn.Handle.PID > 0 {
+				turn := p.Agent.Adopt(*r.LastTurn.Handle, true)
+				p.mu.Lock()
+				p.running[r.Key] = turn
+				p.mu.Unlock()
+				p.logf("%s: adopted the running turn (pid %d)", p.ref(r.Key), r.LastTurn.Handle.PID)
+				go p.settle(r.Key, r.LastTurn.Events, turn)
+				continue
+			}
+			p.Store.Update(r.Key, func(x *store.Record) {
+				x.State = store.Failed
+				x.Attempts = 0
+				x.RetryAfter = nil
+				x.Queue = append([]core.Event{{Type: core.EvNote, Text: "Your previous turn was cut short when the supervisor stopped. Check the issue, the PR and your worktree for where you got to, then carry on.", At: time.Now().UTC()}}, x.Queue...)
+			})
+		case store.Manual:
+			p.Store.Update(r.Key, func(x *store.Record) {
+				x.State = x.PreviousState
+				if x.State == "" {
+					x.State = store.Review
+				}
+				x.PreviousState = ""
+			})
+		}
+	}
+}
+
+// ref is how the log names an issue: #12 for numbered trackers, PROJ-12 for keyed ones.
+func (p *Project) ref(key string) string {
+	if key != "" && key[0] >= '0' && key[0] <= '9' {
+		return "#" + key
+	}
+	return key
+}
+
+func ctxTimeout(d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), d)
+}
+
+// ---- signals from webhooks ------------------------------------------------------------------------------
+
+func (p *Project) onSignal(s core.Signal) {
+	switch s.Type {
+	case core.SigPing:
+		p.logf("webhook: hello from %s", s.Key)
+	case core.SigIssueChanged:
+		if s.Issue != nil {
+			go p.maybeClaim(*s.Issue, false)
+		}
+	case core.SigIssueReopened:
+		if s.Issue == nil {
+			return
+		}
+		if r := p.Store.Get(s.Issue.Key); r != nil {
+			p.Store.Update(r.Key, func(x *store.Record) { x.IssueClosedReported = false })
+			p.enqueue(r.Key, core.Event{Type: core.EvIssue, Action: "reopened", At: time.Now().UTC()})
+		} else {
+			go p.maybeClaim(*s.Issue, true)
+		}
+	case core.SigIssueClosed:
+		r := p.Store.Get(s.Key)
+		if r != nil && !r.IssueClosedReported && r.State != store.Finished {
+			p.Store.Update(r.Key, func(x *store.Record) { x.IssueClosedReported = true })
+			p.enqueue(r.Key, core.Event{Type: core.EvIssue, Action: "closed", At: time.Now().UTC()})
+		}
+	case core.SigIssueComment:
+		if s.Comment == nil {
+			return
+		}
+		r := p.Store.Get(s.Key)
+		if r == nil {
+			return
+		}
+		go p.noteRunAt(r.Key, s.Comment.ID, s.Comment.Body)
+		p.ingest(r, *s.Comment)
+	case core.SigPRComment:
+		if s.Comment == nil || s.PR == nil {
+			return
+		}
+		r := p.recordForPR(*s.PR)
+		if r == nil {
+			return
+		}
+		c := *s.Comment
+		c.PR = s.PR.ID
+		p.ingest(r, c)
+	case core.SigPRChanged:
+		if s.PR == nil {
+			return
+		}
+		r := p.recordForPR(*s.PR)
+		if r == nil {
+			return
+		}
+		if s.PR.HeadSHA != "" {
+			p.Store.Update(r.Key, func(x *store.Record) {
+				if x.HeadSHA != s.PR.HeadSHA {
+					now := time.Now().UTC()
+					x.HeadSHA = s.PR.HeadSHA
+					x.HeadAt = &now
+					x.ChecksReported = ""
+				}
+			})
+			p.scheduleChecks(s.PR.HeadSHA)
+		}
+	case core.SigPRClosed:
+		if s.PR == nil {
+			return
+		}
+		if r := p.recordForPR(*s.PR); r != nil {
+			p.reportPRClosed(r.Key, s.PR.ID, s.PR.State == core.PRMerged)
+		}
+	case core.SigChecks:
+		if s.SHA != "" {
+			p.scheduleChecks(s.SHA)
+		}
+	}
+}
+
+// recordForPR finds the issue a PR belongs to: one already known, its branch, or an issue its body refers to.
+func (p *Project) recordForPR(pr core.PR) *store.Record {
+	if r := p.Store.ByPR(pr.ID); r != nil {
+		return r
+	}
+	key := p.issueOfPR(pr)
+	if key == "" {
+		return nil
+	}
+	return p.Store.Update(key, func(x *store.Record) { x.AddPR(pr.ID) })
+}
+
+// issueOfPR is the tracked issue a PR is for, if any.
+func (p *Project) issueOfPR(pr core.PR) string {
+	if key := p.issueOfBranch(pr.Branch); key != "" && p.Store.Get(key) != nil {
+		return key
+	}
+	for _, key := range p.Tracker.RefsIn(pr.Title + "\n" + pr.Body) {
+		if p.Store.Get(key) != nil {
+			return key
+		}
+	}
+	return ""
+}
+
+func (p *Project) reportPRClosed(key string, pr int, merged bool) {
+	already := false
+	p.Store.Update(key, func(x *store.Record) {
+		for _, c := range x.ClosedPRs {
+			if c == pr {
+				already = true
+				return
+			}
+		}
+		x.ClosedPRs = append(x.ClosedPRs, pr)
+	})
+	if already {
+		return
+	}
+	action := "closed"
+	if merged {
+		action = "merged"
+	}
+	p.enqueue(key, core.Event{Type: core.EvPR, PR: pr, Action: action, At: time.Now().UTC()})
+}
+
+// ---- comments -------------------------------------------------------------------------------------------
+
+// ingest hands a comment to the agent unless it is a bot's, the agent's own or already seen, and
+// acknowledges it where the service allows.
+func (p *Project) ingest(r *store.Record, c core.Comment) bool {
+	return p.ingestOpt(r, c, true)
+}
+
+// ingestOpt is ingest; schedule false queues the comment without starting a turn, so a batch read in one go
+// becomes one turn.
+func (p *Project) ingestOpt(r *store.Record, c core.Comment, schedule bool) bool {
+	if c.Bot {
+		return false
+	}
+	if c.Agent != nil && (c.Agent.From == "" || c.Agent.From == r.Key) {
+		return false
+	}
+	fresh := false
+	p.Store.Update(r.Key, func(x *store.Record) {
+		if x.HasSeen(c.ID) {
+			return
+		}
+		fresh = true
+		x.Seen = append(x.Seen, c.ID)
+		if c.At.After(x.Since) {
+			x.Since = c.At
+		}
+	})
+	if !fresh {
+		return false
+	}
+	cc := c
+	p.enqueueOpt(r.Key, core.Event{Type: core.EvComment, Comment: &cc, At: c.At}, schedule)
+	if p.hub.settings().DryRun {
+		return true
+	}
+	var reactor adapter.Reactor
+	if c.Kind == core.OnIssue {
+		reactor, _ = p.Tracker.(adapter.Reactor)
+	} else {
+		reactor, _ = p.Repo.(adapter.Reactor)
+	}
+	if reactor != nil {
+		go func() {
+			ctx, cancel := ctxTimeout(30 * time.Second)
+			defer cancel()
+			if err := reactor.React(ctx, c); err != nil {
+				p.logf("%s: couldn't acknowledge %s: %s", p.ref(r.Key), c.URL, logx.ErrText(err))
+			}
+		}()
+	}
+	return true
+}
+
+// enqueue queues an event for the issue's next turn, or hands it to the running turn when it is one people
+// said and the turn can take it.
+func (p *Project) enqueue(key string, e core.Event) { p.enqueueOpt(key, e, true) }
+
+func (p *Project) enqueueOpt(key string, e core.Event, schedule bool) {
+	r := p.Store.Update(key, func(x *store.Record) { x.Queue = append(x.Queue, e) })
+	if r == nil {
+		return
+	}
+	if r.State == store.Running && e.Interjects() && p.interject(key, e) {
+		return
+	}
+	suffix := ""
+	switch r.State {
+	case store.Running:
+		suffix = " (queued; a turn is running)"
+	case store.Manual:
+		suffix = " (queued; you are attached)"
+	}
+	p.logf("%s: %s%s", p.ref(key), e.Describe(), suffix)
+	if schedule {
+		p.hub.schedule()
+	}
+}
+
+// interject hands a queued event to the running turn. It stays in the queue until the agent takes it in, so
+// one the turn ends without seeing (or a supervisor restart) leaves it for the next turn.
+func (p *Project) interject(key string, e core.Event) bool {
+	turn := p.Running(key)
+	if turn == nil {
+		return false
+	}
+	sent := turn.Send(core.RenderInterjection(e), func(taken bool) {
+		if !taken {
+			p.logf("%s: %s wasn't taken in before the turn ended; queued for the next one", p.ref(key), e.Describe())
+			return
+		}
+		p.Store.Update(key, func(x *store.Record) {
+			for i, q := range x.Queue {
+				if q.Same(e) {
+					x.Queue = append(x.Queue[:i], x.Queue[i+1:]...)
+					break
+				}
+			}
+			if x.LastTurn != nil {
+				x.LastTurn.Events = append(x.LastTurn.Events, e)
+			}
+		})
+		p.logf("%s: the running turn took in the %s", p.ref(key), e.Describe())
+	})
+	if sent {
+		p.logf("%s: %s (sent to the running turn)", p.ref(key), e.Describe())
+	}
+	return sent
+}
+
+// Message is a message typed into the TUI: into the running turn if there is one, else queued for a turn now.
+func (p *Project) Message(key, text string) {
+	if p.Store.Get(key) == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	p.enqueue(key, core.Event{Type: core.EvMessage, Text: text, At: time.Now().UTC()})
+}
+
+// ---- claiming -------------------------------------------------------------------------------------------
+
+// maybeClaim claims an open issue nobody has: label it and give it a session. reopened lets a labelled,
+// untracked issue through.
+func (p *Project) maybeClaim(issue core.Issue, reopened bool) {
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+	if !issue.Open || p.Store.Get(issue.Key) != nil {
+		return
+	}
+	for _, s := range p.Labels.Skip {
+		if issue.HasLabel(s) {
+			return
+		}
+	}
+	if issue.HasLabel(p.Labels.Claimed) && !reopened {
+		return
+	}
+	// A scheduled issue with a runAt marker waits for it; one without is a timer issue to run now.
+	var marker *runAtMarker
+	if issue.HasLabel(p.Labels.Scheduled) {
+		m, err := p.latestRunAt(issue.Key)
+		if err != nil {
+			p.logf("%s: couldn't read its runAt: %s", p.ref(issue.Key), logx.ErrText(err))
+			return
+		}
+		marker = m
+	}
+	if marker != nil && marker.at.After(time.Now()) {
+		p.Store.Create(issue.Key, issue.Title, issue.URL, p.Agent.NewSession())
+		p.Store.Update(issue.Key, func(x *store.Record) {
+			at := marker.at
+			x.State = store.Scheduled
+			x.RunAt = &at
+			x.ScheduledBy = marker.commentID
+		})
+		p.logf("%s: scheduled for %s", p.ref(issue.Key), marker.at.Format(time.RFC3339))
+		p.hub.changed()
+		return
+	}
+	if len(p.Store.Active()) >= p.hub.settings().MaxOpen {
+		p.logf("%s: holding; %d issues already claimed", p.ref(issue.Key), p.hub.settings().MaxOpen)
+		return
+	}
+	note := ""
+	if marker != nil {
+		note = fmt.Sprintf("This issue was scheduled to start at %s, and that time has come.", marker.at.Format(time.RFC3339))
+	}
+	p.claimLocked(issue, note)
+	if marker != nil {
+		p.editLabels(issue.Key, nil, []string{p.Labels.Scheduled})
+	}
+}
+
+// claimLocked claims an issue; the caller holds claimMu.
+func (p *Project) claimLocked(issue core.Issue, note string) {
+	if p.Store.Get(issue.Key) != nil {
+		return
+	}
+	p.Store.Create(issue.Key, issue.Title, issue.URL, p.Agent.NewSession())
+	if note != "" {
+		p.Store.Update(issue.Key, func(x *store.Record) {
+			x.Queue = append(x.Queue, core.Event{Type: core.EvNote, Text: note, At: time.Now().UTC()})
+		})
+	}
+	p.editLabels(issue.Key, []string{p.Labels.Claimed}, nil)
+	p.transition(issue.Key, "claimed")
+	p.logf("claimed %s %s", p.ref(issue.Key), issue.Title)
+	p.hub.schedule()
+}
+
+// ClaimNow claims by hand, labels or not: a backlog issue the owner wants done now, or a run of one already
+// tracked.
+func (p *Project) ClaimNow(key string) error {
+	if p.Store.Get(key) != nil {
+		p.RunNow(key)
+		return nil
+	}
+	ctx, cancel := ctxTimeout(time.Minute)
+	defer cancel()
+	issue, err := p.Tracker.Issue(ctx, key)
+	if err != nil {
+		return err
+	}
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+	p.claimLocked(issue, "")
+	return nil
+}
+
+func (p *Project) editLabels(key string, add, remove []string) {
+	if p.hub.settings().DryRun {
+		return
+	}
+	add, remove = nonEmpty(add), nonEmpty(remove)
+	if len(add) == 0 && len(remove) == 0 {
+		return
+	}
+	ctx, cancel := ctxTimeout(time.Minute)
+	defer cancel()
+	if err := p.Tracker.EditLabels(ctx, key, add, remove); err != nil {
+		p.logf("%s: couldn't change the labels: %s", p.ref(key), logx.ErrText(err))
+	}
+}
+
+func (p *Project) transition(key, state string) {
+	t, ok := p.Tracker.(adapter.Transitioner)
+	if !ok || p.hub.settings().DryRun {
+		return
+	}
+	ctx, cancel := ctxTimeout(time.Minute)
+	defer cancel()
+	if err := t.Transition(ctx, key, state); err != nil {
+		p.logf("%s: couldn't move it to its %s status: %s", p.ref(key), state, logx.ErrText(err))
+	}
+}
+
+// setStatus puts the status label for the state on the issue and takes the others off.
+func (p *Project) setStatus(key string, state string) {
+	want := p.Labels.Status(state)
+	var add, remove []string
+	for _, l := range p.Labels.Statuses() {
+		if l == want {
+			add = append(add, l)
+		} else {
+			remove = append(remove, l)
+		}
+	}
+	p.editLabels(key, add, remove)
+}
+
+func nonEmpty(xs []string) []string {
+	var out []string
+	for _, x := range xs {
+		if x != "" {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// ---- scheduling -----------------------------------------------------------------------------------------
+
+type runAtMarker struct {
+	at        time.Time
+	commentID string // "" for the issue body
+}
+
+// latestRunAt is the latest runAt marker on an issue: its body, then its comments in order.
+func (p *Project) latestRunAt(key string) (*runAtMarker, error) {
+	ctx, cancel := ctxTimeout(time.Minute)
+	defer cancel()
+	issue, err := p.Tracker.Issue(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	var m *runAtMarker
+	if at, ok := core.RunAtIn(issue.Body); ok {
+		m = &runAtMarker{at: at}
+	}
+	comments, err := p.Tracker.Comments(ctx, key, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range comments {
+		if at, ok := core.RunAtIn(c.Body); ok {
+			m = &runAtMarker{at: at, commentID: c.ID}
+		}
+	}
+	return m, nil
+}
+
+// noteRunAt: a runAt marker in a new issue comment (the agent's or anyone's) holds the issue's next turn until
+// then.
+func (p *Project) noteRunAt(key, commentID, body string) {
+	at, ok := core.RunAtIn(body)
+	r := p.Store.Get(key)
+	if !ok || r == nil || commentID == r.ScheduledBy {
+		return
+	}
+	ahead := at.After(time.Now())
+	// A time already past on a waiting issue wakes it at the next check.
+	p.Store.Update(key, func(x *store.Record) {
+		if ahead || x.State == store.Scheduled {
+			t := at
+			x.RunAt = &t
+		}
+		x.ScheduledBy = commentID
+	})
+	if !ahead {
+		return
+	}
+	p.logf("%s: rescheduled for %s", p.ref(key), at.Format(time.RFC3339))
+	p.editLabels(key, []string{p.Labels.Scheduled}, nil)
+	// A running turn is moved to scheduled when it settles.
+	if r.State != store.Running && r.State != store.Manual {
+		p.holdUntilRunAt(key)
+	}
+}
+
+// holdUntilRunAt parks a tracked issue whose runAt is still ahead; status labels come off until it wakes.
+func (p *Project) holdUntilRunAt(key string) bool {
+	r := p.Store.Get(key)
+	if r == nil || r.RunAt == nil || !r.RunAt.After(time.Now()) {
+		return false
+	}
+	p.Store.Update(key, func(x *store.Record) { x.State = store.Scheduled })
+	p.setStatus(key, "")
+	p.hub.changed()
+	return true
+}
+
+// wakeDue wakes every scheduled issue whose time has come.
+func (p *Project) wakeDue() {
+	for _, r := range p.Store.All() {
+		if r.State != store.Scheduled || r.RunAt == nil || r.RunAt.After(time.Now()) {
+			continue
+		}
+		if r.Turns == 0 {
+			// Not started yet: the owner may have moved the time since it was read.
+			m, err := p.latestRunAt(r.Key)
+			if err != nil {
+				p.logf("%s: couldn't read its runAt: %s", p.ref(r.Key), logx.ErrText(err))
+				continue
+			}
+			if m != nil && m.at.After(time.Now()) {
+				p.Store.Update(r.Key, func(x *store.Record) {
+					at := m.at
+					x.RunAt = &at
+					x.ScheduledBy = m.commentID
+				})
+				continue
+			}
+		}
+		p.wake(r.Key)
+	}
+	p.hub.schedule()
+}
+
+// wake starts a scheduled issue's next turn now: its first, or the one it was rescheduled for.
+func (p *Project) wake(key string) {
+	r := p.Store.Get(key)
+	if r == nil || r.State != store.Scheduled {
+		return
+	}
+	at := time.Now().UTC()
+	if r.RunAt != nil {
+		at = *r.RunAt
+	}
+	first := r.Turns == 0
+	p.Store.Update(key, func(x *store.Record) {
+		x.State = store.Queued
+		x.RunAt = nil
+		if first {
+			x.ClaimedAt = time.Now().UTC()
+		}
+		text := fmt.Sprintf("It is now past %s, the time this issue was rescheduled for. Pick it up where you left off.", at.Format(time.RFC3339))
+		if first {
+			text = fmt.Sprintf("This issue was scheduled to start at %s, and that time has come.", at.Format(time.RFC3339))
+		}
+		x.Queue = append(x.Queue, core.Event{Type: core.EvNote, Text: text, At: time.Now().UTC()})
+	})
+	p.logf("%s: due (%s)", p.ref(key), at.Format(time.RFC3339))
+	if first {
+		p.editLabels(key, []string{p.Labels.Claimed}, []string{p.Labels.Scheduled})
+		p.transition(key, "claimed")
+	} else {
+		p.editLabels(key, nil, []string{p.Labels.Scheduled})
+	}
+}
+
+// RunNow runs a turn on a tracked issue now, with a note if nothing is queued. It also retries a failed one and
+// wakes a scheduled one.
+func (p *Project) RunNow(key string) {
+	r := p.Store.Get(key)
+	if r == nil || r.State == store.Running || r.State == store.Manual {
+		return
+	}
+	if r.State == store.Scheduled {
+		go func() {
+			p.wake(key)
+			p.hub.schedule()
+		}()
+		return
+	}
+	p.Store.Update(key, func(x *store.Record) {
+		x.Attempts = 0
+		x.RetryAfter = nil
+		if x.State == store.Failed {
+			if x.Turns > 0 {
+				x.State = store.Review
+			} else {
+				x.State = store.Queued
+			}
+		}
+		if len(x.Queue) == 0 && x.Turns > 0 {
+			x.Queue = append(x.Queue, core.Event{Type: core.EvNote, Text: "The owner asked for a turn now. Check the issue and the PR for anything outstanding and carry on.", At: time.Now().UTC()})
+		}
+	})
+	p.hub.schedule()
+}
+
+// Drop forgets an issue: kills its turn, drops its record and clears its status labels. The claimed label
+// stays, so it isn't claimed again unless reopened or claimed by hand.
+func (p *Project) Drop(key string) {
+	if p.Store.Get(key) == nil {
+		return
+	}
+	if t := p.Running(key); t != nil {
+		t.Kill()
+	}
+	p.Store.Remove(key)
+	p.logf("%s: dropped from the list", p.ref(key))
+	go p.setStatus(key, "")
+	p.hub.changed()
+}
+
+// KillTurn stops the issue's running turn; it is marked failed and RunNow reruns it.
+func (p *Project) KillTurn(key string) {
+	if t := p.Running(key); t != nil {
+		p.logf("%s: killing the running turn", p.ref(key))
+		t.Kill()
+	}
+}
+
+// ---- turns ----------------------------------------------------------------------------------------------
+
+func (p *Project) runnable(r *store.Record) bool {
+	s := p.hub.settings()
+	switch {
+	case r.State == store.Running || r.State == store.Manual:
+		return false
+	case r.State == store.Scheduled && r.Turns == 0:
+		return false
+	case r.State == store.Failed && r.Attempts >= s.MaxAttempts:
+		return false
+	case r.State == store.Failed && r.RetryAfter != nil && time.Now().Before(*r.RetryAfter):
+		return false
+	}
+	return r.State == store.Queued || len(r.Queue) > 0
+}
+
+// candidates are the issues with a turn to run: the ones already under way first, then the oldest claim.
+func (p *Project) candidates() []*store.Record {
+	var out []*store.Record
+	for _, r := range p.Store.All() {
+		if p.runnable(r) && !p.reserved(r.Key) {
+			out = append(out, r)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i].Turns == 0, out[j].Turns == 0
+		if a == b {
+			return out[i].ClaimedAt.Before(out[j].ClaimedAt)
+		}
+		return !a
+	})
+	return out
+}
+
+// inflight is the list of the project's other issues in flight, with what each touches.
+func (p *Project) inflight(except string) string {
+	var all, others []string
+	for _, r := range p.Store.Active() {
+		touches := r.Touches
+		if touches == "" {
+			touches = "not reported yet"
+		}
+		line := fmt.Sprintf("- %s %s: %s", p.ref(r.Key), r.Title, touches)
+		all = append(all, line)
+		if r.Key != except {
+			others = append(others, line)
+		}
+	}
+	_ = os.MkdirAll(p.StateDir, 0o755)
+	_ = os.WriteFile(p.InflightFile(), []byte(strings.Join(all, "\n")+"\n"), 0o644)
+	return strings.Join(others, "\n")
+}
+
+func (p *Project) turnBody(r *store.Record, events []core.Event) (args, body string) {
+	if r.Turns == 0 {
+		var b strings.Builder
+		if in := p.inflight(r.Key); in != "" {
+			b.WriteString("In flight (other agents' issues; before you build, reconcile with any that overlaps yours):\n" + in)
+		}
+		if len(events) > 0 {
+			if b.Len() > 0 {
+				b.WriteString("\n\n")
+			}
+			b.WriteString("## Already waiting\n\n" + core.Render(events))
+		}
+		return r.Key, b.String()
+	}
+	return r.Key + " events", "## Since your last turn\n\n" + core.Render(events)
+}
+
+// reserved reports whether the issue has a turn running or about to start.
+func (p *Project) reserved(key string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.running[key]
+	return ok
+}
+
+// tryStart reserves the issue's slot in the running map so two schedulers never start the same turn.
+func (p *Project) tryStart(key string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped {
+		return false
+	}
+	if _, ok := p.running[key]; ok {
+		return false
+	}
+	p.running[key] = nil
+	return true
+}
+
+// runTurn starts a turn on the issue and waits for it. The caller has reserved the slot with tryStart.
+func (p *Project) runTurn(key string) {
+	r := p.Store.Get(key)
+	if r == nil {
+		p.mu.Lock()
+		delete(p.running, key)
+		p.mu.Unlock()
+		return
+	}
+	var events []core.Event
+	p.Store.Update(key, func(x *store.Record) {
+		events = x.Queue
+		x.Queue = []core.Event{}
+	})
+	kind := "events"
+	if r.Turns == 0 {
+		kind = "start"
+	}
+	args, body := p.turnBody(r, events)
+	// A session that has run before is resumed, even when its first turn never ended.
+	resume := p.Agent.SessionExists(p.Root, r.Session)
+	ctx := context.Background()
+	turn, err := p.Agent.Start(ctx, adapter.TurnSpec{
+		Cwd:        p.Root,
+		Env:        p.hub.sessionEnv(p, key),
+		Dir:        filepath.Join(p.StateDir, "turns", safeName(key)),
+		Playbook:   "work-issue",
+		Args:       args,
+		Body:       body,
+		Session:    r.Session,
+		Resume:     resume,
+		Structured: true,
+		DryRun:     p.hub.settings().DryRun,
+	})
+	if err != nil {
+		p.mu.Lock()
+		delete(p.running, key)
+		p.mu.Unlock()
+		p.Store.Update(key, func(x *store.Record) {
+			x.Queue = append(events, x.Queue...)
+		})
+		p.failed(key, events, core.Outcome{Error: "couldn't start the agent: " + err.Error()})
+		return
+	}
+	h := turn.Handle()
+	p.Store.Update(key, func(x *store.Record) {
+		x.State = store.Running
+		x.LastTurn = &store.Turn{Kind: kind, StartedAt: h.StartedAt, Events: events, Handle: &h}
+	})
+	p.mu.Lock()
+	p.running[key] = turn
+	p.mu.Unlock()
+	p.hub.changed()
+	desc := make([]string, len(events))
+	for i, e := range events {
+		desc[i] = e.Describe()
+	}
+	detail := kind
+	if len(desc) > 0 {
+		detail += ": " + strings.Join(desc, ", ")
+	}
+	p.logf("%s: turn %d started (%s)", p.ref(key), r.Turns+1, detail)
+	p.settle(key, events, turn)
+}
+
+var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+func safeName(s string) string { return unsafeName.ReplaceAllString(s, "-") }
+
+// settle waits for a turn and acts on how it ended.
+func (p *Project) settle(key string, events []core.Event, turn adapter.Turn) {
+	<-turn.Done()
+	outcome := turn.Outcome()
+	p.mu.Lock()
+	delete(p.running, key)
+	stopped := p.stopped
+	p.mu.Unlock()
+	if stopped {
+		// A reload replaced this project; the new one adopts the turn's result.
+		return
+	}
+	if !outcome.OK || outcome.Status == nil {
+		p.failed(key, events, outcome)
+		return
+	}
+	s := outcome.Status
+	now := time.Now().UTC()
+	p.Store.Update(key, func(x *store.Record) {
+		x.State = store.State(s.State)
+		x.Turns++
+		x.Attempts = 0
+		x.RetryAfter = nil
+		x.Cost += outcome.Cost
+		x.Tokens = x.Tokens.Add(outcome.Tokens)
+		if s.Touches != "" {
+			x.Touches = s.Touches
+		}
+		if s.Preview != "" {
+			x.Preview = s.Preview
+		}
+		for _, pr := range s.PRs {
+			x.AddPR(pr)
+		}
+		if x.LastTurn != nil {
+			x.LastTurn.EndedAt = &now
+			x.LastTurn.Summary = s.Summary
+			x.LastTurn.Cost = outcome.Cost
+			x.LastTurn.Tokens = outcome.Tokens
+			x.LastTurn.Models = outcome.Models
+			x.LastTurn.Handle = nil
+		}
+	})
+	p.logf("%s: turn ended %s after %.1f min: %s", p.ref(key), s.State, outcome.Duration.Minutes(), s.Summary)
+	p.report(key, outcome)
+	if s.State != core.Finished && p.holdUntilRunAt(key) {
+		if r := p.Store.Get(key); r != nil && r.RunAt != nil {
+			p.logf("%s: waiting until %s", p.ref(key), r.RunAt.Format(time.RFC3339))
+		}
+	} else {
+		p.applyState(key, s.State)
+	}
+	p.hub.schedule()
+}
+
+func (p *Project) failed(key string, events []core.Event, outcome core.Outcome) {
+	now := time.Now().UTC()
+	errText := outcome.Error
+	if errText == "" {
+		errText = "the turn ended without a status"
+	}
+	r := p.Store.Update(key, func(x *store.Record) {
+		x.State = store.Failed
+		x.Attempts++
+		retry := now.Add(time.Duration(x.Attempts*5) * time.Minute)
+		x.RetryAfter = &retry
+		x.Cost += outcome.Cost
+		x.Tokens = x.Tokens.Add(outcome.Tokens)
+		// Events taken in mid-turn are in LastTurn.Events too.
+		back := events
+		if x.LastTurn != nil && x.LastTurn.Events != nil {
+			back = x.LastTurn.Events
+		}
+		x.Queue = append(append([]core.Event{}, back...), x.Queue...)
+		if x.LastTurn != nil {
+			x.LastTurn.EndedAt = &now
+			x.LastTurn.Error = errText
+			x.LastTurn.Cost = outcome.Cost
+			x.LastTurn.Tokens = outcome.Tokens
+			x.LastTurn.Models = outcome.Models
+			x.LastTurn.Handle = nil
+		}
+	})
+	p.report(key, outcome)
+	retry := " (press r to retry)"
+	if r != nil && r.Attempts < p.hub.settings().MaxAttempts {
+		retry = fmt.Sprintf(" (retry in %d min)", r.Attempts*5)
+	}
+	p.logf("%s: turn failed after %.1f min: %s%s", p.ref(key), outcome.Duration.Minutes(), errText, retry)
+	p.hub.schedule()
+}
+
+// applyState sets the labels and does the follow-ups for the state a turn ended in.
+func (p *Project) applyState(key string, state core.AgentState) {
+	p.setStatus(key, string(state))
+	p.transition(key, string(state))
+	switch state {
+	case core.Building:
+		// The checks may already have landed while the agent was finishing up.
+		p.refreshPRs(key)
+		if r := p.Store.Get(key); r != nil && r.HeadSHA != "" {
+			p.evaluateChecks(r.HeadSHA)
+		}
+	case core.Finished:
+		path := p.WorktreePath(key)
+		if _, err := os.Stat(path); err == nil {
+			if err := worktree.Remove(worktree.Spec{Root: p.Root, Path: path}); err != nil {
+				p.logf("%s: couldn't remove the worktree: %s", p.ref(key), logx.ErrText(err))
+			} else {
+				p.logf("%s: removed the worktree", p.ref(key))
+			}
+		}
+	}
+}
+
+// report sends one telemetry event per turn, then asks for a fresh read of the usage windows.
+func (p *Project) report(key string, o core.Outcome) {
+	r := p.Store.Get(key)
+	props := map[string]any{
+		"project":    p.Name,
+		"repo":       p.Repo.Describe(),
+		"tracker":    p.Tracker.Describe(),
+		"agent":      p.AgentName,
+		"issue":      key,
+		"ok":         o.OK,
+		"error":      o.Error,
+		"duration_s": int(o.Duration.Seconds()),
+		"cost_usd":   o.Cost,
+		"models":     o.Models,
+	}
+	if o.Status != nil {
+		props["state"] = string(o.Status.State)
+	} else if !o.OK {
+		props["state"] = "failed"
+	}
+	if o.Tokens != nil {
+		props["input_tokens"] = o.Tokens.Input
+		props["output_tokens"] = o.Tokens.Output
+		props["cache_read_tokens"] = o.Tokens.CacheRead
+		props["cache_creation_tokens"] = o.Tokens.CacheCreation
+	}
+	if r != nil {
+		props["title"] = r.Title
+		props["turn"] = r.Turns
+		if r.LastTurn != nil {
+			props["kind"] = r.LastTurn.Kind
+			types := make([]string, len(r.LastTurn.Events))
+			for i, e := range r.LastTurn.Events {
+				types[i] = string(e.Type)
+			}
+			props["events"] = types
+		}
+	}
+	p.hub.capture("agent_turn", props)
+	go p.hub.readUsage()
+}
+
+// ---- checks ---------------------------------------------------------------------------------------------
+
+// scheduleChecks judges a commit's checks a little after the last event about it, so one push gives one event.
+func (p *Project) scheduleChecks(sha string) {
+	if p.Store.BySHA(sha) == nil {
+		return
+	}
+	delay := time.Duration(p.hub.settings().ChecksDebounceSeconds) * time.Second
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped {
+		return
+	}
+	if t := p.checkTimers[sha]; t != nil {
+		t.Stop()
+	}
+	p.checkTimers[sha] = time.AfterFunc(delay, func() {
+		p.mu.Lock()
+		delete(p.checkTimers, sha)
+		p.mu.Unlock()
+		p.evaluateChecks(sha)
+	})
+}
+
+func (p *Project) evaluateChecks(sha string) {
+	r := p.Store.BySHA(sha)
+	if r == nil || store.SameSHA(r.ChecksReported, sha) || r.State != store.Building {
+		return
+	}
+	ctx, cancel := ctxTimeout(time.Minute)
+	defer cancel()
+	result, err := p.Repo.Checks(ctx, sha)
+	if err != nil {
+		p.logf("%s: couldn't read the checks on %s: %s", p.ref(r.Key), sha[:min(7, len(sha))], logx.ErrText(err))
+		return
+	}
+	headAt := time.Now()
+	if r.HeadAt != nil {
+		headAt = *r.HeadAt
+	} else {
+		p.Store.Update(r.Key, func(x *store.Record) {
+			now := time.Now().UTC()
+			x.HeadAt = &now
+		})
+	}
+	// A repo with no CI never reports anything: after a while, say so rather than wait.
+	none := !result.Any && time.Since(headAt) > time.Duration(p.hub.settings().NoChecksMinutes)*time.Minute
+	if !result.Complete && !none {
+		return
+	}
+	pr := 0
+	if len(r.PRs) > 0 {
+		pr = r.PRs[len(r.PRs)-1]
+	}
+	sha = r.HeadSHA
+	p.Store.Update(r.Key, func(x *store.Record) {
+		x.ChecksReported = sha
+		if result.Preview != "" {
+			x.Preview = result.Preview
+		}
+	})
+	p.enqueue(r.Key, core.Event{Type: core.EvChecks, PR: pr, SHA: sha, Passed: len(result.Failed) == 0, Failed: result.Failed, Preview: result.Preview, None: none, At: time.Now().UTC()})
+}
+
+// refreshPRs learns an issue's PRs and the head of its open one.
+func (p *Project) refreshPRs(key string) {
+	r := p.Store.Get(key)
+	if r == nil {
+		return
+	}
+	ctx, cancel := ctxTimeout(2 * time.Minute)
+	defer cancel()
+	found, err := p.Repo.PRsFor(ctx, p.BranchFor(key), p.Tracker.RefFor(key))
+	if err != nil {
+		p.logf("%s: couldn't read its PRs: %s", p.ref(key), logx.ErrText(err))
+		return
+	}
+	views := map[int]core.PR{}
+	for _, pr := range found {
+		if p.issueOfBranch(pr.Branch) == key || containsKey(p.Tracker.RefsIn(pr.Title+"\n"+pr.Body), key) {
+			views[pr.ID] = pr
+		}
+	}
+	for _, id := range r.PRs {
+		if _, ok := views[id]; ok {
+			continue
+		}
+		pr, err := p.Repo.PR(ctx, id)
+		if err != nil {
+			p.logf("%s: couldn't read PR #%d: %s", p.ref(key), id, logx.ErrText(err))
+			continue
+		}
+		views[id] = pr
+	}
+	ids := make([]int, 0, len(views))
+	for id := range views {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	var open *core.PR
+	for _, id := range ids {
+		if pr := views[id]; pr.State == core.PROpen {
+			open = &pr
+		}
+	}
+	p.Store.Update(key, func(x *store.Record) {
+		for _, id := range ids {
+			x.AddPR(id)
+		}
+		if open != nil && x.HeadSHA != open.HeadSHA {
+			now := time.Now().UTC()
+			x.HeadSHA = open.HeadSHA
+			x.HeadAt = &now
+			x.ChecksReported = ""
+		}
+	})
+	for _, id := range ids {
+		if pr := views[id]; pr.State != core.PROpen {
+			p.reportPRClosed(key, id, pr.State == core.PRMerged)
+		}
+	}
+}
+
+func containsKey(keys []string, key string) bool {
+	for _, k := range keys {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// ---- reconcile ------------------------------------------------------------------------------------------
+
+// reconcile reads everything the webhooks might have missed: new issues, comments, PR closes, checks.
+func (p *Project) reconcile() {
+	p.mu.Lock()
+	if p.reconciling || p.stopped {
+		p.mu.Unlock()
+		return
+	}
+	p.reconciling = true
+	p.mu.Unlock()
+	p.hub.changed()
+	defer func() {
+		p.mu.Lock()
+		p.reconciling = false
+		p.mu.Unlock()
+		p.hub.schedule()
+	}()
+	ctx, cancel := ctxTimeout(5 * time.Minute)
+	defer cancel()
+	open, err := p.Tracker.Candidates(ctx)
+	if err != nil {
+		p.logf("reconcile failed: %s", logx.ErrText(err))
+		return
+	}
+	openKeys := map[string]bool{}
+	for _, i := range open {
+		openKeys[i.Key] = true
+	}
+	before := len(p.Store.All())
+	for _, issue := range open {
+		r := p.Store.Get(issue.Key)
+		switch {
+		case r == nil:
+			reopened := false
+			if issue.HasLabel(p.Labels.Claimed) {
+				reopened = p.reopenedSinceLastClaim(ctx, issue)
+			}
+			p.maybeClaim(issue, reopened)
+		case r.State == store.Finished:
+			at, err := p.Tracker.ReopenedAt(ctx, issue.Key)
+			if err == nil && !at.IsZero() && at.After(r.UpdatedAt) {
+				p.Store.Update(issue.Key, func(x *store.Record) { x.IssueClosedReported = false })
+				p.enqueue(issue.Key, core.Event{Type: core.EvIssue, Action: "reopened", At: time.Now().UTC()})
+			}
+		}
+	}
+	recent := time.Now().Add(-3 * 24 * time.Hour)
+	for _, r := range p.Store.All() {
+		if r.State == store.Finished && r.UpdatedAt.Before(recent) {
+			continue
+		}
+		p.refreshPRs(r.Key)
+		fresh := p.Store.Get(r.Key)
+		if fresh == nil {
+			continue
+		}
+		if fresh.State == store.Scheduled && fresh.Turns == 0 && !openKeys[r.Key] {
+			p.Store.Remove(r.Key)
+			p.logf("%s: closed before its scheduled start; forgotten", p.ref(r.Key))
+			continue
+		}
+		p.readComments(ctx, fresh)
+		if fresh.State != store.Finished && !fresh.IssueClosedReported && !openKeys[r.Key] {
+			p.Store.Update(r.Key, func(x *store.Record) { x.IssueClosedReported = true })
+			p.enqueue(r.Key, core.Event{Type: core.EvIssue, Action: "closed", At: time.Now().UTC()})
+		}
+		if fresh.State == store.Building && fresh.HeadSHA != "" {
+			p.evaluateChecks(fresh.HeadSHA)
+		}
+	}
+	p.mu.Lock()
+	p.lastReconcile = time.Now()
+	p.mu.Unlock()
+	claimed := len(p.Store.All()) - before
+	msg := fmt.Sprintf("reconciled: %d open issues, %d tracked", len(open), len(p.Store.Active()))
+	if claimed > 0 {
+		msg += fmt.Sprintf(", %d claimed", claimed)
+	}
+	p.logf("%s", msg)
+}
+
+// readComments ingests the comments on an issue and its PRs since the last one taken.
+func (p *Project) readComments(ctx context.Context, r *store.Record) {
+	comments, err := p.Tracker.Comments(ctx, r.Key, r.Since)
+	if err != nil {
+		p.logf("%s: couldn't read its comments: %s", p.ref(r.Key), logx.ErrText(err))
+		return
+	}
+	for _, id := range r.PRs {
+		more, err := p.Repo.PRComments(ctx, id, r.Since)
+		if err != nil {
+			p.logf("%s: couldn't read the comments on PR #%d: %s", p.ref(r.Key), id, logx.ErrText(err))
+			continue
+		}
+		comments = append(comments, more...)
+	}
+	sort.SliceStable(comments, func(i, j int) bool { return comments[i].At.Before(comments[j].At) })
+	for _, c := range comments {
+		if !c.At.After(r.Since) {
+			continue
+		}
+		if c.Kind == core.OnIssue {
+			p.noteRunAt(r.Key, c.ID, c.Body)
+		}
+		p.ingestOpt(r, c, false)
+	}
+	p.hub.schedule()
+}
+
+// reopenedSinceLastClaim: an issue carrying the claimed label counts as reopened when the tracker's last reopen
+// is newer than this supervisor's last claim of it (or it never claimed it but the tracker says reopened).
+func (p *Project) reopenedSinceLastClaim(ctx context.Context, issue core.Issue) bool {
+	at, err := p.Tracker.ReopenedAt(ctx, issue.Key)
+	if err != nil || at.IsZero() {
+		return false
+	}
+	last := p.Store.LastClaim(issue.Key)
+	return last.IsZero() || at.After(last)
+}
+
+// ---- sweep ----------------------------------------------------------------------------------------------
+
+// Corrections counts the correction notes waiting for the sweep.
+func (p *Project) Corrections() int {
+	entries, err := os.ReadDir(p.CorrectionsDir())
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".md") {
+			n++
+		}
+	}
+	return n
+}
+
+// runSweep folds the agents' correction notes into the project's rule files with an agent turn.
+func (p *Project) runSweep() {
+	if p.Spec.Sweep.Disabled {
+		return
+	}
+	count := p.Corrections()
+	if count == 0 {
+		p.logf("sweep: no corrections to sweep")
+		return
+	}
+	p.mu.Lock()
+	if p.sweep != nil || p.stopped {
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+	rules := p.Spec.Sweep.RuleFiles
+	if len(rules) == 0 {
+		rules = p.Agent.RulesFiles()
+	}
+	body := fmt.Sprintf("Corrections folder: %s\nRule files: %s", p.CorrectionsDir(), strings.Join(rules, ", "))
+	if p.Spec.Sweep.Guide != "" {
+		body += "\nGuide: " + p.Spec.Sweep.Guide
+	}
+	if p.base != "" {
+		body += "\nMain branch: " + p.base
+	}
+	p.logf("sweep: folding %d correction(s) into the rule files", count)
+	turn, err := p.Agent.Start(context.Background(), adapter.TurnSpec{
+		Cwd:      p.Root,
+		Env:      p.hub.sessionEnv(p, ""),
+		Dir:      filepath.Join(p.StateDir, "turns", "sweep"),
+		Playbook: "sweep",
+		Body:     body,
+		DryRun:   p.hub.settings().DryRun,
+	})
+	if err != nil {
+		p.logf("sweep: couldn't start: %s", logx.ErrText(err))
+		return
+	}
+	p.mu.Lock()
+	p.sweep = turn
+	p.mu.Unlock()
+	p.hub.changed()
+	<-turn.Done()
+	o := turn.Outcome()
+	p.mu.Lock()
+	p.sweep = nil
+	p.mu.Unlock()
+	if o.OK {
+		last := strings.TrimSpace(o.Text)
+		if i := strings.LastIndex(last, "\n"); i >= 0 {
+			last = last[i+1:]
+		}
+		if last == "" {
+			last = "done"
+		}
+		p.logf("sweep: %s", last)
+	} else {
+		p.logf("sweep: failed: %s", o.Error)
+	}
+	p.hub.changed()
+}
+
+// ---- attaching ------------------------------------------------------------------------------------------
+
+// Attach marks an issue as in the owner's hands; events queue until Detach.
+func (p *Project) Attach(key string) *store.Record {
+	r := p.Store.Get(key)
+	if r == nil || r.State == store.Running || r.State == store.Manual {
+		return nil
+	}
+	r = p.Store.Update(key, func(x *store.Record) {
+		x.PreviousState = x.State
+		x.State = store.Manual
+	})
+	p.logf("%s: attached", p.ref(key))
+	return r
+}
+
+// Detach hands the issue back to the supervisor.
+func (p *Project) Detach(key string) {
+	p.Store.Update(key, func(x *store.Record) {
+		if x.State == store.Manual {
+			x.State = x.PreviousState
+			if x.State == "" {
+				x.State = store.Review
+			}
+		}
+		x.PreviousState = ""
+	})
+	p.logf("%s: detached", p.ref(key))
+	p.hub.schedule()
+}
+
+// AttachCommand is the interactive session for the issue, with the session's environment.
+func (p *Project) AttachCommand(key string) (*exec.Cmd, error) {
+	r := p.Store.Get(key)
+	if r == nil {
+		return nil, fmt.Errorf("%s isn't tracked", key)
+	}
+	return p.Agent.AttachCommand(adapter.AttachSpec{Cwd: p.Root, Env: p.hub.sessionEnv(p, key), Session: r.Session})
+}
+
+// ---- reading, for the TUI -------------------------------------------------------------------------------
+
+// Transcript is the issue's session as entries, when the agent can show it.
+func (p *Project) Transcript(key string) []core.Entry {
+	r := p.Store.Get(key)
+	t, ok := p.Agent.(adapter.Transcripts)
+	if r == nil || !ok {
+		return nil
+	}
+	return t.Transcript(p.Root, r.Session)
+}
+
+// Activity is what the issue's agent is doing now, when the agent can say.
+func (p *Project) Activity(key string) *core.Activity {
+	r := p.Store.Get(key)
+	t, ok := p.Agent.(adapter.Transcripts)
+	if r == nil || !ok {
+		return nil
+	}
+	return t.Activity(p.Root, r.Session)
+}
+
+// TranscriptPath is where the issue's session transcript is, when the agent keeps one.
+func (p *Project) TranscriptPath(key string) string {
+	r := p.Store.Get(key)
+	t, ok := p.Agent.(adapter.Transcripts)
+	if r == nil || !ok {
+		return ""
+	}
+	return t.TranscriptPath(p.Root, r.Session)
+}
+
+// IssueURL is the issue's page on the tracker.
+func (p *Project) IssueURL(key string) string { return p.Tracker.IssueURL(key) }
+
+// Ref is how the issue is written: #12, PROJ-12.
+func (p *Project) Ref(key string) string { return p.ref(key) }

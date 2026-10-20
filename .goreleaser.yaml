@@ -1,0 +1,59 @@
+# Release builds: `git tag v0.1.0 && git push --tags` runs .github/workflows/release.yml, which runs this.
+version: 2
+project_name: open-supervisor
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - main: ./cmd/open-supervisor
+    binary: open-supervisor
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [README.md, docs/*]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:", "^chore:"]
+
+# `brew install alsiola/tap/open-supervisor`. Needs a repo alsiola/homebrew-tap and a HOMEBREW_TAP_TOKEN
+# secret that can push to it.
+homebrew_casks:
+  - name: open-supervisor
+    repository:
+      owner: alsiola
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/alsiola/open-supervisor
+    description: Claims issues across your repos and works each in its own coding-agent session
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/open-supervisor"]
+          end
+
+nfpms:
+  - package_name: open-supervisor
+    homepage: https://github.com/alsiola/open-supervisor
+    description: Claims issues across your repos and works each in its own coding-agent session
+    maintainer: alsiola
+    formats: [deb, rpm, apk]
+    recommends: [git]
