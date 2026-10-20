@@ -263,8 +263,9 @@ func (j *Jobs) Trigger(job config.Job, ev core.HookEvent) {
 	j.p.logf("%s: running on %s", job.Name, what)
 	if len(job.At) > 0 {
 		go j.runIfDue(job, true, extra)
-	} else {
-		go j.runCheck(job, extra)
+	} else if j.begin(job.Name, extra) {
+		// Queued here rather than in the goroutine, so the run after the current one is the latest delivery's.
+		go j.loop(job, extra)
 	}
 }
 
@@ -288,16 +289,28 @@ func (j *Jobs) writeEvent(job config.Job, body []byte) (string, error) {
 // runCheck runs an interval job and waits for it. A run asked for by a delivery while the job is going runs
 // once it ends; one asked for by the timer is dropped.
 func (j *Jobs) runCheck(job config.Job, extra []string) {
-	j.mu.Lock()
-	if j.busy[job.Name] {
-		if extra != nil {
-			j.pending[job.Name] = extra
-		}
-		j.mu.Unlock()
-		return
+	if j.begin(job.Name, extra) {
+		j.loop(job, extra)
 	}
-	j.busy[job.Name] = true
-	j.mu.Unlock()
+}
+
+// begin marks the job running and reports true; when it's running already, a delivery's run (extra set) is
+// kept for after it, and it reports false.
+func (j *Jobs) begin(name string, extra []string) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.busy[name] {
+		if extra != nil {
+			j.pending[name] = extra
+		}
+		return false
+	}
+	j.busy[name] = true
+	return true
+}
+
+// loop runs the job, then each run asked for while it went, until none is left.
+func (j *Jobs) loop(job config.Job, extra []string) {
 	for {
 		j.check(job, extra)
 		j.mu.Lock()
