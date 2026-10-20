@@ -30,12 +30,12 @@ Start by looking, not asking:
 
 ```
 {{bin}} config path
-{{bin}} config show          # the config as read, defaults included (may be empty)
+{{bin}} config show          # the config as read, defaults included, then what it still lacks
 {{bin}} adapters             # the services this build can talk to, and the roles each fills
 {{bin}} adapters <type>      # one adapter's fields: connection fields, then per-role binding fields
 ```
 
-An existing config may already be set up: build on it rather than starting over, and say what's already there.
+An existing config may be half done: earlier `init` runs, a wizard left part way, a hand edit. Build on it rather than starting over. Tell the owner what's already there and what `config show` says is still to do, then ask whether to finish that or change something. Never remove a connection, project or source the owner didn't ask you to remove.
 
 Look for the owner's checkouts. Try the current directory and the usual places (`~/Code`, `~/src`, `~/dev`, `~/projects`), one or two levels deep. Use `git -C <dir> remote get-url origin` to see which service each one is on. Check which tools are installed (`claude`, `gh`, `ngrok`, `cloudflared`) with `command -v`.
 

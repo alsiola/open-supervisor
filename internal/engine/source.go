@@ -158,13 +158,14 @@ func (s *Source) start() {
 		}
 		s.logf("routing %s to %s", s.Tracker.Describe(), joinUnique(names))
 	}
+	tracker, specs := s.Tracker, s.labelSpecs()
 	go func() {
 		if s.hub.settings().DryRun {
 			return
 		}
 		ctx, cancel := ctxTimeout(2 * time.Minute)
 		defer cancel()
-		if err := s.Tracker.EnsureLabels(ctx, s.labelSpecs()); err != nil {
+		if err := tracker.EnsureLabels(ctx, specs); err != nil {
 			s.logf("couldn't create the labels: %s", logx.ErrText(err))
 		}
 	}()

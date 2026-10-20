@@ -57,11 +57,22 @@ func save(cmd *cobra.Command, cfg *config.Config, done string) error {
 	if done != "" {
 		fmt.Fprintln(out, "✓ "+done)
 	}
+	stillToDo(cmd, cfg)
+	return nil
+}
+
+// stillToDo prints what the config lacks before the supervisor can run, if anything.
+func stillToDo(cmd *cobra.Command, cfg *config.Config) {
+	if len(cfg.Projects) == 0 && len(cfg.Connections) == 0 {
+		fmt.Fprintln(cmd.ErrOrStderr(), "still to do: everything (the config is empty)")
+		return
+	}
 	if err := cfg.Validate(); err != nil {
 		msg := strings.TrimPrefix(err.Error(), cfg.Path+":")
 		fmt.Fprintln(cmd.ErrOrStderr(), "still to do:"+strings.ReplaceAll("\n"+strings.TrimSpace(msg), "\n", "\n  "))
+	} else if len(cfg.Projects) == 0 {
+		fmt.Fprintln(cmd.ErrOrStderr(), "still to do: add a project")
 	}
-	return nil
 }
 
 // values parses repeated key=value flags.
@@ -101,7 +112,7 @@ func setFields(fs *forms.FieldSet, v adapter.Values, what string) error {
 func showCmd(path func() string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "show",
-		Short: "Print the config as the supervisor reads it, defaults included",
+		Short: "Print the config as the supervisor reads it, defaults included, and what it still lacks",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := load(path())
@@ -112,8 +123,11 @@ func showCmd(path func() string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = cmd.OutOrStdout().Write(data)
-			return err
+			if _, err := cmd.OutOrStdout().Write(data); err != nil {
+				return err
+			}
+			stillToDo(cmd, cfg)
+			return nil
 		},
 	}
 }
