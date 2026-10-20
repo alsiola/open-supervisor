@@ -45,12 +45,17 @@ homebrew_casks:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: https://github.com/alsiola/open-supervisor
     description: Claims issues across your repos and works each in its own coding-agent session
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/open-supervisor"]
-          end
+    # The binary isn't notarized, so the quarantine flag comes off after install. Written as postflight_steps
+    # rather than through hooks, which GoReleaser renders as the `postflight` block Homebrew 7 deprecates.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr",
+              args:           ["-dr", "com.apple.quarantine", "open-supervisor"],
+              chdir:          ".",
+              writable_paths: ["open-supervisor"]
+        end
+      end
 
 nfpms:
   - package_name: open-supervisor
