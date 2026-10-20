@@ -47,12 +47,13 @@ func TestValidate(t *testing.T) {
 	c.Settings.Agent = "gh"
 	c.Connections["gh"] = &Connection{Type: "test-host", Values: adapter.Values{}}
 	c.Connections["bad name"] = &Connection{Type: "nope", Values: adapter.Values{}}
-	c.Projects = []*Project{{Name: "a", Root: "/x", Repo: &Binding{Connection: "missing"}, Tracker: &Binding{Connection: "gh"}}}
+	c.Projects = []*Project{{Name: "a", Root: "/x", Repo: &Binding{Connection: "missing"}, Tracker: &Binding{Connection: "gh"},
+		Jobs: []Job{{Name: "j", Command: []string{"true"}, On: &JobTrigger{Branches: []string{"main"}}}}}}
 	err := c.Validate()
 	if err == nil {
 		t.Fatal("expected errors")
 	}
-	for _, want := range []string{"can't be a agent", "unknown type", "Token is required", `no connection named "missing"`, "names are letters"} {
+	for _, want := range []string{"can't be a agent", "unknown type", "Token is required", `no connection named "missing"`, "names are letters", "job j: on needs events or webhook"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in:\n%v", want, err)
 		}

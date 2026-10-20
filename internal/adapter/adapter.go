@@ -162,6 +162,14 @@ type Hooked interface {
 	ParseWebhook(h http.Header, body []byte, secret string) ([]core.Signal, error)
 }
 
+// EventHooked is a Hooked whose hook can subscribe to more of its service's events, for jobs run on them; its
+// ParseWebhook then returns a core.SigEvent for every delivery.
+type EventHooked interface {
+	Hooked
+	// WantEvents adds event names ("push", "release") to what the hook subscribes to, before EnsureWebhook.
+	WantEvents(names []string)
+}
+
 // Agent runs turns: one invocation of a coding agent on an issue's session, which exits when the agent has
 // nothing more to do. Turns run detached so they outlive the supervisor; a later supervisor adopts them.
 type Agent interface {

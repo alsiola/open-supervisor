@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/alsiola/open-supervisor/internal/config"
+	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/logx"
 	"github.com/alsiola/open-supervisor/internal/proc"
 	"github.com/alsiola/open-supervisor/internal/store"
@@ -52,6 +55,7 @@ type Jobs struct {
 
 	mu      sync.Mutex
 	busy    map[string]bool
+	pending map[string][]string // an interval job's next run, asked for by a delivery while it ran: its env
 	running map[string]JobRunning
 	last    map[string]JobResult
 }
@@ -68,7 +72,7 @@ func loadJobs(p *Project) *Jobs {
 		}
 		specs = append(specs, own.Jobs...)
 	}
-	return &Jobs{Specs: specs, p: p, busy: map[string]bool{}, running: map[string]JobRunning{}, last: map[string]JobResult{}}
+	return &Jobs{Specs: specs, p: p, busy: map[string]bool{}, pending: map[string][]string{}, running: map[string]JobRunning{}, last: map[string]JobResult{}}
 }
 
 // Running is the job's timed run going now, if any.
@@ -99,7 +103,7 @@ func (j *Jobs) start() {
 		switch {
 		case job.EveryMinutes > 0:
 			go func() {
-				j.runCheck(job)
+				j.runCheck(job, nil)
 				t := time.NewTicker(time.Duration(job.EveryMinutes) * time.Minute)
 				defer t.Stop()
 				for {
@@ -107,7 +111,7 @@ func (j *Jobs) start() {
 					case <-ctx.Done():
 						return
 					case <-t.C:
-						j.runCheck(job)
+						j.runCheck(job, nil)
 					}
 				}
 			}()
@@ -124,7 +128,7 @@ func (j *Jobs) start() {
 				j.mu.Unlock()
 			}
 			go func() {
-				j.runIfDue(job, false)
+				j.runIfDue(job, false, nil)
 				t := time.NewTicker(time.Minute)
 				defer t.Stop()
 				for {
@@ -132,7 +136,7 @@ func (j *Jobs) start() {
 					case <-ctx.Done():
 						return
 					case <-t.C:
-						j.runIfDue(job, false)
+						j.runIfDue(job, false, nil)
 					}
 				}
 			}()
@@ -152,27 +156,164 @@ func (j *Jobs) RunNow(job config.Job) {
 		return
 	}
 	if len(job.At) > 0 {
-		go j.runIfDue(job, true)
+		go j.runIfDue(job, true, nil)
 	} else {
-		go j.runCheck(job)
+		go j.runCheck(job, nil)
 	}
 }
 
-func (j *Jobs) env() []string { return j.p.hub.sessionEnv(j.p, "") }
+func (j *Jobs) env(extra []string) []string { return append(j.p.hub.sessionEnv(j.p, ""), extra...) }
 
-func (j *Jobs) runCheck(job config.Job) {
+// Events are the event names the jobs run on, without their actions: what the project's hooks subscribe to.
+func (j *Jobs) Events() []string {
+	var out []string
+	for _, job := range j.Specs {
+		if job.On == nil {
+			continue
+		}
+		for _, e := range job.On.Events {
+			name, _, _ := strings.Cut(e, ".")
+			if name != "" && !slices.Contains(out, name) {
+				out = append(out, name)
+			}
+		}
+	}
+	return out
+}
+
+// Webhooked are the jobs that take deliveries at their own URL.
+func (j *Jobs) Webhooked() []config.Job {
+	var out []config.Job
+	for _, job := range j.Specs {
+		if job.On != nil && job.On.Webhook {
+			out = append(out, job)
+		}
+	}
+	return out
+}
+
+// Find is the job with the name.
+func (j *Jobs) Find(name string) (config.Job, bool) {
+	for _, job := range j.Specs {
+		if job.Name == name {
+			return job, true
+		}
+	}
+	return config.Job{}, false
+}
+
+// matches reports whether a job runs on the event: one of its events names it ("push"), or it and its action
+// ("release.published"), and its ref is on one of the job's branches when it has any.
+func matches(job config.Job, ev core.HookEvent) bool {
+	if job.On == nil {
+		return false
+	}
+	named := false
+	for _, e := range job.On.Events {
+		name, action, hasAction := strings.Cut(e, ".")
+		if name == ev.Name && (!hasAction || action == ev.Action) {
+			named = true
+			break
+		}
+	}
+	if !named {
+		return false
+	}
+	if len(job.On.Branches) == 0 {
+		return true
+	}
+	branch, ok := strings.CutPrefix(ev.Ref, "refs/heads/")
+	if !ok {
+		return false
+	}
+	for _, pat := range job.On.Branches {
+		if m, _ := path.Match(pat, branch); m {
+			return true
+		}
+	}
+	return false
+}
+
+// OnEvent runs each job that runs on the event.
+func (j *Jobs) OnEvent(ev core.HookEvent) {
+	for _, job := range j.Specs {
+		if matches(job, ev) {
+			j.Trigger(job, ev)
+		}
+	}
+}
+
+// Trigger runs a job for a delivery, telling it about the delivery through its environment.
+func (j *Jobs) Trigger(job config.Job, ev core.HookEvent) {
+	s := j.p.hub.settings()
+	what := ev.Name
+	if ev.Action != "" {
+		what += "." + ev.Action
+	}
+	if !s.Jobs || s.DryRun {
+		j.p.logf("%s: not run on %s (jobs are off)", job.Name, what)
+		return
+	}
+	extra := []string{"OPEN_SUPERVISOR_EVENT=" + ev.Name, "OPEN_SUPERVISOR_EVENT_ACTION=" + ev.Action, "OPEN_SUPERVISOR_EVENT_REF=" + ev.Ref}
+	if file, err := j.writeEvent(job, ev.Body); err != nil {
+		j.p.logf("%s: couldn't keep the %s delivery: %v", job.Name, what, err)
+	} else {
+		extra = append(extra, "OPEN_SUPERVISOR_EVENT_FILE="+file)
+	}
+	j.p.logf("%s: running on %s", job.Name, what)
+	if len(job.At) > 0 {
+		go j.runIfDue(job, true, extra)
+	} else {
+		go j.runCheck(job, extra)
+	}
+}
+
+// writeEvent keeps a delivery's body for the job to read, clearing out those more than a day old.
+func (j *Jobs) writeEvent(job config.Job, body []byte) (string, error) {
+	dir := filepath.Join(j.p.StateDir, "job-events")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if old, err := os.ReadDir(dir); err == nil {
+		for _, e := range old {
+			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > 24*time.Hour {
+				_ = os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+	file := filepath.Join(dir, fmt.Sprintf("%s-%d.json", job.Name, time.Now().UnixNano()))
+	return file, os.WriteFile(file, body, 0o600)
+}
+
+// runCheck runs an interval job and waits for it. A run asked for by a delivery while the job is going runs
+// once it ends; one asked for by the timer is dropped.
+func (j *Jobs) runCheck(job config.Job, extra []string) {
 	j.mu.Lock()
 	if j.busy[job.Name] {
+		if extra != nil {
+			j.pending[job.Name] = extra
+		}
 		j.mu.Unlock()
 		return
 	}
 	j.busy[job.Name] = true
 	j.mu.Unlock()
-	defer func() {
+	for {
+		j.check(job, extra)
 		j.mu.Lock()
-		delete(j.busy, job.Name)
+		next, ok := j.pending[job.Name]
+		delete(j.pending, job.Name)
+		if !ok {
+			delete(j.busy, job.Name)
+			j.mu.Unlock()
+			return
+		}
 		j.mu.Unlock()
-	}()
+		extra = next
+	}
+}
+
+func (j *Jobs) check(job config.Job, extra []string) {
 	timeout := job.TimeoutMinutes
 	if timeout <= 0 {
 		timeout = 5
@@ -181,7 +322,7 @@ func (j *Jobs) runCheck(job config.Job) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, job.Command[0], job.Command[1:]...)
 	cmd.Dir = j.p.Root
-	cmd.Env = j.env()
+	cmd.Env = j.env(extra)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		tail := strings.TrimSpace(string(out))
 		if i := strings.LastIndex(tail, "\n"); i >= 0 {
@@ -266,8 +407,8 @@ func dueSlot(job config.Job, now time.Time) string {
 }
 
 // runIfDue starts a timed job when its time comes, and notes how the last run ended. It runs detached, like a
-// turn.
-func (j *Jobs) runIfDue(job config.Job, force bool) {
+// turn. extra is the environment a delivery adds.
+func (j *Jobs) runIfDue(job config.Job, force bool, extra []string) {
 	running, isRunning := j.readRunning(job)
 	j.mu.Lock()
 	_, wasRunning := j.running[job.Name]
@@ -309,6 +450,9 @@ func (j *Jobs) runIfDue(job config.Job, force bool) {
 		j.mu.Lock()
 		j.running[job.Name] = running
 		j.mu.Unlock()
+		if extra != nil {
+			j.p.logf("%s: the %s run is still going; this delivery doesn't start another", job.Name, running.Slot)
+		}
 		return
 	}
 	slot := dueSlot(job, time.Now())
@@ -339,7 +483,7 @@ func (j *Jobs) runIfDue(job config.Job, force bool) {
 	})
 	cmd := exec.Command(job.Command[0], job.Command[1:]...)
 	cmd.Dir = j.p.Root
-	cmd.Env = j.env()
+	cmd.Env = j.env(extra)
 	proc.Detach(cmd)
 	if err := cmd.Start(); err != nil {
 		j.p.logf("%s: couldn't start: %v", job.Name, err)
@@ -347,7 +491,10 @@ func (j *Jobs) runIfDue(job config.Job, force bool) {
 	}
 	go func() { _ = cmd.Wait() }()
 	label := slot
-	if label == "" {
+	switch {
+	case extra != nil:
+		label = "on an event"
+	case label == "":
 		label = "by hand"
 	}
 	j.mu.Lock()

@@ -169,15 +169,28 @@ type Sweep struct {
 // detached at each time and reports through Status, a folder where it keeps running.json
 // ({pid, slot, startedAt, log}) while it runs and last.json ({slot, outcome, finishedAt}) when it ends; an
 // outcome of "busy" is tried again in ten minutes. A run missed by more than six hours waits for the next
-// time. Key is the TUI key that runs it now.
+// time. Key is the TUI key that runs it now. On runs it on webhooks as well (see JobTrigger).
 type Job struct {
-	Name           string   `yaml:"name" json:"name"`
-	Command        []string `yaml:"command" json:"command"`
-	Key            string   `yaml:"key,omitempty" json:"key,omitempty"`
-	EveryMinutes   int      `yaml:"everyMinutes,omitempty" json:"everyMinutes,omitempty"`
-	TimeoutMinutes int      `yaml:"timeoutMinutes,omitempty" json:"timeoutMinutes,omitempty"`
-	At             []string `yaml:"at,omitempty" json:"at,omitempty"`
-	Status         string   `yaml:"status,omitempty" json:"status,omitempty"`
+	Name           string      `yaml:"name" json:"name"`
+	Command        []string    `yaml:"command" json:"command"`
+	Key            string      `yaml:"key,omitempty" json:"key,omitempty"`
+	EveryMinutes   int         `yaml:"everyMinutes,omitempty" json:"everyMinutes,omitempty"`
+	TimeoutMinutes int         `yaml:"timeoutMinutes,omitempty" json:"timeoutMinutes,omitempty"`
+	At             []string    `yaml:"at,omitempty" json:"at,omitempty"`
+	Status         string      `yaml:"status,omitempty" json:"status,omitempty"`
+	On             *JobTrigger `yaml:"on,omitempty" json:"on,omitempty"`
+}
+
+// JobTrigger runs a job on webhooks, which arrive through the tunnel. Events are the code host's or tracker's
+// own event names, taken through the project's hook: "push", or "release.published" for one action of an
+// event. Branches limits events that carry a git ref (a push) to those branches, globs allowed. Webhook takes
+// POSTs from anywhere else at /jobs/<project>/<job>/<token>; the supervisor logs the URL once the tunnel is up.
+// The job is told about the delivery through OPEN_SUPERVISOR_EVENT, _EVENT_ACTION, _EVENT_REF and
+// _EVENT_FILE (the body). A delivery that arrives while an interval job is running runs it again once it ends.
+type JobTrigger struct {
+	Events   []string `yaml:"events,omitempty" json:"events,omitempty"`
+	Branches []string `yaml:"branches,omitempty" json:"branches,omitempty"`
+	Webhook  bool     `yaml:"webhook,omitempty" json:"webhook,omitempty"`
 }
 
 // DefaultSettings are what a new config starts with and what a missing setting falls back to.
@@ -394,6 +407,9 @@ func (c *Config) Validate() error {
 		for _, j := range p.Jobs {
 			if j.Name == "" || len(j.Command) == 0 {
 				errs = append(errs, where+": every job needs a name and a command")
+			}
+			if j.On != nil && len(j.On.Events) == 0 && !j.On.Webhook {
+				errs = append(errs, fmt.Sprintf("%s: job %s: on needs events or webhook", where, j.Name))
 			}
 		}
 	}

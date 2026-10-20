@@ -281,7 +281,7 @@ func TestWebhookSignals(t *testing.T) {
 		{rp, "status", `{"sha":"ghi","state":"success",` + repo + `}`, core.SigChecks, "", "ghi", 0, "", ""},
 	}
 	for i, c := range cases {
-		sigs := deliver(t, c.h, c.event, c.body)
+		sigs := withoutEvents(deliver(t, c.h, c.event, c.body))
 		if len(sigs) != 1 {
 			t.Errorf("case %d (%s): %d signals", i, c.event, len(sigs))
 			continue
@@ -312,9 +312,73 @@ func TestWebhookSignals(t *testing.T) {
 		{rp, "pull_request_review", `{"action":"submitted",` + repo + `,` + pull + `,"review":{"id":2,"user":{"login":"r"},"body":"","state":"APPROVED"}}`},
 	}
 	for i, c := range none {
-		if sigs := deliver(t, c.h, c.event, c.body); len(sigs) != 0 {
+		if sigs := withoutEvents(deliver(t, c.h, c.event, c.body)); len(sigs) != 0 {
 			t.Errorf("none case %d (%s): %+v", i, c.event, sigs)
 		}
+	}
+}
+
+// withoutEvents drops the SigEvent every delivery carries for jobs.
+func withoutEvents(sigs []core.Signal) []core.Signal {
+	var out []core.Signal
+	for _, s := range sigs {
+		if s.Type != core.SigEvent {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func TestWebhookEvents(t *testing.T) {
+	tr, rp := bound(t, http.NotFoundHandler())
+	repo := `"repository":{"full_name":"octo/widgets"}`
+	for _, c := range []struct {
+		h                 adapter.Hooked
+		event, body       string
+		name, action, ref string
+	}{
+		{rp, "push", `{"ref":"refs/heads/main",` + repo + `}`, "push", "", "refs/heads/main"},
+		{tr, "release", `{"action":"published",` + repo + `}`, "release", "published", ""},
+		{rp, "create", `{"ref":"v1.2","ref_type":"tag",` + repo + `}`, "create", "", "refs/tags/v1.2"},
+		{rp, "create", `{"ref":"feature","ref_type":"branch",` + repo + `}`, "create", "", "refs/heads/feature"},
+	} {
+		var ev *core.HookEvent
+		for _, s := range deliver(t, c.h, c.event, c.body) {
+			if s.Type == core.SigEvent {
+				ev = s.Event
+			}
+		}
+		if ev == nil || ev.Name != c.name || ev.Action != c.action || ev.Ref != c.ref || string(ev.Body) != c.body {
+			t.Errorf("%s: %+v", c.event, ev)
+		}
+	}
+	for _, s := range deliver(t, tr, "ping", `{`+repo+`}`) {
+		if s.Type == core.SigEvent {
+			t.Error("a ping went to the jobs")
+		}
+	}
+}
+
+func TestWantEventsSubscribes(t *testing.T) {
+	var events []string
+	_, rp := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			fmt.Fprint(w, `[]`)
+			return
+		}
+		var body struct {
+			Events []string `json:"events"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		events = body.Events
+		fmt.Fprint(w, `{"id":1}`)
+	}))
+	rp.WantEvents([]string{"push", "issues", "push", "release"})
+	if _, err := rp.EnsureWebhook(context.Background(), "https://h/x", "s", ""); err != nil {
+		t.Fatal(err)
+	}
+	if want := append(append([]string(nil), hookEvents...), "push", "release"); strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Errorf("events = %v", events)
 	}
 }
 

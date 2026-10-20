@@ -13,8 +13,19 @@ const (
 	SigPRClosed      SignalType = "pr_closed"      // PR (State says merged or closed)
 	SigPRComment     SignalType = "pr_comment"     // PR, Comment
 	SigChecks        SignalType = "checks"         // SHA: something about the commit's checks changed
+	SigEvent         SignalType = "event"          // Event: the delivery as it came, for jobs run on events
 	SigPing          SignalType = "ping"
 )
+
+// HookEvent is a webhook delivery named the way its service names it ("push", "release" with action
+// "published"), with its body, so a job can run on it.
+type HookEvent struct {
+	Name   string
+	Action string
+	// Ref is the git ref the event is about, when it has one ("refs/heads/main" for a push).
+	Ref  string
+	Body []byte
+}
 
 // Signal is one thing a webhook delivery said.
 type Signal struct {
@@ -24,4 +35,5 @@ type Signal struct {
 	PR      *PR
 	Comment *Comment
 	SHA     string
+	Event   *HookEvent
 }

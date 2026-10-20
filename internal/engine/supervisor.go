@@ -6,12 +6,15 @@ package engine
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -332,6 +335,13 @@ func (s *Supervisor) Start() error {
 		p.start()
 	}
 	// Without a tunnel nothing can reach the webhook server, so it isn't started.
+	if !s.TunnelEnabled() {
+		for _, p := range s.Projects() {
+			if len(p.Jobs.Events()) > 0 || len(p.Jobs.Webhooked()) > 0 {
+				p.logf("no tunnel: jobs that run on webhooks won't run")
+			}
+		}
+	}
 	if s.TunnelEnabled() {
 		if err := s.startServer(cfg.Settings.Port); err != nil {
 			logx.Default.Printf("%s; webhooks are off until the port is free (set settings.port to another)", logx.ErrText(err))
@@ -570,9 +580,53 @@ func webhookSecret(file string) (string, error) {
 	return secret, os.WriteFile(file, []byte(secret+"\n"), 0o600)
 }
 
-var hookPath = regexp.MustCompile(`^/hooks/([^/]+)/([^/]+)$`)
+var (
+	hookPath = regexp.MustCompile(`^/hooks/([^/]+)/([^/]+)$`)
+	jobPath  = regexp.MustCompile(`^/jobs/([^/]+)/([^/]+)/([^/]+)$`)
+)
+
+// jobToken is the secret part of a job's webhook URL: stable across restarts, and different for every job.
+func jobToken(secret, project, job string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte("job:" + project + "/" + job))
+	return hex.EncodeToString(mac.Sum(nil))[:32]
+}
+
+// JobHookURL is where a job that takes webhooks takes them, empty while the tunnel is down.
+func (s *Supervisor) JobHookURL(p *Project, job string) string {
+	base := s.HookURL()
+	if base == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/jobs/%s/%s/%s", strings.TrimRight(base, "/"), url.PathEscape(p.Name), url.PathEscape(job), jobToken(s.secret, p.Name, job))
+}
+
+// announceJobHooks logs the URL of each of the project's jobs that take webhooks.
+func (s *Supervisor) announceJobHooks(p *Project) {
+	for _, job := range p.Jobs.Webhooked() {
+		if u := s.JobHookURL(p, job.Name); u != "" {
+			p.logf("%s takes webhooks at %s", job.Name, u)
+		}
+	}
+}
 
 func (s *Supervisor) startServer(port int) error {
+	ln := fmt.Sprintf("127.0.0.1:%d", port)
+	s.server = &http.Server{Addr: ln, Handler: s.handler(), ReadHeaderTimeout: 10 * time.Second}
+	errc := make(chan error, 1)
+	go func() { errc <- s.server.ListenAndServe() }()
+	select {
+	case err := <-errc:
+		return fmt.Errorf("webhook server on %s: %w", ln, err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	logx.Default.Printf("webhook server on http://%s/hooks/<project>/<connection>", ln)
+	return nil
+}
+
+// handler is the webhook server: the projects' hooks at /hooks/<project>/<connection>, and jobs that take
+// webhooks at /jobs/<project>/<job>/<token>.
+func (s *Supervisor) handler() http.Handler {
 	mux := http.NewServeMux()
 	seen := newRecent(2000)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "open-supervisor ok") })
@@ -619,22 +673,46 @@ func (s *Supervisor) startServer(port int) error {
 		}
 		w.WriteHeader(http.StatusAccepted)
 		go func() {
+			event := false
 			for _, sig := range signals {
+				if sig.Type == core.SigEvent {
+					// The tracker and the repo on one hook both send the delivery; jobs run on it once.
+					if event || sig.Event == nil {
+						continue
+					}
+					event = true
+					p.Jobs.OnEvent(*sig.Event)
+					continue
+				}
 				p.onSignal(sig)
 			}
 		}()
 	})
-	ln := fmt.Sprintf("127.0.0.1:%d", port)
-	s.server = &http.Server{Addr: ln, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	errc := make(chan error, 1)
-	go func() { errc <- s.server.ListenAndServe() }()
-	select {
-	case err := <-errc:
-		return fmt.Errorf("webhook server on %s: %w", ln, err)
-	case <-time.After(150 * time.Millisecond):
-	}
-	logx.Default.Printf("webhook server on http://%s/hooks/<project>/<connection>", ln)
-	return nil
+	mux.HandleFunc("/jobs/", func(w http.ResponseWriter, r *http.Request) {
+		m := jobPath.FindStringSubmatch(r.URL.Path)
+		if r.Method != http.MethodPost || m == nil {
+			http.NotFound(w, r)
+			return
+		}
+		p := s.Project(m[1])
+		if p == nil {
+			http.NotFound(w, r)
+			return
+		}
+		job, ok := p.Jobs.Find(m[2])
+		if !ok || job.On == nil || !job.On.Webhook || !hmac.Equal([]byte(m[3]), []byte(jobToken(s.secret, p.Name, job.Name))) {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := readBody(r)
+		if err != nil {
+			http.Error(w, "too big", http.StatusRequestEntityTooLarge)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		go p.Jobs.Trigger(job, core.HookEvent{Name: "webhook", Body: body})
+	})
+	return mux
 }
 
 func readBody(r *http.Request) ([]byte, error) {
@@ -731,6 +809,7 @@ func (s *Supervisor) startTunnel() {
 			logx.Default.Printf("tunnel: %s", url)
 			for _, p := range s.Projects() {
 				go p.pointHooks(url, s.secret)
+				s.announceJobHooks(p)
 			}
 		}
 	}()
@@ -817,6 +896,7 @@ func (s *Supervisor) Reload(cfg *config.Config) error {
 			p.start()
 			if hook != "" {
 				go p.pointHooks(hook, s.secret)
+				s.announceJobHooks(p)
 			}
 			go p.reconcile()
 		}
@@ -921,6 +1001,18 @@ func (s *Supervisor) openProject(cfg *config.Config, spec *config.Project, fp st
 	}
 	p.Store = store.New(b.StateDir, s.changed)
 	p.Jobs = loadJobs(p)
+	if events := p.Jobs.Events(); len(events) > 0 {
+		subscribed := false
+		for _, h := range []any{p.Tracker, p.Repo} {
+			if eh, ok := h.(adapter.EventHooked); ok {
+				eh.WantEvents(events)
+				subscribed = true
+			}
+		}
+		if !subscribed {
+			p.logf("jobs run on %s, but neither %s nor %s sends events", strings.Join(events, ", "), p.Tracker.Describe(), p.Repo.Describe())
+		}
+	}
 	return p, nil
 }
 

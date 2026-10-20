@@ -21,6 +21,8 @@ type binding struct {
 	c     *conn
 	repo  string
 	owner string
+	// events are what the hook subscribes to beyond hookEvents, for jobs.
+	events []string
 }
 
 // Tracker is a repository's issues.
@@ -36,6 +38,9 @@ var (
 	_ adapter.Reactor = (*Repo)(nil)
 	_ adapter.Hooked  = (*Tracker)(nil)
 	_ adapter.Hooked  = (*Repo)(nil)
+
+	_ adapter.EventHooked = (*Tracker)(nil)
+	_ adapter.EventHooked = (*Repo)(nil)
 )
 
 // ---- API shapes -----------------------------------------------------------------------------------------

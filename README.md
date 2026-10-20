@@ -88,6 +88,8 @@ projects:
     tracker: { connection: jira, project: API, transitionClaimed: In Progress, transitionReview: In Review }
     jobs:
       - { name: refresh, command: [pnpm, refresh], at: ["06:00"], status: .local/refresh, key: f }
+      - { name: deploy, command: [./scripts/deploy.sh], on: { events: [push], branches: [main] } }
+      - { name: reindex, command: [pnpm, reindex], on: { webhook: true } }
 ```
 
 Secrets never go in the file. A secret field holds a reference: `keyring:<name>` (the OS keyring, which is what the wizard uses), `env:VAR`, `cmd:op read …`, or `file:<name>` (`secrets.yaml` next to the config, for machines without a keyring).
@@ -95,6 +97,15 @@ Secrets never go in the file. A secret field holds a reference: `keyring:<name>`
 State (issue records, turn output, logs, correction notes) goes in `~/.local/state/open-supervisor`. Generated files (the agent plugin, issue worktrees) go in `~/.local/share/open-supervisor`. Nothing is written into your checkouts except through git.
 
 A project can also keep jobs in its own checkout, in `.open-supervisor.yaml` under `jobs:`.
+
+### Jobs on webhooks
+
+A job with `on:` also runs when a webhook arrives through the tunnel:
+
+- `events` are the code host's own event names, taken through the project's hook (GitHub for now): `push`, `release`, `workflow_run`, or `release.published` for one action. The supervisor adds them to the hook's subscription. `branches` limits events that carry a git ref, such as a push, to those branches, and takes globs (`release/*`).
+- `webhook: true` gives the job a URL of its own, `<tunnel>/jobs/<project>/<job>/<token>`, for any other service to POST to. The token is derived from the supervisor's webhook secret, so the URL stays the same across restarts. The supervisor logs the URL when the tunnel comes up.
+
+The job learns about the delivery from `OPEN_SUPERVISOR_EVENT`, `OPEN_SUPERVISOR_EVENT_ACTION`, `OPEN_SUPERVISOR_EVENT_REF` and `OPEN_SUPERVISOR_EVENT_FILE` (a file holding the body, kept for a day). `OPEN_SUPERVISOR_EVENT` is `webhook` for the job's own URL. A job without `at:` runs and is waited for. If a delivery arrives while it is running, it runs once more when the current run ends, for the latest delivery. A job with `at:` starts detached, and a delivery that arrives while it is running is skipped. With no tunnel, or under `--dry-run`, these jobs don't run on webhooks. Deliveries aren't replayed by the reconcile, so a missed one stays missed.
 
 ## What it does
 
@@ -104,7 +115,7 @@ A project can also keep jobs in its own checkout, in `.open-supervisor.yaml` und
 - **Interjects.** A comment or TUI message that arrives mid-turn goes into the running turn. The agent takes it in after its current tool call.
 - **Sets status labels** from the state each turn ends in. On Jira it can also move the issue through workflow statuses.
 - **Schedules.** An agent parks an issue until a time with `agent schedule`. An issue labelled `scheduled` with a `runAt` marker waits until then.
-- **Webhooks plus reconcile.** Webhooks arrive through the tunnel and are signature-checked. Every few minutes a reconcile reads everything a webhook could have missed, so webhooks are optional.
+- **Webhooks plus reconcile.** Webhooks arrive through the tunnel and are signature-checked. They can also [run a project's jobs](#jobs-on-webhooks). Every few minutes a reconcile reads everything a webhook could have missed, so webhooks are optional.
 - **Retries** a failed turn after 5, then 10, then 15 minutes, then waits for `r`.
 - **Sweeps** once a day: an agent turn folds the corrections agents logged into the project's rule files.
 - **Usage and metrics.** It shows the Claude subscription's 5-hour and 7-day windows in the header. It sends an `agent_turn` event per turn (tokens, cost, duration, state) and an `agent_usage` event to the telemetry connections.
