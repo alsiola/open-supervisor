@@ -291,6 +291,9 @@ func Clone(c *config.Config) *config.Config {
 	for _, p := range c.Projects {
 		out.Projects = append(out.Projects, CloneProject(p))
 	}
+	for _, s := range c.SourceList {
+		out.SourceList = append(out.SourceList, s.Clone())
+	}
 	return out
 }
 

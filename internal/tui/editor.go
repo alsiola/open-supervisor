@@ -23,7 +23,7 @@ type editor struct {
 	cfg           *config.Config
 	dirty         bool
 	tab           int
-	sel           [3]int
+	sel           [4]int
 	width, height int
 
 	form   *huh.Form
@@ -36,7 +36,7 @@ type editor struct {
 	onYes   func() tea.Cmd
 }
 
-var tabs = []string{"General", "Connections", "Projects"}
+var tabs = []string{"General", "Connections", "Projects", "Sources"}
 
 type testedMsg struct {
 	name, who string
@@ -67,8 +67,10 @@ func (e *editor) start(steps []func() *huh.Form, finish func() error) tea.Cmd {
 
 func (e *editor) next() tea.Cmd {
 	for len(e.steps) > 0 {
-		f := e.steps[0]()
+		// Popped before it runs: a step may put more steps in front of the rest.
+		step := e.steps[0]
 		e.steps = e.steps[1:]
+		f := step()
 		if f == nil {
 			continue
 		}
@@ -147,7 +149,7 @@ func (e *editor) update(msg tea.Msg) (tea.Cmd, bool) {
 		e.tab = (e.tab + 1) % len(tabs)
 	case "shift+tab", "left":
 		e.tab = (e.tab + len(tabs) - 1) % len(tabs)
-	case "1", "2", "3":
+	case "1", "2", "3", "4":
 		e.tab = int(s[0] - '1')
 	case "up":
 		e.sel[e.tab] = max(0, e.sel[e.tab]-1)
@@ -184,8 +186,17 @@ func (e *editor) count() int {
 		return len(e.cfg.Connections)
 	case 2:
 		return len(e.cfg.Projects)
+	case 3:
+		return len(e.cfg.SourceList)
 	}
 	return 1
+}
+
+func (e *editor) selectedSource() *config.Source {
+	if i := e.sel[3]; i < len(e.cfg.SourceList) {
+		return e.cfg.SourceList[i]
+	}
+	return nil
 }
 
 func (e *editor) selectedConnection() string {
@@ -216,6 +227,10 @@ func (e *editor) edit() tea.Cmd {
 		if p := e.selectedProject(); p != nil {
 			return e.editProject(forms.NewProjectDraft(e.cfg, p, ""))
 		}
+	case 3:
+		if src := e.selectedSource(); src != nil {
+			return e.editSource(forms.NewSourceDraft(e.cfg, src))
+		}
 	}
 	return nil
 }
@@ -232,8 +247,27 @@ func (e *editor) add() tea.Cmd {
 			}
 		}
 		return e.editProject(forms.NewProjectDraft(e.cfg, nil, cwd))
+	case 3:
+		if len(e.cfg.ConnectionNames(adapter.RoleTracker)) == 0 || len(e.cfg.Projects) == 0 {
+			e.errText = "a source needs an issue tracker connection and a project to feed"
+			return nil
+		}
+		return e.editSource(forms.NewSourceDraft(e.cfg, nil))
 	}
 	return nil
+}
+
+func (e *editor) editSource(d *forms.SourceDraft) tea.Cmd {
+	return e.start(d.Steps(e.cfg), func() error {
+		note, err := d.Apply(e.cfg)
+		if err == nil {
+			e.note = "saved " + strings.TrimSpace(d.Name) + " to the draft; s applies"
+			if note != "" {
+				e.note += " (" + note + ")"
+			}
+		}
+		return err
+	})
 }
 
 func (e *editor) editConnection(d *forms.ConnectionDraft) tea.Cmd {
@@ -250,16 +284,44 @@ func (e *editor) editConnection(d *forms.ConnectionDraft) tea.Cmd {
 }
 
 func (e *editor) editProject(d *forms.ProjectDraft) tea.Cmd {
+	var share *forms.SourceDraft
 	return e.start([]func() *huh.Form{
 		func() *huh.Form { return formOf(d.BasicGroups(e.cfg)) },
 		func() *huh.Form { return formOf(d.BindingGroups(e.cfg)) },
 		func() *huh.Form { return formOf(d.ExtraGroups(e.cfg)) },
+		func() *huh.Form {
+			// Written into a copy first, to see whether it needs routes or shares another project's issues.
+			tmp := forms.Clone(e.cfg)
+			if p, err := d.Apply(tmp); err == nil {
+				if share = d.Follow(tmp, p); share != nil {
+					e.steps = append(share.Steps(tmp), e.steps...)
+				}
+			}
+			return nil
+		},
 	}, func() error {
-		p, err := d.Apply(e.cfg)
-		if err == nil {
-			e.note = "saved " + p.Name + " to the draft; s applies"
+		// Both on a copy first, so a source that can't be saved leaves the project as it was.
+		next := forms.Clone(e.cfg)
+		p, err := d.Apply(next)
+		if err != nil {
+			return err
 		}
-		return err
+		note := "saved " + p.Name + " to the draft; s applies"
+		if share != nil {
+			more, err := share.Apply(next)
+			if err != nil {
+				return err
+			}
+			if share.Accepted {
+				note = fmt.Sprintf("saved %s, fed by %s, to the draft; s applies", p.Name, strings.TrimSpace(share.Name))
+			}
+			if more != "" {
+				note += " (" + more + ")"
+			}
+		}
+		*e.cfg = *next
+		e.note = note
+		return nil
 	})
 }
 
@@ -294,6 +356,18 @@ func (e *editor) remove() {
 			forms.RemoveProject(e.cfg, p.Name)
 			e.dirty = true
 			e.sel[2] = max(0, min(e.sel[2], len(e.cfg.Projects)-1))
+			return nil
+		}
+	case 3:
+		src := e.selectedSource()
+		if src == nil {
+			return
+		}
+		e.confirm = fmt.Sprintf("Remove the source %s? Each project it feeds reads the tracker on its own again. (y/n)", src.Name)
+		e.onYes = func() tea.Cmd {
+			forms.RemoveSource(e.cfg, src.Name)
+			e.dirty = true
+			e.sel[3] = max(0, min(e.sel[3], len(e.cfg.SourceList)-1))
 			return nil
 		}
 	}
@@ -373,11 +447,14 @@ func (e *editor) view() string {
 		out = append(out, e.connectionLines()...)
 	case 2:
 		out = append(out, e.projectLines()...)
+	case 3:
+		out = append(out, e.sourceLines()...)
 	}
 	keys := map[int]string{
 		0: " ⏎ edit   tab switch   s save & apply   esc close",
 		1: " ↑↓ select   ⏎ edit   a add   d delete   t test   tab switch   s save & apply   esc close",
 		2: " ↑↓ select   ⏎ edit   a add   d remove   x disable/enable   tab switch   s save & apply   esc close",
+		3: " ↑↓ select   ⏎ edit   a add   d remove   tab switch   s save & apply   esc close",
 	}[e.tab]
 	status := dim(keys)
 	switch {
@@ -492,6 +569,32 @@ func (e *editor) projectLines() []string {
 	}
 	if len(e.cfg.Projects) == 0 {
 		out = append(out, dim("  no projects: press a to add one"))
+	}
+	return out
+}
+
+func (e *editor) sourceLines() []string {
+	out := []string{"", dim("  A source is one tracker feeding several projects; its routes send each issue to one of them.")}
+	for i, src := range e.cfg.SourceList {
+		tracker := ""
+		if src.Tracker != nil {
+			tracker = src.Tracker.Connection
+		}
+		unrouted := "unrouted: left alone"
+		if src.Unrouted == config.UnroutedLabel {
+			unrouted = "unrouted: labelled " + e.cfg.Settings.Labels.Unrouted
+		}
+		line := fmt.Sprintf("  %s %s %s", pad(src.Name, 16), pad(tracker, 14), dim(unrouted))
+		if i == e.sel[3] {
+			line = invS.Render(pad(ansi.Strip(line), e.width))
+		}
+		out = append(out, "", line)
+		for n, r := range src.Routes {
+			out = append(out, fmt.Sprintf("      %d. %s %s", n+1, pad(r.Project, 14), dim("when "+r.When.String())))
+		}
+	}
+	if len(e.cfg.SourceList) == 0 {
+		out = append(out, "", dim("  no sources: every project reads its own tracker. Press a to share one between projects."))
 	}
 	return out
 }

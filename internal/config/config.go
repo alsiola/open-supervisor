@@ -276,6 +276,16 @@ var ErrNoConfig = errors.New("no config yet")
 
 // Load reads and checks the config at path.
 func Load(path string) (*Config, error) {
+	c, err := Read(path)
+	if err != nil {
+		return nil, err
+	}
+	return c, c.Validate()
+}
+
+// Read reads the config at path with the defaults filled in, but doesn't validate it: for changing a config
+// a step at a time, where it may be incomplete in between.
+func Read(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%w at %s: run `%s init`", ErrNoConfig, path, Name)
@@ -283,13 +293,18 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return Parse(path, data)
+}
+
+// Parse reads a config from its YAML with the defaults filled in, without validating it.
+func Parse(path string, data []byte) (*Config, error) {
 	c := New(path)
 	if err := yaml.Unmarshal(data, c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	c.Path = path
 	c.fill()
-	return c, c.Validate()
+	return c, nil
 }
 
 // fill puts the defaults in for anything left out.

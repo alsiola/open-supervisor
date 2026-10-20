@@ -1,6 +1,6 @@
 # Writing an adapter
 
-Every service open-supervisor talks to sits behind a small Go interface in [`internal/adapter`](../internal/adapter/adapter.go). An adapter is one package that implements the interfaces for the roles it can fill and registers a `Spec` describing its settings. The onboarding wizard and the TUI's config editor build their forms from that `Spec`, so a new adapter needs no UI code.
+Every service open-supervisor talks to sits behind a small Go interface in [`internal/adapter`](../internal/adapter/adapter.go). An adapter is one package that implements the interfaces for the roles it can fill and registers a `Spec` describing its settings. The onboarding wizard, the TUI's config editor and the `config` commands all work from that `Spec` (`open-supervisor adapters <type>` prints it), so a new adapter needs no UI code.
 
 | Role | Interface(s) | Shipped | Ideas |
 | --- | --- | --- | --- |
@@ -64,5 +64,8 @@ An `Agent` runs one turn at a time per issue, detached, so turns outlive the sup
 - `Send` hands the running agent a message mid-turn. Return false if your agent can't take one, and it waits for the next turn.
 - `Prepare` gets the playbooks (`internal/playbooks/*.md`). Claude Code installs them as a plugin of skills. An agent without skills can put `playbooks.Body(text)` at the top of the first prompt instead.
 - The playbooks tell the agent to use `$OPEN_SUPERVISOR agent …` for everything that touches a service. Keep `OPEN_SUPERVISOR*` in the environment you pass on.
+- `SetupCommand` (optional, `adapter.SetupAgent`) is what makes `init --with <type>` work. It returns an interactive session, attached to the terminal, started on the setup guide (`playbooks.Setup`).
+  - **Where the guide goes.** Hand it over the way your agent takes skills, but keep it apart from the turn playbooks, so agents working issues never see it. Claude Code gets it as its own plugin.
+  - **Permissions.** Let the commands in `spec.Allow` run without a permission prompt.
 
 Look at [`internal/adapters/claudecode`](../internal/adapters/claudecode) for a complete one, and [`internal/engine/engine_test.go`](../internal/engine/engine_test.go) for fakes of every role.

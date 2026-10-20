@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -27,6 +28,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/adapter"
 	_ "github.com/alsiola/open-supervisor/internal/adapters/all"
 	"github.com/alsiola/open-supervisor/internal/config"
+	"github.com/alsiola/open-supervisor/internal/configcli"
 	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/engine"
 	"github.com/alsiola/open-supervisor/internal/logx"
@@ -71,13 +73,22 @@ func root() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "change nothing on any service and run no jobs; turns run a stub prompt on a cheap model")
 	cmd.Flags().BoolVar(&noTunnel, "no-tunnel", false, "no webhooks; services are read only by the reconcile")
 
+	var setupWith string
 	initCmd := &cobra.Command{
-		Use:   "init",
-		Short: "Set up connections and projects with the onboarding wizard",
-		Args:  cobra.NoArgs,
+		Use:   "init [--with <agent>]",
+		Short: "Set up connections and projects with the onboarding wizard, or have your coding agent do it",
+		Long: "Without --with, the onboarding wizard asks a step at a time.\n\n" +
+			"--with claude-code (or an agent connection's name) starts that agent in this terminal with the setup guide:\n" +
+			"it looks at your checkouts, asks about your services and how issues map to repos, and writes the config\n" +
+			"through `" + config.Name + " config`. It's an ordinary interactive session: answer it, and stop it when you like.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			path := resolve(configPath)
-			existing, err := config.Load(path)
+			if setupWith != "" {
+				return setupWithAgent(path, setupWith)
+			}
+			// Read, not Load: an incomplete config is what init is for.
+			existing, err := config.Read(path)
 			if err != nil && !errors.Is(err, config.ErrNoConfig) {
 				return err
 			}
@@ -85,6 +96,7 @@ func root() *cobra.Command {
 			return err
 		},
 	}
+	initCmd.Flags().StringVar(&setupWith, "with", "", "have this coding agent set things up (claude-code, or an agent connection)")
 	doctorCmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check the config, every connection and every project",
@@ -123,7 +135,7 @@ func root() *cobra.Command {
 			fmt.Println(config.Name, v)
 		},
 	}
-	cmd.AddCommand(initCmd, doctorCmd, routeCmd, pluginCmd, versionCmd, toolbelt.Command(), adaptersCmd())
+	cmd.AddCommand(initCmd, doctorCmd, routeCmd, pluginCmd, versionCmd, toolbelt.Command(), adaptersCmd(), configcli.Command(func() string { return resolve(configPath) }))
 	return cmd
 }
 
@@ -160,12 +172,28 @@ func run(path string, headless, dryRun, noTunnel bool) error {
 	headless = headless || !interactive()
 	cfg, err := config.Load(path)
 	if errors.Is(err, config.ErrNoConfig) && !headless {
-		fmt.Println("No config yet: starting the setup wizard.")
-		if cfg, err = wizard.Run(path, nil); err != nil {
-			return err
+		how, err2 := wizard.ChooseSetup()
+		if err2 != nil {
+			return err2
+		}
+		if how == "" {
+			fmt.Println("No config yet: starting the setup wizard.")
+			if cfg, err = wizard.Run(path, nil); err != nil {
+				return err
+			}
+		} else {
+			if err := setupWithAgent(path, how); err != nil {
+				return err
+			}
+			if cfg, err = config.Load(path); err != nil {
+				return fmt.Errorf("%w\nrun `%s init --with %s` to carry on, or `%s init` for the wizard", err, config.Name, how, config.Name)
+			}
 		}
 	}
 	if err != nil {
+		if cfg != nil {
+			return fmt.Errorf("%w\nfix it with `%s init` (or `init --with claude-code`), `%s config`, or by hand", err, config.Name, config.Name)
+		}
 		return err
 	}
 	if len(cfg.Projects) == 0 {
@@ -458,10 +486,18 @@ func writePlaybooks(path string) error {
 
 func adaptersCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "adapters",
-		Short: "List the adapters this build has, and the roles each can fill",
-		Args:  cobra.NoArgs,
-		Run: func(cmd *cobra.Command, _ []string) {
+		Use:   "adapters [<type>]",
+		Short: "List the adapters this build has and the roles each can fill, or one adapter's fields",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				s, ok := adapter.Lookup(args[0])
+				if !ok {
+					return fmt.Errorf("no adapter %q", args[0])
+				}
+				describeAdapter(s)
+				return nil
+			}
 			for _, s := range adapter.All() {
 				roles := make([]string, len(s.Roles))
 				for i, r := range s.Roles {
@@ -469,6 +505,118 @@ func adaptersCmd() *cobra.Command {
 				}
 				fmt.Printf("%-12s %-18s %-24s %s\n", s.Type, s.Title, strings.Join(roles, ", "), s.Description)
 			}
+			return nil
 		},
 	}
+}
+
+// describeAdapter prints an adapter's connection fields and, per role, the fields a project or source binds.
+func describeAdapter(s adapter.Spec) {
+	roles := make([]string, len(s.Roles))
+	for i, r := range s.Roles {
+		roles[i] = string(r)
+	}
+	fmt.Printf("%s (%s): %s\nroles: %s\n", s.Type, s.Title, s.Description, strings.Join(roles, ", "))
+	fields := func(title string, fs []adapter.Field) {
+		if len(fs) == 0 {
+			return
+		}
+		fmt.Printf("\n%s\n", title)
+		for _, f := range fs {
+			var notes []string
+			if f.Required {
+				notes = append(notes, "required")
+			}
+			notes = append(notes, string(f.Type))
+			if f.Default != "" {
+				notes = append(notes, "default "+f.Default)
+			}
+			if len(f.Options) > 0 {
+				notes = append(notes, "one of "+strings.Join(f.Options, ", "))
+			}
+			for k, v := range f.ShowIf {
+				notes = append(notes, "when "+k+" is "+strings.Join(v, " or "))
+			}
+			fmt.Printf("  %-16s %s (%s)\n", f.Key, f.Label, strings.Join(notes, "; "))
+			if f.Help != "" {
+				fmt.Printf("  %-16s %s\n", "", f.Help)
+			}
+		}
+	}
+	fields("connection fields (config connection set <name> --type "+s.Type+" --set key=value)", s.Fields)
+	for _, r := range s.Roles {
+		flag := map[adapter.Role]string{adapter.RoleRepo: "config project set --repo key=value", adapter.RoleTracker: "config project set --tracker key=value, or config source set --set key=value"}[r]
+		if flag == "" {
+			flag = "bound by " + string(r)
+		}
+		fields(string(r)+" binding fields ("+flag+")", s.Binding[r])
+	}
+}
+
+// setupWithAgent starts a coding agent in this terminal with the setup guide. agent is an agent connection in
+// the config, or an agent adapter's type, opened with its defaults.
+func setupWithAgent(path, agent string) error {
+	cfg, err := config.Read(path)
+	if errors.Is(err, config.ErrNoConfig) {
+		cfg = config.New(path)
+	} else if err != nil {
+		return err
+	}
+	env := adapterEnv(cfg)
+	env.Log = func(string, ...any) {}
+	if _, ok := cfg.Connections[agent]; !ok && agent == "claude" {
+		agent = "claude-code"
+	}
+	var conn adapter.Connection
+	if c, ok := cfg.Connections[agent]; ok {
+		if spec, ok := adapter.Lookup(c.Type); !ok || !spec.Has(adapter.RoleAgent) {
+			return fmt.Errorf("%s isn't a coding agent", agent)
+		}
+		conn, err = engine.Open(cfg, agent, env)
+	} else if spec, ok := adapter.Lookup(agent); ok && spec.Has(adapter.RoleAgent) {
+		conn, err = spec.New(spec.Defaults(), env)
+	} else {
+		var names []string
+		for _, s := range adapter.ForRole(adapter.RoleAgent) {
+			names = append(names, s.Type)
+		}
+		return fmt.Errorf("no coding agent %q: one of %s, or an agent connection's name", agent, strings.Join(names, ", "))
+	}
+	if err != nil {
+		return err
+	}
+	sa, ok := conn.(adapter.SetupAgent)
+	if !ok {
+		return fmt.Errorf("%s can't run a setup session; run `%s init` for the wizard", agent, config.Name)
+	}
+	bin := selfCommand()
+	cwd, _ := os.Getwd()
+	cmd, err := sa.SetupCommand(adapter.SetupSpec{
+		Cwd:   cwd,
+		Env:   append(os.Environ(), "OPEN_SUPERVISOR_CONFIG="+path),
+		Guide: playbooks.Setup(bin),
+		// Reading and changing the supervisor's own config, nothing else, goes without asking.
+		Allow: []string{bin + " config", bin + " adapters", bin + " doctor", bin + " route"},
+	})
+	if err != nil {
+		return err
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	fmt.Printf("Starting %s to set up %s (config %s)…\n", agent, config.Name, path)
+	return cmd.Run()
+}
+
+// selfCommand is how an agent should run this binary: its name when that's what PATH finds, else its path.
+func selfCommand() string {
+	self, err := os.Executable()
+	if err != nil {
+		return config.Name
+	}
+	self, _ = filepath.EvalSymlinks(self)
+	if found, err := exec.LookPath(config.Name); err == nil {
+		if f, err := filepath.EvalSymlinks(found); err == nil && f == self {
+			return config.Name
+		}
+	}
+	return self
 }

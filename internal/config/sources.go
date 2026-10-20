@@ -391,3 +391,46 @@ func (c *Config) validateSources(role func(where, name string, r adapter.Role), 
 		}
 	}
 }
+
+// Clone is a deep copy of the source.
+func (s *Source) Clone() *Source {
+	cp := *s
+	if s.Tracker != nil {
+		v := adapter.Values{}
+		for k, x := range s.Tracker.Values {
+			v[k] = x
+		}
+		cp.Tracker = &Binding{Connection: s.Tracker.Connection, Values: v}
+	}
+	cp.Routes = make([]Route, len(s.Routes))
+	for i, r := range s.Routes {
+		cp.Routes[i] = Route{Project: r.Project, When: r.When.Clone()}
+	}
+	if s.Labels != nil {
+		l := *s.Labels
+		l.Skip = append([]string(nil), s.Labels.Skip...)
+		cp.Labels = &l
+	}
+	return &cp
+}
+
+// Clone is a deep copy of the match.
+func (m *Match) Clone() *Match {
+	if m == nil {
+		return nil
+	}
+	cp := &Match{Not: m.Not.Clone()}
+	if m.Fields != nil {
+		cp.Fields = map[string][]string{}
+		for k, v := range m.Fields {
+			cp.Fields[k] = append([]string(nil), v...)
+		}
+	}
+	for _, x := range m.Any {
+		cp.Any = append(cp.Any, x.Clone())
+	}
+	for _, x := range m.All {
+		cp.All = append(cp.All, x.Clone())
+	}
+	return cp
+}

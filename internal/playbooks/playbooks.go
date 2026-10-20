@@ -13,6 +13,13 @@ import (
 //go:embed *.md
 var files embed.FS
 
+//go:embed setup/setup.md
+var setupGuide string
+
+// Setup is the setup guide, a skill for an agent setting the supervisor up with its owner (see `init --with`).
+// It is kept apart from All, so agents working issues never see it. bin is how the agent runs the supervisor.
+func Setup(bin string) string { return strings.ReplaceAll(setupGuide, "{{bin}}", bin) }
+
 // All returns every playbook by name ("work-issue", "sweep").
 func All() map[string]string {
 	out := map[string]string{}

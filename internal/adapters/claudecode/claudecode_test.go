@@ -159,3 +159,22 @@ func TestPrepareWritesThePlugin(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSetupCommand(t *testing.T) {
+	dir := t.TempDir()
+	a := &Agent{binary: "sh", extra: []string{"--verbose"}, env: adapter.Env{DataDir: dir}}
+	cmd, err := a.SetupCommand(adapter.SetupSpec{Cwd: dir, Guide: "---\nname: setup\n---\nhi", Allow: []string{"os config", "os doctor"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"sh", "/open-supervisor:setup", "--plugin-dir", filepath.Join(dir, "claude-setup-plugin"), "--verbose", "--allowedTools", "Bash(os config:*)", "Bash(os doctor:*)"}
+	if strings.Join(cmd.Args, "|") != strings.Join(want, "|") {
+		t.Fatal(cmd.Args)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "claude-setup-plugin", "skills", "setup", "SKILL.md")); err != nil || string(b) != "---\nname: setup\n---\nhi" {
+		t.Fatal(string(b), err)
+	}
+	if _, err := os.Stat(filepath.Join(a.pluginDir, "skills", "setup")); a.pluginDir != "" && err == nil {
+		t.Fatal("the setup skill is in the playbooks' plugin")
+	}
+}

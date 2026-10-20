@@ -148,6 +148,45 @@ func (a *Agent) AttachCommand(spec adapter.AttachSpec) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
+// SetupCommand is an interactive claude with the setup guide as a skill of its own plugin (kept apart from the
+// playbooks, so turns never see it), started on that skill.
+func (a *Agent) SetupCommand(spec adapter.SetupSpec) (*exec.Cmd, error) {
+	dir := filepath.Join(a.env.DataDir, "claude-setup-plugin")
+	if err := os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0o755); err != nil {
+		return nil, err
+	}
+	manifest, _ := json.MarshalIndent(map[string]string{
+		"name":        PluginName,
+		"description": "Sets open-supervisor up",
+		"version":     "1.0.0",
+	}, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, ".claude-plugin", "plugin.json"), manifest, 0o644); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "skills", "setup"), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "skills", "setup", "SKILL.md"), []byte(spec.Guide), 0o644); err != nil {
+		return nil, err
+	}
+	if _, err := exec.LookPath(a.binary); err != nil {
+		return nil, fmt.Errorf("%s isn't on PATH: install Claude Code (npm i -g @anthropic-ai/claude-code)", a.binary)
+	}
+	prompt := "/" + PluginName + ":setup"
+	// The prompt first and the tools last: --allowedTools takes every argument after it.
+	args := append([]string{prompt, "--plugin-dir", dir}, a.extra...)
+	if len(spec.Allow) > 0 {
+		args = append(args, "--allowedTools")
+		for _, p := range spec.Allow {
+			args = append(args, "Bash("+p+":*)")
+		}
+	}
+	cmd := exec.Command(a.binary, args...)
+	cmd.Dir = spec.Cwd
+	cmd.Env = a.childEnv(spec.Env)
+	return cmd, nil
+}
+
 func (a *Agent) prompt(spec adapter.TurnSpec) string {
 	text := "/" + PluginName + ":" + spec.Playbook
 	if spec.Args != "" {

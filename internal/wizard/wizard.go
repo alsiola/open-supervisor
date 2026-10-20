@@ -56,6 +56,28 @@ type wizard struct {
 	isNew bool
 }
 
+// ChooseSetup asks, on a first run, how to set up: the wizard ("") or a coding agent found on PATH (its type),
+// which looks around and asks in its own words. With no agent installed it is the wizard without asking.
+func ChooseSetup() (string, error) {
+	var opts []huh.Option[string]
+	for _, s := range adapter.ForRole(adapter.RoleAgent) {
+		bin := s.Defaults()["binary"]
+		if bin == "" {
+			continue
+		}
+		if _, err := exec.LookPath(bin); err == nil {
+			opts = append(opts, huh.NewOption("with "+s.Title+": it looks at your checkouts and asks about the rest", s.Type))
+		}
+	}
+	if len(opts) == 0 {
+		return "", nil
+	}
+	opts = append(opts, huh.NewOption("with the wizard, a step at a time", ""))
+	how := opts[0].Value
+	err := run(huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("No config yet. How would you like to set up?").Options(opts...).Value(&how))))
+	return how, err
+}
+
 func run(f *huh.Form) error {
 	err := f.WithTheme(forms.Theme()).Run()
 	if errors.Is(err, huh.ErrUserAborted) {
@@ -94,14 +116,15 @@ func Run(path string, existing *config.Config) (*config.Config, error) {
 			huh.NewOption("a coding agent", "agent"),
 			huh.NewOption("a code host", "repo"),
 			huh.NewOption("an issue tracker", "tracker"),
+			huh.NewOption("a tracker shared by several projects (routes)", "sources"),
 			huh.NewOption("telemetry", "telemetry"),
 			huh.NewOption("webhooks (tunnel)", "webhooks"),
 			huh.NewOption("limits and labels", "settings"),
 		).Value(&pick)))); err != nil {
 			return nil, err
 		}
-		byName := map[string]func() error{"agent": w.agent, "repo": w.codeHost, "tracker": w.tracker, "telemetry": w.telemetry, "webhooks": w.webhooks, "projects": w.projects, "settings": w.settings}
-		for _, name := range []string{"agent", "repo", "tracker", "telemetry", "webhooks", "projects", "settings"} {
+		byName := map[string]func() error{"agent": w.agent, "repo": w.codeHost, "tracker": w.tracker, "telemetry": w.telemetry, "webhooks": w.webhooks, "projects": w.projects, "sources": w.sources, "settings": w.settings}
+		for _, name := range []string{"agent", "repo", "tracker", "telemetry", "webhooks", "projects", "sources", "settings"} {
 			for _, p := range pick {
 				if p == name {
 					steps = append(steps, byName[name])
@@ -338,12 +361,81 @@ func (w *wizard) projects() error {
 			fmt.Println(bad.Render("✗ " + err.Error()))
 		} else {
 			fmt.Println(ok.Render("✓ added " + p.Name + " (" + p.Root + ")"))
+			if sd := d.Follow(w.cfg, p); sd != nil {
+				if err := w.source(sd); err != nil {
+					return err
+				}
+			}
 		}
 		more, err := w.confirm("Add another project?", false)
 		if err != nil || !more {
 			return err
 		}
 	}
+}
+
+// source asks for a shared tracker's routes, shows where the open issues would go, and asks again until
+// they look right.
+func (w *wizard) source(sd *forms.SourceDraft) error {
+	steps := sd.Steps(w.cfg)
+	for {
+		for _, step := range steps {
+			if f := step(); f != nil {
+				if err := run(f); err != nil {
+					return err
+				}
+			}
+		}
+		if !sd.Accepted {
+			return nil
+		}
+		if _, err := sd.Routes(); err != nil {
+			fmt.Println(bad.Render("✗ " + err.Error()))
+		} else if keep, err := w.confirm("Use these routes?", true); err != nil {
+			return err
+		} else if keep {
+			break
+		}
+		steps = sd.RouteSteps(w.cfg)
+	}
+	note, err := sd.Apply(w.cfg)
+	if err != nil {
+		fmt.Println(bad.Render("✗ " + err.Error()))
+		return nil
+	}
+	fmt.Println(ok.Render("✓ " + strings.TrimSpace(sd.Name) + " feeds " + strings.Join(sd.Projects, ", ")))
+	if note != "" {
+		fmt.Println(dim.Render(note))
+	}
+	return nil
+}
+
+// sources adds a shared tracker, or changes one.
+func (w *wizard) sources() error {
+	w.header("Shared trackers")
+	if len(w.cfg.ConnectionNames(adapter.RoleTracker)) == 0 || len(w.cfg.Projects) == 0 {
+		fmt.Println(bad.Render("A shared tracker needs an issue tracker and projects to feed; set those up first."))
+		return nil
+	}
+	pick := ""
+	if len(w.cfg.SourceList) > 0 {
+		var opts []huh.Option[string]
+		for _, s := range w.cfg.SourceList {
+			opts = append(opts, huh.NewOption("change "+s.Name, s.Name))
+		}
+		opts = append(opts, huh.NewOption("share another tracker", ""))
+		pick = opts[0].Value
+		if err := run(huh.NewForm(huh.NewGroup(huh.NewSelect[string]().Title("Which?").Options(opts...).Value(&pick)))); err != nil {
+			return err
+		}
+	}
+	var src *config.Source
+	for _, s := range w.cfg.SourceList {
+		if s.Name == pick {
+			src = s
+		}
+	}
+	return w.source(forms.NewSourceDraft(w.cfg, src))
 }
 
 func (w *wizard) hasRoot(dir string) bool {
@@ -403,6 +495,12 @@ func Summary(cfg *config.Config) string {
 	}
 	if len(cfg.Projects) == 0 {
 		b.WriteString("  none yet\n")
+	}
+	for _, src := range cfg.SourceList {
+		fmt.Fprintf(&b, "Source %s:\n", src.Name)
+		for _, r := range src.Routes {
+			fmt.Fprintf(&b, "  → %s when %s\n", r.Project, r.When.String())
+		}
 	}
 	fmt.Fprintf(&b, "Turns at once: %d; issues per project: %d", cfg.Settings.MaxTurns, cfg.Settings.MaxOpen)
 	return b.String()

@@ -31,12 +31,45 @@ There are single binaries for macOS, Linux and Windows (amd64 and arm64) on the 
 ## Start
 
 ```sh
-open-supervisor init      # the wizard: agent, code host, tracker, telemetry, webhooks, projects
-open-supervisor doctor    # checks every connection, project and source, read-only
-open-supervisor           # the TUI
+open-supervisor init --with claude-code   # your coding agent sets it up with you
+open-supervisor init                      # or the wizard: agent, code host, tracker, telemetry, webhooks, projects
+open-supervisor doctor                    # checks every connection, project and source, read-only
+open-supervisor                           # the TUI
 ```
 
-The first `open-supervisor` with no config starts the wizard itself. Everything the wizard sets can be changed later from the TUI: press `,`.
+The first `open-supervisor` with no config asks which way to set up: with a coding agent it finds installed, or with the wizard. Everything set up can be changed later from the TUI (press `,`), the wizard, or `open-supervisor config`.
+
+### Setting up with your agent
+
+`init --with claude-code` starts Claude Code in your terminal with a setup skill (it isn't one of the playbooks agents get for turns). The agent:
+
+1. Looks for your checkouts and their remotes, and asks which are in scope.
+2. Asks which services you use, and how issues map to repos.
+3. Writes the config with `open-supervisor config` commands, testing each connection as it adds it.
+4. Reads the tracker's open issues to suggest routes.
+5. Finishes with `doctor`.
+
+The supervisor's own read and config commands run without asking. Anything else the agent runs asks you first, as usual.
+
+It's an ordinary interactive Claude Code session: you answer its questions, and can stop it at any point and pick up later with the same command. `--with` also takes the name of an agent connection you've already configured.
+
+Tokens never pass through the agent. It asks you to give each one as an `env:` or `cmd:` reference, or to run `open-supervisor config secret <connection> <field>` in a terminal of your own. That command asks for the token without showing it and stores it in the keyring.
+
+### Changing the config from the command line
+
+`open-supervisor config` changes the config one step at a time, for scripts and agents. Each command saves at once, then lists what the config still lacks (`doctor` checks the whole config when you're done):
+
+```sh
+open-supervisor config connection set linear --type linear --set token=env:LINEAR_API_KEY   # tested as it's saved
+open-supervisor config project set web --root ~/Code/web --code github --source linear      # the repo is read from the checkout
+open-supervisor config source set linear --tracker linear --set team=ENG --unrouted label
+open-supervisor config source inspect linear                   # the properties its open issues carry, and where routes send them
+open-supervisor config route set linear web --when labels=web,frontend
+open-supervisor config route set linear api                    # everything else
+open-supervisor config set settings.maxTurns 2                 # any value, by its dotted path in `config show`
+open-supervisor config get projects.web
+open-supervisor adapters linear                                # an adapter's connection and binding fields
+```
 
 Other ways to run it:
 
@@ -133,7 +166,16 @@ A project with a `tracker:` of its own takes every issue in it. When one tracker
 - **Labels belong to the source.** The claimed, skip and status labels live on the shared tracker, so a source sets them with its own `labels:` and the projects it feeds take them from it.
 - **One source per project.** A project takes issues from one place: its own tracker, or one source. A source's routes can name it more than once.
 
-The config editor (`,`) can set a project to take its issues from a source; the sources themselves are edited in the file. Webhook URLs are `/hooks/<project or source>/<connection>`, and a project with its own tracker keeps the URL it had.
+Sources can be set up in four ways:
+- **The wizard.** Adding a project whose tracker reads the same issues as another project's offers to share it. Each way asks:
+  - which property splits the issues;
+  - which values send an issue to each project, suggesting the values the open issues carry;
+  - and then shows where the open issues would go.
+- **The TUI's config editor** (`,`, then the Sources tab) does the same, and edits sources that already exist.
+- **The `config` commands.**
+- **By hand, in the file.**
+
+Routes using `any:`, `all:` or `not:` are kept as written; the forms ask only about projects that are new to the source. Webhook URLs are `/hooks/<project or source>/<connection>`, and a project with its own tracker keeps the URL it had.
 
 ### Jobs on webhooks
 

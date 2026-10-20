@@ -242,6 +242,22 @@ type AttachSpec struct {
 	Session string
 }
 
+// SetupAgent is an agent that can set the supervisor up: an interactive session, started with the setup
+// guide, that asks its owner about their services and repos and writes the config through `config` commands.
+type SetupAgent interface {
+	SetupCommand(spec SetupSpec) (*exec.Cmd, error)
+}
+
+// SetupSpec is a setup session to start.
+type SetupSpec struct {
+	Cwd string
+	Env []string
+	// Guide is the setup skill, frontmatter included.
+	Guide string
+	// Allow are command prefixes the session may run without asking ("open-supervisor config").
+	Allow []string
+}
+
 // Transcripts is an agent whose sessions can be read as they run.
 type Transcripts interface {
 	Transcript(cwd, session string) []core.Entry

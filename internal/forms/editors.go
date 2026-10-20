@@ -122,6 +122,9 @@ func validName(s string) bool {
 }
 
 // Spec is the draft's adapter type.
+// ValidName reports whether a name may be used for a connection, project or source.
+func ValidName(s string) bool { return validName(s) }
+
 func (d *ConnectionDraft) Spec() (adapter.Spec, bool) { return adapter.Lookup(d.Type) }
 
 // FieldGroups ask for the connection's fields. Call after the type is known.
@@ -264,8 +267,8 @@ func RoleNoun(r adapter.Role) string {
 
 // ---- projects -------------------------------------------------------------------------------------------
 
-// FromSource is the tracker choice for a project fed by one of the config's sources (edited in the file).
-const FromSource = "@source"
+// FromSource prefixes the tracker choice for a project fed by one of the config's sources: "@source:linear".
+const FromSource = "@source:"
 
 // ProjectDraft is a project being added or edited.
 type ProjectDraft struct {
@@ -321,8 +324,8 @@ func NewProjectDraft(cfg *config.Config, p *config.Project, dir string) *Project
 	}
 	if p.Tracker != nil {
 		d.Tracker = p.Tracker.Connection
-	} else if cfg.SourceFor(p) != nil {
-		d.Tracker = FromSource
+	} else if src := cfg.SourceFor(p); src != nil {
+		d.Tracker = FromSource + src.Name
 	}
 	return d
 }
@@ -335,20 +338,7 @@ func RemoveProject(cfg *config.Config, name string) {
 			break
 		}
 	}
-	var sources []*config.Source
-	for _, src := range cfg.SourceList {
-		var routes []config.Route
-		for _, r := range src.Routes {
-			if r.Project != name {
-				routes = append(routes, r)
-			}
-		}
-		src.Routes = routes
-		if len(routes) > 0 {
-			sources = append(sources, src)
-		}
-	}
-	cfg.SourceList = sources
+	dropRoutes(cfg, name, nil)
 }
 
 // RoutedTo reports whether one of the config's sources has a route to the project.
@@ -457,8 +447,13 @@ func (d *ProjectDraft) BasicGroups(cfg *config.Config) []*huh.Group {
 		return out
 	}
 	trackers := conns(adapter.RoleTracker)
-	if len(cfg.SourceList) > 0 {
-		trackers = append([]huh.Option[string]{huh.NewOption("from a source's routes (sources: in the config file)", FromSource)}, trackers...)
+	for i := len(cfg.SourceList) - 1; i >= 0; i-- {
+		src := cfg.SourceList[i]
+		conn := ""
+		if src.Tracker != nil {
+			conn = ", shared " + src.Tracker.Connection
+		}
+		trackers = append([]huh.Option[string]{huh.NewOption("from "+src.Name+"'s routes"+conn, FromSource+src.Name)}, trackers...)
 	}
 	return []*huh.Group{
 		huh.NewGroup(
@@ -529,7 +524,7 @@ func (d *ProjectDraft) BindingGroups(cfg *config.Config) []*huh.Group {
 		}
 	}
 	d.TrackerFields = nil
-	if c, ok := cfg.Connections[d.Tracker]; ok && d.Tracker != FromSource {
+	if c, ok := cfg.Connections[d.Tracker]; ok {
 		if spec, ok := adapter.Lookup(c.Type); ok && len(spec.Binding[adapter.RoleTracker]) > 0 {
 			values := d.bindingValues(d.project, "tracker")
 			if len(values) == 0 && d.Tracker == d.Repo && d.RepoFields != nil {
@@ -621,8 +616,9 @@ func (d *ProjectDraft) Apply(cfg *config.Config) (*config.Project, error) {
 	if d.Repo == "" || d.Tracker == "" {
 		return nil, errors.New("a project needs a code host and an issue tracker connection")
 	}
-	if d.Tracker == FromSource && !RoutedTo(cfg, d.Original) && !RoutedTo(cfg, name) {
-		return nil, fmt.Errorf("no source routes to %s yet: add a route to it under sources: in %s, or pick a tracker", name, cfg.Path)
+	from, fromSource := strings.CutPrefix(d.Tracker, FromSource)
+	if fromSource && findSource(cfg, from) == nil {
+		return nil, fmt.Errorf("no source called %s", from)
 	}
 	p := d.project
 	if p == nil {
@@ -670,9 +666,6 @@ func (d *ProjectDraft) Apply(cfg *config.Config) (*config.Project, error) {
 		}
 	}
 	p.Tracker = &config.Binding{Connection: d.Tracker, Values: trackerValues}
-	if d.Tracker == FromSource {
-		p.Tracker = nil
-	}
 	if d.Original != "" && name != d.Original {
 		for _, src := range cfg.SourceList {
 			for i := range src.Routes {
@@ -681,6 +674,14 @@ func (d *ProjectDraft) Apply(cfg *config.Config) (*config.Project, error) {
 				}
 			}
 		}
+	}
+	if fromSource {
+		// Routes to it from any other source go; the chosen source's are asked for next (see Follow).
+		p.Tracker = nil
+		dropRoutes(cfg, name, findSource(cfg, from))
+	} else {
+		// Its own tracker: no source feeds it any more.
+		dropRoutes(cfg, name, nil)
 	}
 	replaced := false
 	for i, q := range cfg.Projects {
