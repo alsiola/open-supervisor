@@ -7,6 +7,7 @@ import (
 	_ "github.com/alsiola/open-supervisor/internal/adapters/claudecode"
 	_ "github.com/alsiola/open-supervisor/internal/adapters/github"
 	_ "github.com/alsiola/open-supervisor/internal/adapters/jira"
+	_ "github.com/alsiola/open-supervisor/internal/adapters/linear"
 	_ "github.com/alsiola/open-supervisor/internal/adapters/posthog"
 	_ "github.com/alsiola/open-supervisor/internal/adapters/tunnel"
 )

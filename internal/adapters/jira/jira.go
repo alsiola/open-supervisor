@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,8 +51,11 @@ func init() {
 		},
 		Binding: map[adapter.Role][]adapter.Field{
 			adapter.RoleTracker: {
-				{Key: "project", Label: "Project key", Type: adapter.Text, Required: true, Placeholder: "PROJ"},
+				{Key: "project", Label: "Project key", Type: adapter.Text, Required: true, Placeholder: "PROJ",
+					Help: "Several, comma-separated, for a source that routes them to projects: API, WEB."},
 				{Key: "jql", Label: "Extra JQL", Type: adapter.Text, Help: "ANDed with the project and open filter, e.g. component = Web."},
+				{Key: "fields", Label: "Extra fields for routes", Type: adapter.Text,
+					Help: "Comma-separated field ids routes can match on, e.g. customfield_10010."},
 				transition("transitionClaimed", "Status when claimed"),
 				transition("transitionBuilding", "Status while building"),
 				transition("transitionReview", "Status when up for review"),
@@ -123,29 +127,73 @@ func (c *Conn) Check(ctx context.Context) (string, error) {
 	return "signed in as " + me.DisplayName, nil
 }
 
-// Tracker binds the site to one project's issues.
+var keyRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+
+// Tracker binds the site to one project's issues, or several projects' for a source that routes them.
 func (c *Conn) Tracker(b adapter.Values, p adapter.ProjectInfo) (adapter.Tracker, error) {
-	key := strings.ToUpper(strings.TrimSpace(b.Get("project", "")))
-	if !regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`).MatchString(key) {
-		return nil, fmt.Errorf("project key %q isn't a Jira key", key)
+	var keys, quoted []string
+	for _, k := range strings.Split(b.Get("project", ""), ",") {
+		k = strings.ToUpper(strings.TrimSpace(k))
+		if k == "" {
+			continue
+		}
+		if !keyRe.MatchString(k) {
+			return nil, fmt.Errorf("project key %q isn't a Jira key", k)
+		}
+		keys = append(keys, k)
+		quoted = append(quoted, regexp.QuoteMeta(k))
 	}
-	t := &Tracker{c: c, project: key, jql: strings.TrimSpace(b.Get("jql", "")), statuses: map[string]string{}}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("no project key")
+	}
+	t := &Tracker{c: c, projects: keys, project: strings.Join(keys, ","), jql: strings.TrimSpace(b.Get("jql", "")), statuses: map[string]string{}}
 	for state, field := range stateFields {
 		if s := strings.TrimSpace(b.Get(field, "")); s != "" {
 			t.statuses[state] = s
 		}
 	}
-	t.refRe = regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(key) + `-\d+\b`)
+	for _, f := range strings.Split(b.Get("fields", ""), ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			t.extra = append(t.extra, f)
+		}
+	}
+	t.refRe = regexp.MustCompile(`(?i)\b(?:` + strings.Join(quoted, "|") + `)-\d+\b`)
 	return t, nil
 }
 
-// Tracker is one Jira project's issues.
+// Tracker is one or more Jira projects' issues.
 type Tracker struct {
 	c        *Conn
+	projects []string
+	// project names them for the log and the hook: "API" or "API,WEB".
 	project  string
 	jql      string
 	statuses map[string]string
 	refRe    *regexp.Regexp
+	// extra are fields read for routes beyond the ones every issue gets.
+	extra []string
+}
+
+// owns reports whether an issue key is in one of the tracker's projects.
+func (t *Tracker) owns(key string) bool {
+	for _, p := range t.projects {
+		if strings.HasPrefix(strings.ToUpper(key), p+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+// projectJQL selects the tracker's projects.
+func (t *Tracker) projectJQL() string {
+	if len(t.projects) == 1 {
+		return fmt.Sprintf("project = %q", t.projects[0])
+	}
+	q := make([]string, len(t.projects))
+	for i, p := range t.projects {
+		q[i] = fmt.Sprintf("%q", p)
+	}
+	return "project in (" + strings.Join(q, ", ") + ")"
 }
 
 func (t *Tracker) Describe() string { return "jira " + t.project }
@@ -190,17 +238,41 @@ type rawStatus struct {
 	} `json:"statusCategory"`
 }
 
+type rawNamed struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
+}
+
+type rawFields struct {
+	Summary     string     `json:"summary"`
+	Description string     `json:"description"`
+	Labels      []string   `json:"labels"`
+	Status      rawStatus  `json:"status"`
+	Created     string     `json:"created"`
+	Updated     string     `json:"updated"`
+	Reporter    *rawUser   `json:"reporter"`
+	Assignee    *rawUser   `json:"assignee"`
+	Project     *rawNamed  `json:"project"`
+	IssueType   *rawNamed  `json:"issuetype"`
+	Priority    *rawNamed  `json:"priority"`
+	Components  []rawNamed `json:"components"`
+	FixVersions []rawNamed `json:"fixVersions"`
+	Parent      *rawNamed  `json:"parent"`
+	// all are every field as it came, for the extra ones routes match on.
+	all map[string]json.RawMessage
+}
+
+func (f *rawFields) UnmarshalJSON(data []byte) error {
+	type plain rawFields
+	if err := json.Unmarshal(data, (*plain)(f)); err != nil {
+		return err
+	}
+	return json.Unmarshal(data, &f.all)
+}
+
 type rawIssue struct {
-	Key    string `json:"key"`
-	Fields struct {
-		Summary     string    `json:"summary"`
-		Description string    `json:"description"`
-		Labels      []string  `json:"labels"`
-		Status      rawStatus `json:"status"`
-		Created     string    `json:"created"`
-		Updated     string    `json:"updated"`
-		Reporter    *rawUser  `json:"reporter"`
-	} `json:"fields"`
+	Key       string    `json:"key"`
+	Fields    rawFields `json:"fields"`
 	Changelog *struct {
 		Histories []rawHistory `json:"histories"`
 	} `json:"changelog"`
@@ -219,7 +291,12 @@ type rawItem struct {
 	ToString   string `json:"toString"`
 }
 
-const issueFields = "summary,labels,status,created,updated,description,reporter"
+const issueFields = "summary,labels,status,created,updated,description,reporter,assignee,project,issuetype,priority,components,fixVersions,parent"
+
+// fields are the fields to read: every issue's, and the extra ones routes match on.
+func (t *Tracker) fields() []string {
+	return append(strings.Split(issueFields, ","), t.extra...)
+}
 
 func parseTime(s string) time.Time {
 	for _, l := range []string{"2006-01-02T15:04:05.000-0700", "2006-01-02T15:04:05-0700", time.RFC3339Nano} {
@@ -241,14 +318,74 @@ func (t *Tracker) issue(r rawIssue) core.Issue {
 		CreatedAt: parseTime(r.Fields.Created),
 		UpdatedAt: parseTime(r.Fields.Updated),
 	}
-	if r.Fields.Reporter != nil {
-		i.Author = r.Fields.Reporter.DisplayName
+	f := r.Fields
+	if f.Reporter != nil {
+		i.Author = f.Reporter.DisplayName
+	}
+	if f.Project != nil {
+		i.SetAttr("project", f.Project.Key, f.Project.Name)
+	}
+	if f.IssueType != nil {
+		i.SetAttr("issuetype", f.IssueType.Name)
+	}
+	if f.Priority != nil {
+		i.SetAttr("priority", f.Priority.Name)
+	}
+	if f.Assignee != nil {
+		i.SetAttr("assignee", f.Assignee.DisplayName, f.Assignee.EmailAddress)
+	}
+	if f.Parent != nil {
+		i.SetAttr("parent", f.Parent.Key)
+	}
+	i.SetAttr("status", f.Status.Name)
+	for _, c := range f.Components {
+		i.SetAttr("components", c.Name)
+	}
+	for _, v := range f.FixVersions {
+		i.SetAttr("fixVersions", v.Name)
+	}
+	for _, id := range t.extra {
+		i.SetAttr(id, flatten(f.all[id])...)
 	}
 	return i
 }
 
+// flatten reads a field's value as strings: a string or number as it is, an option or user by its value or
+// name, a list as each of its items.
+func flatten(raw json.RawMessage) []string {
+	var v any
+	if len(raw) == 0 || json.Unmarshal(raw, &v) != nil {
+		return nil
+	}
+	var out []string
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case string:
+			out = append(out, x)
+		case float64:
+			out = append(out, strconv.FormatFloat(x, 'f', -1, 64))
+		case bool:
+			out = append(out, strconv.FormatBool(x))
+		case []any:
+			for _, y := range x {
+				walk(y)
+			}
+		case map[string]any:
+			for _, k := range []string{"value", "name", "key", "displayName"} {
+				if s, ok := x[k].(string); ok && s != "" {
+					out = append(out, s)
+					return
+				}
+			}
+		}
+	}
+	walk(v)
+	return out
+}
+
 func (t *Tracker) query() string {
-	q := fmt.Sprintf("project = %q AND statusCategory != Done", t.project)
+	q := t.projectJQL() + " AND statusCategory != Done"
 	if t.jql != "" {
 		q += " AND (" + t.jql + ")"
 	}
@@ -275,7 +412,7 @@ func (t *Tracker) searchJQL(ctx context.Context) ([]rawIssue, error) {
 	var all []rawIssue
 	token := ""
 	for n := 0; n < 50; n++ {
-		body := map[string]any{"jql": t.query(), "fields": strings.Split(issueFields, ","), "maxResults": 100}
+		body := map[string]any{"jql": t.query(), "fields": t.fields(), "maxResults": 100}
 		if token != "" {
 			body["nextPageToken"] = token
 		}
@@ -299,7 +436,7 @@ func (t *Tracker) searchJQL(ctx context.Context) ([]rawIssue, error) {
 func (t *Tracker) searchLegacy(ctx context.Context) ([]rawIssue, error) {
 	var all []rawIssue
 	for start := 0; start < 5000; {
-		body := map[string]any{"jql": t.query(), "fields": strings.Split(issueFields, ","), "maxResults": 100, "startAt": start}
+		body := map[string]any{"jql": t.query(), "fields": t.fields(), "maxResults": 100, "startAt": start}
 		var page struct {
 			Issues []rawIssue `json:"issues"`
 			Total  int        `json:"total"`
@@ -318,7 +455,7 @@ func (t *Tracker) searchLegacy(ctx context.Context) ([]rawIssue, error) {
 
 func (t *Tracker) Issue(ctx context.Context, key string) (core.Issue, error) {
 	var r rawIssue
-	if _, err := t.c.api.Do(ctx, "GET", "rest/api/2/issue/"+url.PathEscape(key)+"?fields="+issueFields, nil, &r); err != nil {
+	if _, err := t.c.api.Do(ctx, "GET", "rest/api/2/issue/"+url.PathEscape(key)+"?fields="+url.QueryEscape(strings.Join(t.fields(), ",")), nil, &r); err != nil {
 		return core.Issue{}, err
 	}
 	return t.issue(r), nil
@@ -549,7 +686,7 @@ func (t *Tracker) EnsureWebhook(ctx context.Context, hookURL, secret, existing s
 		"name":        "open-supervisor " + t.project,
 		"url":         hookURL,
 		"events":      []string{"jira:issue_created", "jira:issue_updated", "comment_created"},
-		"filters":     map[string]string{"issue-related-events-section": "project = " + t.project},
+		"filters":     map[string]string{"issue-related-events-section": t.projectJQL()},
 		"secret":      secret,
 		"excludeBody": false,
 	}
@@ -584,7 +721,7 @@ func (t *Tracker) EnsureWebhook(ctx context.Context, hookURL, secret, existing s
 
 func (t *Tracker) manual(err error, hookURL string) error {
 	if adapter.IsStatus(err, http.StatusUnauthorized) || adapter.IsStatus(err, http.StatusForbidden) {
-		return fmt.Errorf("only a Jira administrator can register webhooks: add one by hand in Jira's settings (System → WebHooks) for %s with the events issue created, issue updated and comment created, JQL `project = %s` and the secret in the supervisor's state dir (webhook-secret), or rely on the reconcile", hookURL, t.project)
+		return fmt.Errorf("only a Jira administrator can register webhooks: add one by hand in Jira's settings (System → WebHooks) for %s with the events issue created, issue updated and comment created, JQL `%s` and the secret in the supervisor's state dir (webhook-secret), or rely on the reconcile", hookURL, t.projectJQL())
 	}
 	return err
 }
@@ -609,7 +746,7 @@ func (t *Tracker) ParseWebhook(h http.Header, body []byte, secret string) ([]cor
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil, fmt.Errorf("jira: a delivery that isn't JSON: %w", err)
 	}
-	if p.Issue == nil || !strings.HasPrefix(strings.ToUpper(p.Issue.Key), t.project+"-") {
+	if p.Issue == nil || !t.owns(p.Issue.Key) {
 		return nil, nil
 	}
 	issue := t.issue(*p.Issue)
@@ -617,22 +754,24 @@ func (t *Tracker) ParseWebhook(h http.Header, body []byte, secret string) ([]cor
 	case "jira:issue_created":
 		return []core.Signal{{Type: core.SigIssueChanged, Key: issue.Key, Issue: &issue}}, nil
 	case "jira:issue_updated":
-		var out []core.Signal
-		if p.Changelog != nil {
-			for _, it := range p.Changelog.Items {
-				switch it.Field {
-				case "status":
-					if !issue.Open {
-						out = append(out, core.Signal{Type: core.SigIssueClosed, Key: issue.Key})
-					} else if t.wasDone(it) {
-						out = append(out, core.Signal{Type: core.SigIssueReopened, Key: issue.Key, Issue: &issue})
-					}
-				case "labels":
-					out = append(out, core.Signal{Type: core.SigIssueChanged, Key: issue.Key, Issue: &issue})
-				}
-			}
+		if p.Changelog == nil {
+			return nil, nil
 		}
-		return out, nil
+		changed := false
+		for _, it := range p.Changelog.Items {
+			if it.Field == "status" && !issue.Open {
+				return []core.Signal{{Type: core.SigIssueClosed, Key: issue.Key}}, nil
+			}
+			if it.Field == "status" && t.wasDone(it) {
+				return []core.Signal{{Type: core.SigIssueReopened, Key: issue.Key, Issue: &issue}}, nil
+			}
+			// Any other change (labels, components, a move to Todo) can make it claimable or change its route.
+			changed = true
+		}
+		if !changed {
+			return nil, nil
+		}
+		return []core.Signal{{Type: core.SigIssueChanged, Key: issue.Key, Issue: &issue}}, nil
 	case "comment_created":
 		if p.Comment == nil {
 			return nil, nil

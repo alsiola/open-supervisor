@@ -287,13 +287,11 @@ func (e *editor) remove() {
 			return
 		}
 		e.confirm = fmt.Sprintf("Remove the project %s from the config? Its state stays on disk. (y/n)", p.Name)
+		if forms.RoutedTo(e.cfg, p.Name) {
+			e.confirm = fmt.Sprintf("Remove the project %s, and the routes to it, from the config? Its state stays on disk. (y/n)", p.Name)
+		}
 		e.onYes = func() tea.Cmd {
-			for i, q := range e.cfg.Projects {
-				if q == p {
-					e.cfg.Projects = append(e.cfg.Projects[:i], e.cfg.Projects[i+1:]...)
-					break
-				}
-			}
+			forms.RemoveProject(e.cfg, p.Name)
 			e.dirty = true
 			e.sel[2] = max(0, min(e.sel[2], len(e.cfg.Projects)-1))
 			return nil
@@ -479,6 +477,8 @@ func (e *editor) projectLines() []string {
 		}
 		if p.Tracker != nil {
 			tracker = p.Tracker.Connection
+		} else if src := e.cfg.SourceFor(p); src != nil {
+			tracker = "via " + src.Name
 		}
 		name := p.Name
 		if p.Disabled {

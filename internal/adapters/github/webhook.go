@@ -145,9 +145,10 @@ func (t *Tracker) signals(event string, p *payload) []core.Signal {
 		if p.Issue == nil || p.Issue.PullRequest != nil {
 			return nil
 		}
-		issue := p.Issue.issue()
+		issue := p.Issue.issue(t.repo)
 		switch p.Action {
-		case "opened", "labeled", "unlabeled":
+		// Anything a route might match on can change where an issue goes.
+		case "opened", "labeled", "unlabeled", "edited", "milestoned", "demilestoned", "assigned", "unassigned", "typed", "untyped":
 			return []core.Signal{{Type: core.SigIssueChanged, Key: issue.Key, Issue: &issue}}
 		case "closed":
 			return []core.Signal{{Type: core.SigIssueClosed, Key: issue.Key}}

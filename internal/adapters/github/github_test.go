@@ -143,7 +143,7 @@ func TestMarkers(t *testing.T) {
 			t.Errorf("agentMark(%q) = %+v, want %+v", body, got, want)
 		}
 	}
-	tr := &Tracker{&binding{c: &conn{web: "https://github.com"}, repo: "octo/widgets"}}
+	tr := &Tracker{binding: &binding{c: &conn{web: "https://github.com"}, repo: "octo/widgets"}}
 	at := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
 	if got, ok := core.RunAtIn(tr.RunAtMarker(at)); !ok || !got.Equal(at) {
 		t.Errorf("runAt marker round trip: %v %v", got, ok)
@@ -153,6 +153,17 @@ func TestMarkers(t *testing.T) {
 	}
 	if len(tr.RefsIn(tr.RefFor("5"))) != 1 {
 		t.Errorf("RefFor isn't read back by RefsIn")
+	}
+	if got := tr.RefsIn("Closes octo/widgets#7 and fixes other/repo#8"); strings.Join(got, ",") != "7" {
+		t.Errorf("full refs: %v", got)
+	}
+	// A planning repo's issues, worked in other repositories: only full references are its own.
+	shared := &Tracker{binding: tr.binding, shared: true}
+	if ref := shared.RefFor("5"); ref != "Closes octo/widgets#5" {
+		t.Errorf("shared RefFor = %q", ref)
+	}
+	if got := shared.RefsIn("Closes #3, closes Octo/Widgets#5"); strings.Join(got, ",") != "5" {
+		t.Errorf("shared RefsIn = %v", got)
 	}
 }
 

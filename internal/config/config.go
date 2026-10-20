@@ -27,6 +27,8 @@ type Config struct {
 	Settings    Settings               `yaml:"settings"`
 	Connections map[string]*Connection `yaml:"connections"`
 	Projects    []*Project             `yaml:"projects"`
+	// SourceList are trackers that feed several projects through routes; see Source.
+	SourceList []*Source `yaml:"sources,omitempty"`
 
 	// Path is where the config was read from and is saved to.
 	Path string `yaml:"-"`
@@ -73,6 +75,8 @@ type Labels struct {
 	Help      string   `yaml:"help,omitempty"`
 	Review    string   `yaml:"review,omitempty"`
 	Done      string   `yaml:"done,omitempty"`
+	// Unrouted marks an issue no route of its source takes, on sources that ask for it.
+	Unrouted string `yaml:"unrouted,omitempty"`
 }
 
 // Merge fills the empty labels from base.
@@ -89,6 +93,7 @@ func (l Labels) Merge(base Labels) Labels {
 		Help:      pick(l.Help, base.Help),
 		Review:    pick(l.Review, base.Review),
 		Done:      pick(l.Done, base.Done),
+		Unrouted:  pick(l.Unrouted, base.Unrouted),
 		Skip:      l.Skip,
 	}
 	if out.Skip == nil {
@@ -132,9 +137,11 @@ type Project struct {
 	Name string `yaml:"name"`
 	Root string `yaml:"root"`
 	// Agent is the agent connection, when not the default.
-	Agent   string   `yaml:"agent,omitempty"`
-	Repo    *Binding `yaml:"repo"`
-	Tracker *Binding `yaml:"tracker"`
+	Agent string   `yaml:"agent,omitempty"`
+	Repo  *Binding `yaml:"repo"`
+	// Tracker is where the project's issues are, when it has a tracker of its own; a project fed by one of the
+	// config's sources has none.
+	Tracker *Binding `yaml:"tracker,omitempty"`
 	Labels  *Labels  `yaml:"labels,omitempty"`
 	Branch  string   `yaml:"branch,omitempty"`
 	// BaseBranch is where new branches start and PRs go; empty asks the code host.
@@ -207,6 +214,7 @@ func DefaultSettings() Settings {
 			Help:      "agent-needs-help",
 			Review:    "ready-for-review",
 			Done:      "might-be-done",
+			Unrouted:  "needs-routing",
 		},
 		Branch:                "agent/issue-{key}",
 		SweepAt:               "08:41",
@@ -331,6 +339,11 @@ func (c *Config) fill() {
 			}
 		}
 	}
+	for _, s := range c.SourceList {
+		if s.Tracker != nil && s.Tracker.Values == nil {
+			s.Tracker.Values = adapter.Values{}
+		}
+	}
 }
 
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
@@ -391,10 +404,12 @@ func (c *Config) Validate() error {
 		} else {
 			role(where+" repo", p.Repo.Connection, adapter.RoleRepo)
 		}
-		if p.Tracker == nil || p.Tracker.Connection == "" {
-			errs = append(errs, where+": needs a tracker connection")
-		} else {
-			role(where+" tracker", p.Tracker.Connection, adapter.RoleTracker)
+		if p.Tracker != nil {
+			if p.Tracker.Connection == "" {
+				errs = append(errs, where+": needs a tracker connection")
+			} else {
+				role(where+" tracker", p.Tracker.Connection, adapter.RoleTracker)
+			}
 		}
 		agent := p.Agent
 		if agent == "" {
@@ -413,6 +428,7 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	c.validateSources(role, &errs)
 	if len(errs) > 0 {
 		sort.Strings(errs)
 		return fmt.Errorf("%s:\n  %s", c.Path, strings.Join(errs, "\n  "))
@@ -458,8 +474,13 @@ func (c *Config) AgentFor(p *Project) string {
 	return c.Settings.Agent
 }
 
-// LabelsFor are a project's labels.
+// LabelsFor are a project's labels: its source's, when a source feeds it.
 func (c *Config) LabelsFor(p *Project) Labels {
+	if p.Tracker == nil {
+		if s := c.SourceFor(p); s != nil {
+			return c.SourceLabels(s)
+		}
+	}
 	if p.Labels == nil {
 		return c.Settings.Labels
 	}

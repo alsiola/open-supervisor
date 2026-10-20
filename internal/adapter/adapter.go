@@ -59,6 +59,9 @@ type ProjectInfo struct {
 	Root string
 	// Remote is the checkout's origin URL, when it has one.
 	Remote string
+	// Shared: a tracker bound for a source that feeds several projects, so PRs in other repositories refer to
+	// its issues (GitHub then writes owner/repo#12, not #12). Name is the source's; Root and Remote are empty.
+	Shared bool
 }
 
 // RepoProvider is a connection that can host code.

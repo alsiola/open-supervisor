@@ -1,7 +1,8 @@
 // Package engine is the supervisor: one process over every project in the config. It owns what the projects
 // share (the webhook server and its tunnel, the cap on turns running at once, the agents' usage windows,
-// telemetry and the daily sweep) and hands everything else to each Project. Webhooks make it quick; a
-// reconcile every few minutes makes it right.
+// telemetry and the daily sweep) and hands everything else to each Project. Issues reach projects through
+// Sources: a tracker read once and routed to the projects it feeds. Webhooks make it quick; a reconcile every
+// few minutes makes it right.
 package engine
 
 import (
@@ -51,6 +52,8 @@ type Supervisor struct {
 	cfg      *config.Config
 	conns    *Connections
 	projects []*Project
+	sources  []*Source
+	hooks    map[string][]*hookGroup
 	sinks    []adapter.Telemetry
 	hookURL  string
 	usage    map[string]*core.Usage
@@ -84,11 +87,13 @@ func New(cfg *config.Config, opts Options) (*Supervisor, error) {
 	}
 	s.cfg = cfg
 	s.conns = OpenConnections(cfg, s.adapterEnv())
-	projects, err := s.buildProjects(cfg, nil)
+	projects, sources, err := s.build(cfg, nil, nil)
 	if err != nil {
 		return nil, err
 	}
 	s.projects = projects
+	s.sources = sources
+	s.hooks = buildHooks(sources, projects)
 	s.sinks = s.openSinks(cfg)
 	return s, nil
 }
@@ -115,6 +120,22 @@ func (s *Supervisor) Projects() []*Project {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]*Project(nil), s.projects...)
+}
+
+// Sources are where the projects' issues come from, the config's own first.
+func (s *Supervisor) Sources() []*Source {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]*Source(nil), s.sources...)
+}
+
+// Unrouted counts the open issues no route takes, across every source.
+func (s *Supervisor) Unrouted() int {
+	n := 0
+	for _, src := range s.Sources() {
+		n += len(src.Unrouted())
+	}
+	return n
 }
 
 // Project finds a project by name.
@@ -334,6 +355,9 @@ func (s *Supervisor) Start() error {
 	for _, p := range s.Projects() {
 		p.start()
 	}
+	for _, src := range s.Sources() {
+		src.start()
+	}
 	// Without a tunnel nothing can reach the webhook server, so it isn't started.
 	if !s.TunnelEnabled() {
 		for _, p := range s.Projects() {
@@ -439,15 +463,15 @@ func (s *Supervisor) Stop() {
 	}
 }
 
-// Reconcile runs every project's reconcile.
+// Reconcile runs every source's reconcile, which covers the projects it feeds.
 func (s *Supervisor) Reconcile() {
 	var wg sync.WaitGroup
-	for _, p := range s.Projects() {
+	for _, src := range s.Sources() {
 		wg.Add(1)
-		go func(p *Project) {
+		go func(src *Source) {
 			defer wg.Done()
-			p.reconcile()
-		}(p)
+			src.reconcile()
+		}(src)
 	}
 	wg.Wait()
 }
@@ -620,12 +644,12 @@ func (s *Supervisor) startServer(port int) error {
 		return fmt.Errorf("webhook server on %s: %w", ln, err)
 	case <-time.After(150 * time.Millisecond):
 	}
-	logx.Default.Printf("webhook server on http://%s/hooks/<project>/<connection>", ln)
+	logx.Default.Printf("webhook server on http://%s/hooks/<project or source>/<connection>", ln)
 	return nil
 }
 
-// handler is the webhook server: the projects' hooks at /hooks/<project>/<connection>, and jobs that take
-// webhooks at /jobs/<project>/<job>/<token>.
+// handler is the webhook server: the hooks at /hooks/<owner>/<connection> (the owner is the source or project
+// that registered it), and jobs that take webhooks at /jobs/<project>/<job>/<token>.
 func (s *Supervisor) handler() http.Handler {
 	mux := http.NewServeMux()
 	seen := newRecent(2000)
@@ -636,8 +660,8 @@ func (s *Supervisor) handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		p := s.Project(m[1])
-		if p == nil {
+		groups := s.hookGroups(m[1] + "/" + m[2])
+		if len(groups) == 0 {
 			http.NotFound(w, r)
 			return
 		}
@@ -646,47 +670,26 @@ func (s *Supervisor) handler() http.Handler {
 			http.Error(w, "too big", http.StatusRequestEntityTooLarge)
 			return
 		}
-		for _, h := range []string{"X-GitHub-Delivery", "X-Request-UUID", "X-Atlassian-Webhook-Identifier", "X-Hook-UUID"} {
+		delivery := ""
+		for _, h := range []string{"X-GitHub-Delivery", "X-Request-UUID", "X-Atlassian-Webhook-Identifier", "X-Hook-UUID", "Linear-Delivery"} {
 			if id := r.Header.Get(h); id != "" {
-				if seen.has(m[2] + id) {
-					w.WriteHeader(http.StatusAccepted)
-					return
-				}
-				seen.add(m[2] + id)
+				delivery = m[2] + id
 				break
 			}
 		}
-		var signals []core.Signal
-		ok := false
-		for _, hooked := range p.hookedBy(m[2]) {
-			sigs, err := hooked.ParseWebhook(r.Header, body, s.secret)
-			if err != nil {
-				p.logf("webhook: %s", logx.ErrText(err))
-				continue
-			}
-			ok = true
-			signals = append(signals, sigs...)
+		if delivery != "" && seen.has(delivery) {
+			w.WriteHeader(http.StatusOK)
+			return
 		}
-		if !ok {
+		if !s.deliver(groups, r.Header, body) {
 			http.Error(w, "rejected", http.StatusUnauthorized)
 			return
 		}
-		w.WriteHeader(http.StatusAccepted)
-		go func() {
-			event := false
-			for _, sig := range signals {
-				if sig.Type == core.SigEvent {
-					// The tracker and the repo on one hook both send the delivery; jobs run on it once.
-					if event || sig.Event == nil {
-						continue
-					}
-					event = true
-					p.Jobs.OnEvent(*sig.Event)
-					continue
-				}
-				p.onSignal(sig)
-			}
-		}()
+		// Only a delivery taken is remembered, so the service's retry of a rejected one gets through.
+		if delivery != "" {
+			seen.add(delivery)
+		}
+		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/jobs/", func(w http.ResponseWriter, r *http.Request) {
 		m := jobPath.FindStringSubmatch(r.URL.Path)
@@ -718,58 +721,6 @@ func (s *Supervisor) handler() http.Handler {
 func readBody(r *http.Request) ([]byte, error) {
 	defer r.Body.Close()
 	return io.ReadAll(http.MaxBytesReader(nil, r.Body, 25<<20))
-}
-
-// hookedBy are the project's tracker and repo bound to a connection that take webhooks.
-func (p *Project) hookedBy(conn string) []adapter.Hooked {
-	var out []adapter.Hooked
-	if conn == p.trackerConn {
-		if h, ok := p.Tracker.(adapter.Hooked); ok {
-			out = append(out, h)
-		}
-	}
-	if conn == p.repoConn {
-		if h, ok := p.Repo.(adapter.Hooked); ok {
-			out = append(out, h)
-		}
-	}
-	return out
-}
-
-// pointHooks points each of the project's hooks at the public URL; a tracker and a repo on the same target
-// share one.
-func (p *Project) pointHooks(base, secret string) {
-	type hook struct {
-		h    adapter.Hooked
-		conn string
-	}
-	var hooks []hook
-	if h, ok := p.Tracker.(adapter.Hooked); ok {
-		hooks = append(hooks, hook{h, p.trackerConn})
-	}
-	if h, ok := p.Repo.(adapter.Hooked); ok {
-		hooks = append(hooks, hook{h, p.repoConn})
-	}
-	done := map[string]bool{}
-	for _, x := range hooks {
-		target := x.h.HookTarget()
-		if done[target] {
-			continue
-		}
-		done[target] = true
-		url := fmt.Sprintf("%s/hooks/%s/%s", strings.TrimRight(base, "/"), p.Name, x.conn)
-		existing, _ := p.Store.Hook(target)
-		ctx, cancel := ctxTimeout(time.Minute)
-		id, err := x.h.EnsureWebhook(ctx, url, secret, existing.ID)
-		cancel()
-		if err != nil {
-			p.logf("webhook: couldn't point %s's hook at %s: %s", target, url, logx.ErrText(err))
-			continue
-		}
-		p.Store.SetHook(target, store.Hook{ID: id, URL: url})
-		p.logf("webhook: %s's hook %s points at %s", target, id, url)
-	}
-	p.hub.changed()
 }
 
 func (s *Supervisor) startTunnel() {
@@ -807,8 +758,8 @@ func (s *Supervisor) startTunnel() {
 				continue
 			}
 			logx.Default.Printf("tunnel: %s", url)
+			s.pointHooks(url, nil)
 			for _, p := range s.Projects() {
-				go p.pointHooks(url, s.secret)
 				s.announceJobHooks(p)
 			}
 		}
@@ -844,8 +795,9 @@ func (r *recent) add(id string) {
 
 // ---- reload ---------------------------------------------------------------------------------------------
 
-// Reload applies a changed config without a restart. Settings take effect at once; a project whose definition
-// or connections changed is rebuilt (its running turns carry on and are adopted), the rest are kept as they are.
+// Reload applies a changed config without a restart. Settings take effect at once; a project whose definition,
+// connections or source changed is rebuilt (its running turns carry on and are adopted), the rest are kept as
+// they are. Sources are rebuilt to take new routes, keeping their tracker when it is unchanged.
 func (s *Supervisor) Reload(cfg *config.Config) error {
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -859,12 +811,16 @@ func (s *Supervisor) Reload(cfg *config.Config) error {
 	for _, p := range s.Projects() {
 		keep[p.fingerprint] = p
 	}
+	keepSources := map[string]*Source{}
+	for _, src := range s.Sources() {
+		keepSources[src.fingerprint] = src
+	}
 	s.mu.Lock()
 	prevConns := s.conns
 	s.cfg = cfg
 	s.conns = conns
 	s.mu.Unlock()
-	projects, err := s.buildProjects(cfg, keep)
+	projects, sources, err := s.build(cfg, keep, keepSources)
 	if err != nil {
 		s.mu.Lock()
 		s.cfg = old
@@ -882,8 +838,13 @@ func (s *Supervisor) Reload(cfg *config.Config) error {
 			p.logf("stopped for the new config")
 		}
 	}
+	hooks := buildHooks(sources, projects)
 	s.mu.Lock()
+	before := registered(s.hooks)
+	carryHooks(s.hooks, hooks)
 	s.projects = projects
+	s.sources = sources
+	s.hooks = hooks
 	for _, sink := range s.sinks {
 		go sink.Close(context.Background())
 	}
@@ -891,20 +852,53 @@ func (s *Supervisor) Reload(cfg *config.Config) error {
 	hook := s.hookURL
 	s.mu.Unlock()
 	s.prepareAgents()
+	fresh := map[*Project]bool{}
 	for _, p := range projects {
 		if !p.begun {
+			fresh[p] = true
 			p.start()
-			if hook != "" {
-				go p.pointHooks(hook, s.secret)
-				s.announceJobHooks(p)
+		}
+	}
+	freshSources := map[*Source]bool{}
+	for _, src := range sources {
+		src.mu.Lock()
+		started := src.started
+		src.mu.Unlock()
+		if !started {
+			freshSources[src] = true
+			src.start()
+		}
+	}
+	if hook != "" {
+		s.pointHooks(hook, func(g *hookGroup) bool {
+			// A hook whose owner changed has a new path.
+			if before[g.target] != g.path {
+				return true
 			}
-			go p.reconcile()
+			for _, m := range g.members {
+				if fresh[m.project] || freshSources[m.source] {
+					return true
+				}
+			}
+			return false
+		})
+		for p := range fresh {
+			s.announceJobHooks(p)
+		}
+	}
+	for _, src := range sources {
+		due := freshSources[src]
+		for _, p := range src.Projects() {
+			due = due || fresh[p]
+		}
+		if due {
+			go src.reconcile()
 		}
 	}
 	if old.Settings.Tunnel != cfg.Settings.Tunnel || old.Settings.Port != cfg.Settings.Port {
 		logx.Default.Printf("the tunnel and the webhook port change at the next start")
 	}
-	logx.Default.Printf("config reloaded: %d project(s), %d rebuilt", len(projects), len(projects)-countKept(projects, keep))
+	logx.Default.Printf("config reloaded: %d project(s), %d rebuilt", len(projects), len(fresh))
 	s.schedule()
 	return nil
 }
@@ -919,34 +913,85 @@ func countKept(projects []*Project, keep map[string]*Project) int {
 	return n
 }
 
-// buildProjects opens each enabled project in the config, reusing those in keep whose fingerprint is unchanged.
-func (s *Supervisor) buildProjects(cfg *config.Config, keep map[string]*Project) ([]*Project, error) {
-	var out []*Project
+// build opens the config's sources and the enabled projects they feed, reusing those in keep and keepSources
+// whose fingerprint is unchanged.
+func (s *Supervisor) build(cfg *config.Config, keep map[string]*Project, keepSources map[string]*Source) ([]*Project, []*Source, error) {
 	var errs []string
+	opened := map[string]*Source{}
+	var sources []*Source
+	// A source whose routes changed keeps its tracker, so the projects it feeds needn't be rebuilt.
+	trackers := map[string]adapter.Tracker{}
+	for _, src := range keepSources {
+		trackers[src.trackerFingerprint] = src.Tracker
+	}
+	for _, spec := range cfg.Sources() {
+		fp := sourceFingerprint(cfg, spec)
+		src := keepSources[fp]
+		if src == nil {
+			var err error
+			if src, err = s.openSource(cfg, spec, fp, trackers[trackerFingerprint(cfg, spec)]); err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %s", spec.Name, logx.ErrText(err)))
+				continue
+			}
+		}
+		opened[spec.Name] = src
+		sources = append(sources, src)
+	}
+	var projects []*Project
+	feeds := map[*Source][]*Project{}
 	for _, spec := range cfg.Projects {
 		if spec.Disabled {
 			continue
 		}
-		fp := fingerprint(cfg, spec)
-		if p := keep[fp]; p != nil {
-			out = append(out, p)
+		srcSpec := cfg.SourceFor(spec)
+		if srcSpec == nil {
+			errs = append(errs, fmt.Sprintf("%s: no tracker, and no source routes to it", spec.Name))
 			continue
 		}
-		p, err := s.openProject(cfg, spec, fp)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %s", spec.Name, logx.ErrText(err)))
+		src := opened[srcSpec.Name]
+		if src == nil {
+			errs = append(errs, fmt.Sprintf("%s: its source %s couldn't be opened", spec.Name, srcSpec.Name))
 			continue
 		}
-		out = append(out, p)
+		fp := fingerprint(cfg, spec, src)
+		p := keep[fp]
+		if p == nil {
+			var err error
+			if p, err = s.openProject(cfg, spec, src, fp); err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %s", spec.Name, logx.ErrText(err)))
+				continue
+			}
+		}
+		projects = append(projects, p)
+		feeds[src] = append(feeds[src], p)
 	}
-	if len(errs) > 0 && len(out) == 0 && len(cfg.Projects) > 0 {
-		return nil, fmt.Errorf("no project could be opened:\n  %s", strings.Join(errs, "\n  "))
+	if len(errs) > 0 && len(projects) == 0 && len(cfg.Projects) > 0 {
+		return nil, nil, fmt.Errorf("no project could be opened:\n  %s", strings.Join(errs, "\n  "))
 	}
 	for _, e := range errs {
 		logx.Default.Printf("project %s", e)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return indexOf(cfg, out[i].Name) < indexOf(cfg, out[j].Name) })
-	return out, nil
+	sort.SliceStable(projects, func(i, j int) bool { return indexOf(cfg, projects[i].Name) < indexOf(cfg, projects[j].Name) })
+	var live []*Source
+	for _, src := range sources {
+		ps := feeds[src]
+		if len(ps) == 0 {
+			continue
+		}
+		sort.SliceStable(ps, func(i, j int) bool { return routeIndex(src.Spec, ps[i].Name) < routeIndex(src.Spec, ps[j].Name) })
+		src.setProjects(ps)
+		live = append(live, src)
+	}
+	return projects, live, nil
+}
+
+func routeIndex(spec *config.Source, project string) int {
+	for i, r := range spec.Routes {
+		if r.Project == project {
+			return i
+		}
+	}
+	return len(spec.Routes)
 }
 
 func indexOf(cfg *config.Config, name string) int {
@@ -958,11 +1003,45 @@ func indexOf(cfg *config.Config, name string) int {
 	return len(cfg.Projects)
 }
 
-// fingerprint is everything a project is built from, so a reload can tell whether it changed.
-func fingerprint(cfg *config.Config, p *config.Project) string {
+// sourceFingerprint is everything a source is built from, so a reload can tell whether it changed.
+func sourceFingerprint(cfg *config.Config, src *config.Source) string {
+	b, _ := json.Marshal(struct {
+		S *config.Source
+		T string
+	}{src, trackerFingerprint(cfg, src)})
+	return string(b)
+}
+
+// trackerFingerprint is everything a source's tracker is built from: not its routes.
+func trackerFingerprint(cfg *config.Config, src *config.Source) string {
+	b, _ := json.Marshal(struct {
+		Name     string
+		T        *config.Binding
+		Implicit bool
+		C        *config.Connection
+		L        config.Labels
+		// An implicit source on the code host's connection reads the repo's binding.
+		R *config.Binding
+	}{src.Name, src.Tracker, src.Implicit(), cfg.Connections[src.Tracker.Connection], cfg.SourceLabels(src), implicitRepo(cfg, src)})
+	return string(b)
+}
+
+func implicitRepo(cfg *config.Config, src *config.Source) *config.Binding {
+	if !src.Implicit() {
+		return nil
+	}
+	if p := cfg.Project(src.Name); p != nil {
+		return p.Repo
+	}
+	return nil
+}
+
+// fingerprint is everything a project is built from, its source's tracker included, so a reload can tell
+// whether it changed.
+func fingerprint(cfg *config.Config, p *config.Project, src *Source) string {
 	conns := map[string]*config.Connection{}
 	agent := cfg.AgentFor(p)
-	for _, name := range []string{agent, p.Repo.Connection, p.Tracker.Connection} {
+	for _, name := range []string{agent, p.Repo.Connection} {
 		conns[name] = cfg.Connections[name]
 	}
 	b, _ := json.Marshal(struct {
@@ -970,26 +1049,52 @@ func fingerprint(cfg *config.Config, p *config.Project) string {
 		C      map[string]*config.Connection
 		L      config.Labels
 		B, Agt string
-	}{p, conns, cfg.LabelsFor(p), cfg.BranchFor(p), agent})
+		S      string
+	}{p, conns, cfg.LabelsFor(p), cfg.BranchFor(p), agent, src.trackerFingerprint})
 	return string(b)
 }
 
-func (s *Supervisor) openProject(cfg *config.Config, spec *config.Project, fp string) (*Project, error) {
+// openSource opens a source, on the tracker given or a newly opened one.
+func (s *Supervisor) openSource(cfg *config.Config, spec *config.Source, fp string, tracker adapter.Tracker) (*Source, error) {
+	if tracker == nil {
+		var err error
+		if tracker, err = BindSource(cfg, spec, s.conns); err != nil {
+			return nil, err
+		}
+	}
+	src := &Source{
+		Name:        spec.Name,
+		Spec:        spec,
+		Tracker:     tracker,
+		Labels:      cfg.SourceLabels(spec),
+		conn:        spec.Tracker.Connection,
+		fingerprint: fp,
+		stateDir:    filepath.Join(s.state, "sources", spec.Name),
+		hub:         s,
+	}
+	src.trackerFingerprint = trackerFingerprint(cfg, spec)
+	if !spec.Implicit() {
+		src.store = store.New(src.stateDir, s.changed)
+	}
+	return src, nil
+}
+
+func (s *Supervisor) openProject(cfg *config.Config, spec *config.Project, src *Source, fp string) (*Project, error) {
 	b, err := Bind(cfg, spec, s.conns, s.state)
 	if err != nil {
 		return nil, err
 	}
 	p := &Project{
-		Name:        spec.Name,
-		Spec:        spec,
-		Root:        b.Root,
-		StateDir:    b.StateDir,
-		Tracker:     b.Tracker,
+		Name:     spec.Name,
+		Spec:     spec,
+		Root:     b.Root,
+		StateDir: b.StateDir,
+		// The source's tracker, so the project and its source act on the same one.
+		Tracker:     src.Tracker,
 		Repo:        b.Repo,
 		Agent:       b.Agent,
 		AgentName:   b.AgentName,
 		Labels:      cfg.LabelsFor(spec),
-		trackerConn: spec.Tracker.Connection,
 		repoConn:    spec.Repo.Connection,
 		fingerprint: fp,
 		branchTmpl:  b.BranchTemplate,
@@ -999,20 +1104,9 @@ func (s *Supervisor) openProject(cfg *config.Config, spec *config.Project, fp st
 		running:     map[string]adapter.Turn{},
 		checkTimers: map[string]*time.Timer{},
 	}
+	p.src.Store(src)
 	p.Store = store.New(b.StateDir, s.changed)
 	p.Jobs = loadJobs(p)
-	if events := p.Jobs.Events(); len(events) > 0 {
-		subscribed := false
-		for _, h := range []any{p.Tracker, p.Repo} {
-			if eh, ok := h.(adapter.EventHooked); ok {
-				eh.WantEvents(events)
-				subscribed = true
-			}
-		}
-		if !subscribed {
-			p.logf("jobs run on %s, but neither %s nor %s sends events", strings.Join(events, ", "), p.Tracker.Describe(), p.Repo.Describe())
-		}
-	}
 	return p, nil
 }
 

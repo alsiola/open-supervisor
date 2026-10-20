@@ -34,6 +34,9 @@ func (m *model) header() []string {
 	if j := m.jobsText(); j != "" {
 		parts = append(parts, j)
 	}
+	if n := sup.Unrouted(); n > 0 {
+		parts = append(parts, yellowS.Render(fmt.Sprintf("%d unrouted", n)))
+	}
 	parts = append(parts, m.reconcileText())
 	if u := m.usageText(); u != "" {
 		parts = append(parts, u)
@@ -47,8 +50,8 @@ func (m *model) header() []string {
 func (m *model) reconcileText() string {
 	var oldest time.Time
 	busy := false
-	for _, p := range m.sup.Projects() {
-		at, going := p.Reconciled()
+	for _, src := range m.sup.Sources() {
+		at, going := src.Reconciled()
 		busy = busy || going
 		if oldest.IsZero() || at.Before(oldest) {
 			oldest = at
@@ -210,6 +213,16 @@ func (m *model) renderList() string {
 		}
 		out = append(out, line)
 	}
+	// Under the issues in flight, the ones no route takes, for claiming by hand (c project#KEY).
+	if un := m.unroutedLines(infoW); len(un) > 0 && len(out) < 3+listH-1 {
+		out = append(out, "")
+		for _, l := range un {
+			if len(out) >= 3+listH {
+				break
+			}
+			out = append(out, l)
+		}
+	}
 	for len(out) < 3+listH {
 		if len(rows) == 0 && len(out) == 3 {
 			if len(m.sup.Projects()) == 0 {
@@ -244,13 +257,28 @@ func (m *model) renderList() string {
 	return m.paint(out)
 }
 
+// unroutedLines are the open issues no route takes, by source.
+func (m *model) unroutedLines(infoW int) []string {
+	var out []string
+	for _, src := range m.sup.Sources() {
+		for _, i := range src.Unrouted() {
+			out = append(out, dim(fmt.Sprintf(" %s %s %s %s", pad(src.Name, 11), pad(i.Key, 9), pad(i.Title, 34), pad("unrouted: no route takes it; c <project>#"+i.Key+" claims it", infoW+38))))
+		}
+	}
+	return out
+}
+
 func (m *model) detailLines(rw row) []string {
 	p, r := rw.p, rw.r
 	w := max(40, m.width-4)
 	field := func(name, value string) string { return "  " + dim(pad(name, 14)) + value }
 	section := func(name string) []string { return []string{"", bold("  " + name)} }
 	var lines []string
-	lines = append(lines, "  "+dim(p.Tracker.Describe())+" "+bold(p.Ref(r.Key))+" "+r.Title)
+	from := p.Tracker.Describe()
+	if src := p.Source(); src != nil && !src.Spec.Implicit() {
+		from += " via " + src.Name
+	}
+	lines = append(lines, "  "+dim(from)+" "+bold(p.Ref(r.Key))+" "+r.Title)
 	state := stateStyle(r.State).Render(string(r.State))
 	if r.PreviousState != "" {
 		state += dim(" (was " + string(r.PreviousState) + ")")

@@ -1,5 +1,7 @@
 package core
 
+import "context"
+
 // SignalType names what a webhook delivery can tell the engine. Adapters turn their service's payloads into
 // signals; the engine decides what each means for the issues it holds.
 type SignalType string
@@ -15,6 +17,9 @@ const (
 	SigChecks        SignalType = "checks"         // SHA: something about the commit's checks changed
 	SigEvent         SignalType = "event"          // Event: the delivery as it came, for jobs run on events
 	SigPing          SignalType = "ping"
+	// SigDeferred: what the delivery means needs the API, which a webhook handler mustn't wait on; the engine
+	// calls Resolve after answering.
+	SigDeferred SignalType = "deferred"
 )
 
 // HookEvent is a webhook delivery named the way its service names it ("push", "release" with action
@@ -36,4 +41,6 @@ type Signal struct {
 	Comment *Comment
 	SHA     string
 	Event   *HookEvent
+	// Resolve, on a SigDeferred, reads what the delivery means.
+	Resolve func(ctx context.Context) ([]Signal, error)
 }

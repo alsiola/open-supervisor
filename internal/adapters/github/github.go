@@ -252,11 +252,12 @@ func (c *conn) Repo(v adapter.Values, _ adapter.ProjectInfo) (adapter.Repo, erro
 	return &Repo{b}, nil
 }
 
-// Tracker binds the connection to a repository's issues.
-func (c *conn) Tracker(v adapter.Values, _ adapter.ProjectInfo) (adapter.Tracker, error) {
+// Tracker binds the connection to a repository's issues. A tracker shared by several projects writes and
+// reads full references (owner/repo#12), since its issues are referred to from other repositories' PRs.
+func (c *conn) Tracker(v adapter.Values, p adapter.ProjectInfo) (adapter.Tracker, error) {
 	b, err := c.bind(v)
 	if err != nil {
 		return nil, err
 	}
-	return &Tracker{b}, nil
+	return &Tracker{binding: b, shared: p.Shared}, nil
 }

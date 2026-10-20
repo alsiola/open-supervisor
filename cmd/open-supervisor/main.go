@@ -27,6 +27,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/adapter"
 	_ "github.com/alsiola/open-supervisor/internal/adapters/all"
 	"github.com/alsiola/open-supervisor/internal/config"
+	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/engine"
 	"github.com/alsiola/open-supervisor/internal/logx"
 	"github.com/alsiola/open-supervisor/internal/playbooks"
@@ -100,6 +101,16 @@ func root() *cobra.Command {
 			return writePlaybooks(resolve(configPath))
 		},
 	}
+	var routeSource string
+	routeCmd := &cobra.Command{
+		Use:   "route <issue>",
+		Short: "Show an issue's properties and which project its source's routes send it to",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return explainRoute(resolve(configPath), routeSource, args[0])
+		},
+	}
+	routeCmd.Flags().StringVar(&routeSource, "source", "", "the source to route through (or a project with a tracker of its own)")
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version",
@@ -112,7 +123,7 @@ func root() *cobra.Command {
 			fmt.Println(config.Name, v)
 		},
 	}
-	cmd.AddCommand(initCmd, doctorCmd, pluginCmd, versionCmd, toolbelt.Command(), adaptersCmd())
+	cmd.AddCommand(initCmd, doctorCmd, routeCmd, pluginCmd, versionCmd, toolbelt.Command(), adaptersCmd())
 	return cmd
 }
 
@@ -245,7 +256,10 @@ func doctor(path string) error {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		issues, err := b.Tracker.Candidates(ctx)
+		var issues []core.Issue
+		if b.Source.Implicit() {
+			issues, err = b.Tracker.Candidates(ctx)
+		}
 		var base string
 		if err == nil {
 			base = p.BaseBranch
@@ -259,18 +273,25 @@ func doctor(path string) error {
 			fmt.Printf("  ✗ %-14s %s · %s: %v\n", p.Name, b.Tracker.Describe(), b.Repo.Describe(), err)
 			continue
 		}
-		labels := cfg.LabelsFor(p)
+		if !b.Source.Implicit() {
+			fmt.Printf("  ✓ %-14s issues from %s · %s · base %s · agent %s\n", p.Name, b.Source.Name, b.Repo.Describe(), base, b.AgentName)
+			continue
+		}
 		claimable := 0
 		for _, i := range issues {
-			skip := i.HasLabel(labels.Claimed)
-			for _, s := range labels.Skip {
-				skip = skip || i.HasLabel(s)
-			}
-			if !skip {
+			if claimableIssue(i, cfg.LabelsFor(p)) {
 				claimable++
 			}
 		}
 		fmt.Printf("  ✓ %-14s %s · %s · base %s · %d open, %d claimable · agent %s\n", p.Name, b.Tracker.Describe(), b.Repo.Describe(), base, len(issues), claimable, b.AgentName)
+	}
+	if len(cfg.SourceList) > 0 {
+		fmt.Println("\nsources")
+	}
+	for _, src := range cfg.SourceList {
+		if !doctorSource(cfg, src, conns) {
+			failed++
+		}
 	}
 	if cfg.Settings.Tunnel == "" {
 		fmt.Printf("\nwebhooks   off: the reconcile reads every %d minutes\n", cfg.Settings.ReconcileMinutes)
@@ -282,6 +303,135 @@ func doctor(path string) error {
 	}
 	fmt.Println("\nall good: run `open-supervisor`")
 	return nil
+}
+
+// claimableIssue reports whether the supervisor would claim the issue, routes aside.
+func claimableIssue(i core.Issue, labels config.Labels) bool {
+	if !i.Open || i.Waiting || i.HasLabel(labels.Claimed) {
+		return false
+	}
+	for _, s := range labels.Skip {
+		if i.HasLabel(s) {
+			return false
+		}
+	}
+	return true
+}
+
+// doctorSource reads a source's open issues and says where its routes send them.
+func doctorSource(cfg *config.Config, src *config.Source, conns *engine.Connections) bool {
+	tracker, err := engine.BindSource(cfg, src, conns)
+	if err != nil {
+		fmt.Printf("  ✗ %-14s %v\n", src.Name, err)
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	issues, err := tracker.Candidates(ctx)
+	cancel()
+	if err != nil {
+		fmt.Printf("  ✗ %-14s %s: %v\n", src.Name, tracker.Describe(), err)
+		return false
+	}
+	labels := cfg.SourceLabels(src)
+	counts := make([]int, len(src.Routes))
+	claimable, unrouted := 0, 0
+	for _, i := range issues {
+		if !claimableIssue(i, labels) {
+			continue
+		}
+		claimable++
+		if n := src.RouteFor(i.Attr); n >= 0 {
+			counts[n]++
+		} else {
+			unrouted++
+		}
+	}
+	fmt.Printf("  ✓ %-14s %s · %d open, %d claimable, %d unrouted\n", src.Name, tracker.Describe(), len(issues), claimable, unrouted)
+	for n, r := range src.Routes {
+		note := ""
+		if counts[n] == 0 && claimable > 0 {
+			note = "  (takes nothing open now)"
+		}
+		fmt.Printf("      %d. %-12s %3d  when %s%s\n", n+1, r.Project, counts[n], r.When.String(), note)
+	}
+	return true
+}
+
+// explainRoute reads one issue and shows its properties and which of its source's routes take it.
+func explainRoute(path, sourceName, key string) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	var src *config.Source
+	switch {
+	case sourceName != "":
+		if src = cfg.FindSource(sourceName); src == nil {
+			return fmt.Errorf("no source or project with a tracker named %q", sourceName)
+		}
+	case len(cfg.SourceList) == 1:
+		src = cfg.SourceList[0]
+	default:
+		names := []string{}
+		for _, s := range cfg.Sources() {
+			names = append(names, s.Name)
+		}
+		return fmt.Errorf("which source? pass --source (one of %s)", strings.Join(names, ", "))
+	}
+	tracker, err := engine.BindSource(cfg, src, engine.OpenConnections(cfg, adapterEnv(cfg)))
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	issue, err := tracker.Issue(ctx, strings.TrimPrefix(key, "#"))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s %s\n%s\n\n", issue.Key, issue.Title, issue.URL)
+	props := map[string][]string{"labels": issue.Labels}
+	for k, v := range issue.Attrs {
+		props[k] = v
+	}
+	names := make([]string, 0, len(props))
+	for k := range props {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		fmt.Printf("  %-14s %s\n", k, strings.Join(props[k], ", "))
+	}
+	fmt.Printf("\nroutes of %s\n", src.Name)
+	n := src.RouteFor(issue.Attr)
+	for i, r := range src.Routes {
+		mark := "✗"
+		switch {
+		case i == n:
+			mark = "✓"
+		case n >= 0 && i > n:
+			mark = " "
+		}
+		fmt.Printf("  %s %d. %-12s when %s\n", mark, i+1, r.Project, r.When.String())
+	}
+	labels := cfg.SourceLabels(src)
+	switch {
+	case n >= 0 && issue.Waiting:
+		fmt.Printf("\n→ %s, once it moves to a state %s claims from\n", src.Routes[n].Project, tracker.Describe())
+	case n >= 0 && !claimableIssue(issue, labels):
+		fmt.Printf("\n→ %s, once it is open and carries neither the claimed label nor a skip label\n", src.Routes[n].Project)
+	case n >= 0:
+		fmt.Printf("\n→ %s\n", src.Routes[n].Project)
+	default:
+		fmt.Printf("\n→ no route takes it (unrouted: %s)\n", orDefault(src.Unrouted, config.UnroutedIgnore))
+	}
+	return nil
+}
+
+func orDefault(s, d string) string {
+	if s == "" {
+		return d
+	}
+	return s
 }
 
 func writePlaybooks(path string) error {

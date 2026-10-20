@@ -11,16 +11,67 @@ import (
 // Issue is one item in a tracker (a GitHub issue, a Jira issue, a Linear issue). Key is the tracker's own
 // identifier as people write it: "12" for GitHub, "PROJ-12" for Jira.
 type Issue struct {
-	Key       string    `json:"key"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body,omitempty"`
-	URL       string    `json:"url,omitempty"`
-	Author    string    `json:"author,omitempty"`
-	Labels    []string  `json:"labels,omitempty"`
-	Open      bool      `json:"open"`
-	Reopened  bool      `json:"reopened,omitempty"` // the tracker says it was reopened (GitHub's stateReason)
+	Key      string   `json:"key"`
+	Title    string   `json:"title"`
+	Body     string   `json:"body,omitempty"`
+	URL      string   `json:"url,omitempty"`
+	Author   string   `json:"author,omitempty"`
+	Labels   []string `json:"labels,omitempty"`
+	Open     bool     `json:"open"`
+	Reopened bool     `json:"reopened,omitempty"` // the tracker says it was reopened (GitHub's stateReason)
+	// Waiting: open, but somewhere the tracker isn't offering it to be worked yet (a Linear backlog state).
+	// It is never claimed on its own, only by hand.
+	Waiting   bool      `json:"waiting,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+	// Attrs are the tracker's other properties, for routing issues to projects: "project", "team",
+	// "components", "assignee", a custom field. Each adapter documents the names it fills; a value the issue
+	// lacks is absent, never an empty string.
+	Attrs map[string][]string `json:"attrs,omitempty"`
+}
+
+// Attr is a property's values by name: "labels", "key", "title" and "author" from the issue itself, anything
+// else from Attrs. Names ignore case.
+func (i Issue) Attr(name string) []string {
+	switch strings.ToLower(name) {
+	case "labels", "label":
+		return i.Labels
+	case "key":
+		return []string{i.Key}
+	case "title":
+		return []string{i.Title}
+	case "author":
+		if i.Author == "" {
+			return nil
+		}
+		return []string{i.Author}
+	}
+	if v, ok := i.Attrs[name]; ok {
+		return v
+	}
+	for k, v := range i.Attrs {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return nil
+}
+
+// SetAttr records a property, leaving out empty values; nothing at all leaves the property absent.
+func (i *Issue) SetAttr(name string, values ...string) {
+	var keep []string
+	for _, v := range values {
+		if v = strings.TrimSpace(v); v != "" {
+			keep = append(keep, v)
+		}
+	}
+	if len(keep) == 0 {
+		return
+	}
+	if i.Attrs == nil {
+		i.Attrs = map[string][]string{}
+	}
+	i.Attrs[name] = append(i.Attrs[name], keep...)
 }
 
 // HasLabel reports whether the issue carries the label, ignoring case.

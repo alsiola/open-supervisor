@@ -322,16 +322,27 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 			m.flash = "no projects"
 			return nil
 		}
-		return m.ask(fmt.Sprintf("claim issue (%s: 12 or PROJ-12, or <project>#12): ", fallback.Name), func(v string) tea.Cmd {
-			p, key := m.parseClaim(v, fallback)
+		prompt := fmt.Sprintf("claim issue (%s: 12 or PROJ-12, or <project>#12): ", fallback.Name)
+		if src := fallback.Source(); !src.Spec.Implicit() {
+			prompt = fmt.Sprintf("claim issue (from %s by its routes: PROJ-12, or <project>#PROJ-12): ", src.Name)
+		}
+		return m.ask(prompt, func(v string) tea.Cmd {
+			p, key, forced := m.parseClaim(v, fallback)
 			if p == nil || key == "" {
 				return flash(fmt.Sprintf("couldn't read %q as an issue to claim", v))
 			}
 			return func() tea.Msg {
-				if err := p.ClaimNow(key); err != nil {
-					return flashMsg(fmt.Sprintf("%s %s: couldn't claim: %v", p.Name, key, err))
+				if forced {
+					if err := p.ClaimNow(key); err != nil {
+						return flashMsg(fmt.Sprintf("%s %s: couldn't claim: %v", p.Name, key, err))
+					}
+					return flashMsg(fmt.Sprintf("claimed %s %s", p.Name, p.Ref(key)))
 				}
-				return flashMsg(fmt.Sprintf("claimed %s %s", p.Name, p.Ref(key)))
+				got, err := p.Source().ClaimNow(key)
+				if err != nil {
+					return flashMsg(fmt.Sprintf("%s: couldn't claim: %v", key, err))
+				}
+				return flashMsg(fmt.Sprintf("claimed %s %s", got.Name, got.Ref(key)))
 			}
 		})
 	case "R":
@@ -360,17 +371,18 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 
 var claimRe = regexp.MustCompile(`^(?:([\w.-]+)#)?#?(\S+)$`)
 
-// parseClaim reads "12", "#12", "PROJ-12" or "project#12".
-func (m *model) parseClaim(v string, fallback *engine.Project) (*engine.Project, string) {
+// parseClaim reads "12", "#12", "PROJ-12" or "project#12". forced: a project was named, so its routes don't
+// decide.
+func (m *model) parseClaim(v string, fallback *engine.Project) (*engine.Project, string, bool) {
 	g := claimRe.FindStringSubmatch(strings.TrimSpace(v))
 	if g == nil {
-		return nil, ""
+		return nil, "", false
 	}
 	p := fallback
 	if g[1] != "" {
 		p = m.sup.Project(g[1])
 	}
-	return p, g[2]
+	return p, g[2], g[1] != ""
 }
 
 func flash(s string) tea.Cmd { return func() tea.Msg { return flashMsg(s) } }

@@ -393,7 +393,13 @@ func Summary(cfg *config.Config) string {
 	}
 	b.WriteString("Projects:\n")
 	for _, p := range cfg.Projects {
-		fmt.Fprintf(&b, "  %s  %s  (code %s, issues %s)\n", p.Name, p.Root, p.Repo.Connection, p.Tracker.Connection)
+		issues := "none"
+		if p.Tracker != nil {
+			issues = p.Tracker.Connection
+		} else if src := cfg.SourceFor(p); src != nil {
+			issues = "from source " + src.Name
+		}
+		fmt.Fprintf(&b, "  %s  %s  (code %s, issues %s)\n", p.Name, p.Root, p.Repo.Connection, issues)
 	}
 	if len(cfg.Projects) == 0 {
 		b.WriteString("  none yet\n")

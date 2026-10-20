@@ -300,3 +300,51 @@ func TestEnsureWebhookNeedsAdmin(t *testing.T) {
 		t.Errorf("id %q %v", id, err)
 	}
 }
+
+func TestSeveralProjectsAndRouteAttrs(t *testing.T) {
+	var asked []string
+	tr := testTracker(t, adapter.Values{"project": "api, Web", "fields": "customfield_10010, customfield_2"}, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		if jql, _ := body["jql"].(string); !strings.HasPrefix(jql, `project in ("API", "WEB") AND statusCategory != Done`) {
+			t.Errorf("jql: %v", body["jql"])
+		}
+		for _, f := range body["fields"].([]any) {
+			asked = append(asked, f.(string))
+		}
+		json.NewEncoder(w).Encode(map[string]any{"isLast": true, "issues": []any{map[string]any{"key": "WEB-7", "fields": map[string]any{
+			"summary":           "Button",
+			"status":            map[string]any{"name": "To Do", "statusCategory": map[string]string{"key": "new"}},
+			"project":           map[string]any{"key": "WEB", "name": "Website"},
+			"issuetype":         map[string]any{"name": "Bug"},
+			"priority":          map[string]any{"name": "High"},
+			"assignee":          map[string]any{"displayName": "Sam", "emailAddress": "sam@x"},
+			"components":        []any{map[string]any{"name": "UI"}, map[string]any{"name": "Forms"}},
+			"customfield_10010": map[string]any{"value": "Team Rocket"},
+			"customfield_2":     []any{3.0, "x"},
+		}}}})
+	})
+	if !tr.owns("web-7") || tr.owns("OTHER-1") || tr.Describe() != "jira API,WEB" {
+		t.Fatalf("owns / describe: %s", tr.Describe())
+	}
+	if refs := tr.RefsIn("API-1, WEB-2 and NOPE-3"); len(refs) != 2 {
+		t.Fatalf("refs: %v", refs)
+	}
+	got, err := tr.Candidates(context.Background())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("%v %v", got, err)
+	}
+	i := got[0]
+	for name, want := range map[string]string{"project": "WEB,Website", "issuetype": "Bug", "priority": "High", "assignee": "Sam,sam@x",
+		"components": "UI,Forms", "status": "To Do", "customfield_10010": "Team Rocket", "customfield_2": "3,x"} {
+		if g := strings.Join(i.Attr(name), ","); g != want {
+			t.Errorf("%s: got %q, want %q", name, g, want)
+		}
+	}
+	if i.Attr("parent") != nil {
+		t.Error("an absent field should have no values")
+	}
+	if !strings.Contains(strings.Join(asked, ","), "components") || !strings.Contains(strings.Join(asked, ","), "customfield_10010") {
+		t.Errorf("fields asked for: %v", asked)
+	}
+}

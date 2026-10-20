@@ -26,6 +26,7 @@ type fakeHost struct {
 	prs      map[int]core.PR
 	checks   map[string]core.Checks
 	labelOps []string
+	reads    int
 }
 
 func newHost() *fakeHost {
@@ -44,6 +45,7 @@ func (h *fakeHost) Describe() string { return "fake" }
 func (h *fakeHost) Candidates(context.Context) ([]core.Issue, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.reads++
 	var out []core.Issue
 	for _, i := range h.issues {
 		if i.Open {

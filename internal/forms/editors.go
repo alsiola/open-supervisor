@@ -204,6 +204,11 @@ func RenameConnection(cfg *config.Config, from, to string) {
 			p.Tracker.Connection = to
 		}
 	}
+	for _, src := range cfg.SourceList {
+		if src.Tracker != nil && src.Tracker.Connection == from {
+			src.Tracker.Connection = to
+		}
+	}
 }
 
 // Uses lists what uses a connection, empty when it can be deleted.
@@ -232,6 +237,11 @@ func Uses(cfg *config.Config, name string) []string {
 			out = append(out, p.Name+"'s tracker")
 		}
 	}
+	for _, src := range cfg.SourceList {
+		if src.Tracker != nil && src.Tracker.Connection == name {
+			out = append(out, "source "+src.Name)
+		}
+	}
 	return out
 }
 
@@ -253,6 +263,9 @@ func RoleNoun(r adapter.Role) string {
 }
 
 // ---- projects -------------------------------------------------------------------------------------------
+
+// FromSource is the tracker choice for a project fed by one of the config's sources (edited in the file).
+const FromSource = "@source"
 
 // ProjectDraft is a project being added or edited.
 type ProjectDraft struct {
@@ -308,8 +321,49 @@ func NewProjectDraft(cfg *config.Config, p *config.Project, dir string) *Project
 	}
 	if p.Tracker != nil {
 		d.Tracker = p.Tracker.Connection
+	} else if cfg.SourceFor(p) != nil {
+		d.Tracker = FromSource
 	}
 	return d
+}
+
+// RemoveProject takes a project out of the config, with the routes to it and any source left with none.
+func RemoveProject(cfg *config.Config, name string) {
+	for i, q := range cfg.Projects {
+		if q.Name == name {
+			cfg.Projects = append(cfg.Projects[:i], cfg.Projects[i+1:]...)
+			break
+		}
+	}
+	var sources []*config.Source
+	for _, src := range cfg.SourceList {
+		var routes []config.Route
+		for _, r := range src.Routes {
+			if r.Project != name {
+				routes = append(routes, r)
+			}
+		}
+		src.Routes = routes
+		if len(routes) > 0 {
+			sources = append(sources, src)
+		}
+	}
+	cfg.SourceList = sources
+}
+
+// RoutedTo reports whether one of the config's sources has a route to the project.
+func RoutedTo(cfg *config.Config, project string) bool {
+	if project == "" {
+		return false
+	}
+	for _, src := range cfg.SourceList {
+		for _, r := range src.Routes {
+			if r.Project == project {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // IsGitCheckout reports whether dir is the top of a git checkout.
@@ -402,6 +456,10 @@ func (d *ProjectDraft) BasicGroups(cfg *config.Config) []*huh.Group {
 		}
 		return out
 	}
+	trackers := conns(adapter.RoleTracker)
+	if len(cfg.SourceList) > 0 {
+		trackers = append([]huh.Option[string]{huh.NewOption("from a source's routes (sources: in the config file)", FromSource)}, trackers...)
+	}
 	return []*huh.Group{
 		huh.NewGroup(
 			huh.NewInput().Title("Checkout *").Description("The project's main git checkout. ~ is fine.").Value(&d.Root).Validate(func(s string) error {
@@ -437,7 +495,7 @@ func (d *ProjectDraft) BasicGroups(cfg *config.Config) []*huh.Group {
 		huh.NewGroup(
 			huh.NewSelect[string]().Title("Agent").Options(agents...).Value(&d.Agent),
 			huh.NewSelect[string]().Title("Code host").Options(conns(adapter.RoleRepo)...).Value(&d.Repo),
-			huh.NewSelect[string]().Title("Issue tracker").Options(conns(adapter.RoleTracker)...).Value(&d.Tracker),
+			huh.NewSelect[string]().Title("Issue tracker").Options(trackers...).Value(&d.Tracker),
 		).Title("Connections"),
 	}
 }
@@ -470,7 +528,8 @@ func (d *ProjectDraft) BindingGroups(cfg *config.Config) []*huh.Group {
 			groups = append(groups, d.RepoFields.Groups("Repository on "+d.Repo)...)
 		}
 	}
-	if c, ok := cfg.Connections[d.Tracker]; ok {
+	d.TrackerFields = nil
+	if c, ok := cfg.Connections[d.Tracker]; ok && d.Tracker != FromSource {
 		if spec, ok := adapter.Lookup(c.Type); ok && len(spec.Binding[adapter.RoleTracker]) > 0 {
 			values := d.bindingValues(d.project, "tracker")
 			if len(values) == 0 && d.Tracker == d.Repo && d.RepoFields != nil {
@@ -562,6 +621,9 @@ func (d *ProjectDraft) Apply(cfg *config.Config) (*config.Project, error) {
 	if d.Repo == "" || d.Tracker == "" {
 		return nil, errors.New("a project needs a code host and an issue tracker connection")
 	}
+	if d.Tracker == FromSource && !RoutedTo(cfg, d.Original) && !RoutedTo(cfg, name) {
+		return nil, fmt.Errorf("no source routes to %s yet: add a route to it under sources: in %s, or pick a tracker", name, cfg.Path)
+	}
 	p := d.project
 	if p == nil {
 		p = &config.Project{}
@@ -608,6 +670,18 @@ func (d *ProjectDraft) Apply(cfg *config.Config) (*config.Project, error) {
 		}
 	}
 	p.Tracker = &config.Binding{Connection: d.Tracker, Values: trackerValues}
+	if d.Tracker == FromSource {
+		p.Tracker = nil
+	}
+	if d.Original != "" && name != d.Original {
+		for _, src := range cfg.SourceList {
+			for i := range src.Routes {
+				if src.Routes[i].Project == d.Original {
+					src.Routes[i].Project = name
+				}
+			}
+		}
+	}
 	replaced := false
 	for i, q := range cfg.Projects {
 		if q.Name == d.Original && d.Original != "" {

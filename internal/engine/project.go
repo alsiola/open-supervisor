@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alsiola/open-supervisor/internal/adapter"
@@ -31,10 +32,10 @@ type hub interface {
 	dataDir() string
 }
 
-// Project is one project under the supervisor: it claims the project's open issues, gives each a session,
-// queues what happens on the tracker and the code host for the agent, and sets the issue's status labels from
-// what each turn reports. The supervisor routes webhooks here, decides when a turn may start (one cap across
-// every project) and runs the reconcile.
+// Project is one project under the supervisor: it claims the issues its source routes to it, gives each a
+// session, queues what happens on the tracker and the code host for the agent, and sets the issue's status labels
+// from what each turn reports. Its source hands it the tracker's webhooks and runs the reconcile; the
+// supervisor hands it the repo's webhooks and decides when a turn may start (one cap across every project).
 type Project struct {
 	Name      string
 	Spec      *config.Project
@@ -48,13 +49,15 @@ type Project struct {
 	Store     *store.Store
 	Jobs      *Jobs
 
-	// connections are the names of the tracker's and the repo's connections, for routing webhooks.
-	trackerConn, repoConn string
-	fingerprint           string
-	branchTmpl            string
-	branchRe              *regexp.Regexp
-	base                  string
-	hub                   hub
+	// repoConn is the name of the repo's connection, for routing webhooks.
+	repoConn    string
+	fingerprint string
+	branchTmpl  string
+	branchRe    *regexp.Regexp
+	base        string
+	hub         hub
+	// src is the source that feeds the project; a reload can swap it for an equal one.
+	src atomic.Pointer[Source]
 
 	mu            sync.Mutex
 	running       map[string]adapter.Turn
@@ -65,9 +68,13 @@ type Project struct {
 	stopped       bool
 	// begun: start has run (a reload starts only the projects it built).
 	begun bool
-
-	claimMu sync.Mutex
 }
+
+// source is where the project's issues come from.
+func (p *Project) source() *Source { return p.src.Load() }
+
+// Source is where the project's issues come from: its own tracker, or a source with a route to it.
+func (p *Project) Source() *Source { return p.source() }
 
 func (p *Project) logf(format string, args ...any) {
 	logx.Default.Write(p.Name, filepath.Join(p.StateDir, "log"), format, args...)
@@ -136,17 +143,11 @@ func (p *Project) start() {
 	}
 	p.Store.Prune()
 	p.recoverInterrupted()
-	p.logf("watching %s (issues) and %s (code) from %s with %s", p.Tracker.Describe(), p.Repo.Describe(), p.Root, p.AgentName)
-	go func() {
-		if p.hub.settings().DryRun {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		if err := p.Tracker.EnsureLabels(ctx, p.labelSpecs()); err != nil {
-			p.logf("couldn't create the labels: %s", logx.ErrText(err))
-		}
-	}()
+	issues := p.Tracker.Describe()
+	if src := p.source(); src != nil && !src.Spec.Implicit() {
+		issues += " through " + src.Name
+	}
+	p.logf("watching %s (issues) and %s (code) from %s with %s", issues, p.Repo.Describe(), p.Root, p.AgentName)
 	p.Jobs.start()
 }
 
@@ -162,21 +163,6 @@ func (p *Project) stop() {
 	if sweep != nil {
 		sweep.Kill()
 	}
-}
-
-func (p *Project) labelSpecs() []adapter.Label {
-	l := p.Labels
-	out := []adapter.Label{
-		{Name: l.Claimed, Color: "FBCA04", Description: "An agent has this issue"},
-		{Name: l.Scheduled, Color: "C5DEF5", Description: "Opened on a timer, or held until its runAt time"},
-		{Name: l.Help, Color: "D93F0B", Description: "The agent asked something it cannot go on without"},
-		{Name: l.Review, Color: "0E8A16", Description: "Something is up for the owner"},
-		{Name: l.Done, Color: "BFDADC", Description: "Everything asked is handled; only a merge or close is left"},
-	}
-	for _, s := range l.Skip {
-		out = append(out, adapter.Label{Name: s, Color: "EDEDED", Description: "The supervisor leaves this issue alone"})
-	}
-	return out
 }
 
 // recoverInterrupted adopts the turns the last supervisor left running; one with no process to adopt gets a
@@ -213,12 +199,7 @@ func (p *Project) recoverInterrupted() {
 }
 
 // ref is how the log names an issue: #12 for numbered trackers, PROJ-12 for keyed ones.
-func (p *Project) ref(key string) string {
-	if key != "" && key[0] >= '0' && key[0] <= '9' {
-		return "#" + key
-	}
-	return key
-}
+func (p *Project) ref(key string) string { return refOf(key) }
 
 func ctxTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), d)
@@ -226,23 +207,20 @@ func ctxTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 
 // ---- signals from webhooks ------------------------------------------------------------------------------
 
+// onSignal takes the repo's signals, and the tracker's about issues the project holds (its source routes the
+// rest).
 func (p *Project) onSignal(s core.Signal) {
 	switch s.Type {
 	case core.SigPing:
 		p.logf("webhook: hello from %s", s.Key)
-	case core.SigIssueChanged:
-		if s.Issue != nil {
-			go p.maybeClaim(*s.Issue, false)
-		}
 	case core.SigIssueReopened:
-		if s.Issue == nil {
-			return
+		key := s.Key
+		if s.Issue != nil {
+			key = s.Issue.Key
 		}
-		if r := p.Store.Get(s.Issue.Key); r != nil {
+		if r := p.Store.Get(key); r != nil {
 			p.Store.Update(r.Key, func(x *store.Record) { x.IssueClosedReported = false })
 			p.enqueue(r.Key, core.Event{Type: core.EvIssue, Action: "reopened", At: time.Now().UTC()})
-		} else {
-			go p.maybeClaim(*s.Issue, true)
 		}
 	case core.SigIssueClosed:
 		r := p.Store.Get(s.Key)
@@ -473,9 +451,10 @@ func (p *Project) Message(key, text string) {
 // maybeClaim claims an open issue nobody has: label it and give it a session. reopened lets a labelled,
 // untracked issue through.
 func (p *Project) maybeClaim(issue core.Issue, reopened bool) {
-	p.claimMu.Lock()
-	defer p.claimMu.Unlock()
-	if !issue.Open || p.Store.Get(issue.Key) != nil {
+	src := p.source()
+	src.claimMu.Lock()
+	defer src.claimMu.Unlock()
+	if !issue.Open || issue.Waiting || src.Holder(issue.Key) != nil {
 		return
 	}
 	for _, s := range p.Labels.Skip {
@@ -533,18 +512,26 @@ func (p *Project) claimLocked(issue core.Issue, note string) {
 			x.Queue = append(x.Queue, core.Event{Type: core.EvNote, Text: note, At: time.Now().UTC()})
 		})
 	}
-	p.editLabels(issue.Key, []string{p.Labels.Claimed}, nil)
+	var remove []string
+	if p.Labels.Unrouted != "" && issue.HasLabel(p.Labels.Unrouted) {
+		remove = append(remove, p.Labels.Unrouted)
+	}
+	p.editLabels(issue.Key, []string{p.Labels.Claimed}, remove)
 	p.transition(issue.Key, "claimed")
 	p.logf("claimed %s %s", p.ref(issue.Key), issue.Title)
 	p.hub.schedule()
 }
 
-// ClaimNow claims by hand, labels or not: a backlog issue the owner wants done now, or a run of one already
-// tracked.
+// ClaimNow claims by hand, labels and routes or not: a backlog issue the owner wants done now, or a run of one
+// already tracked.
 func (p *Project) ClaimNow(key string) error {
 	if p.Store.Get(key) != nil {
 		p.RunNow(key)
 		return nil
+	}
+	src := p.source()
+	if h := src.Holder(key); h != nil {
+		return fmt.Errorf("%s has it", h.Name)
 	}
 	ctx, cancel := ctxTimeout(time.Minute)
 	defer cancel()
@@ -552,8 +539,12 @@ func (p *Project) ClaimNow(key string) error {
 	if err != nil {
 		return err
 	}
-	p.claimMu.Lock()
-	defer p.claimMu.Unlock()
+	src.claimMu.Lock()
+	defer src.claimMu.Unlock()
+	if h := src.Holder(key); h != nil {
+		return fmt.Errorf("%s has it", h.Name)
+	}
+	src.forget(issue.Key)
 	p.claimLocked(issue, "")
 	return nil
 }
@@ -1077,6 +1068,7 @@ func (p *Project) report(key string, o core.Outcome) {
 		"project":    p.Name,
 		"repo":       p.Repo.Describe(),
 		"tracker":    p.Tracker.Describe(),
+		"source":     p.source().Name,
 		"agent":      p.AgentName,
 		"issue":      key,
 		"ok":         o.OK,
@@ -1246,51 +1238,44 @@ func containsKey(keys []string, key string) bool {
 
 // ---- reconcile ------------------------------------------------------------------------------------------
 
-// reconcile reads everything the webhooks might have missed: new issues, comments, PR closes, checks.
-func (p *Project) reconcile() {
+// reconcile runs the reconcile of the project's source, which covers the project.
+func (p *Project) reconcile() { p.source().reconcile() }
+
+// beginReconcile marks a reconcile going, false when the project is stopped.
+func (p *Project) beginReconcile() bool {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.reconciling || p.stopped {
-		p.mu.Unlock()
-		return
+		return false
 	}
 	p.reconciling = true
+	return true
+}
+
+func (p *Project) endReconcile() {
+	p.mu.Lock()
+	p.reconciling = false
 	p.mu.Unlock()
 	p.hub.changed()
-	defer func() {
-		p.mu.Lock()
-		p.reconciling = false
-		p.mu.Unlock()
-		p.hub.schedule()
-	}()
-	ctx, cancel := ctxTimeout(5 * time.Minute)
-	defer cancel()
-	open, err := p.Tracker.Candidates(ctx)
-	if err != nil {
-		p.logf("reconcile failed: %s", logx.ErrText(err))
+}
+
+// reconcileHeld looks at an open issue the project holds: a finished one reopened since goes back to the agent.
+func (p *Project) reconcileHeld(ctx context.Context, issue core.Issue) {
+	r := p.Store.Get(issue.Key)
+	if r == nil || r.State != store.Finished {
 		return
 	}
-	openKeys := map[string]bool{}
-	for _, i := range open {
-		openKeys[i.Key] = true
+	at, err := p.Tracker.ReopenedAt(ctx, issue.Key)
+	if err == nil && !at.IsZero() && at.After(r.UpdatedAt) {
+		p.Store.Update(issue.Key, func(x *store.Record) { x.IssueClosedReported = false })
+		p.enqueue(issue.Key, core.Event{Type: core.EvIssue, Action: "reopened", At: time.Now().UTC()})
 	}
-	before := len(p.Store.All())
-	for _, issue := range open {
-		r := p.Store.Get(issue.Key)
-		switch {
-		case r == nil:
-			reopened := false
-			if issue.HasLabel(p.Labels.Claimed) {
-				reopened = p.reopenedSinceLastClaim(ctx, issue)
-			}
-			p.maybeClaim(issue, reopened)
-		case r.State == store.Finished:
-			at, err := p.Tracker.ReopenedAt(ctx, issue.Key)
-			if err == nil && !at.IsZero() && at.After(r.UpdatedAt) {
-				p.Store.Update(issue.Key, func(x *store.Record) { x.IssueClosedReported = false })
-				p.enqueue(issue.Key, core.Event{Type: core.EvIssue, Action: "reopened", At: time.Now().UTC()})
-			}
-		}
-	}
+}
+
+// maintain reads, for every issue the project holds, what the webhooks might have missed: PRs, comments, closes
+// and checks. openKeys are the tracker's open issues; routed is how many of them are the project's, and before
+// how many issues the project held before the reconcile claimed any.
+func (p *Project) maintain(ctx context.Context, openKeys map[string]bool, routed, before int) {
 	recent := time.Now().Add(-3 * 24 * time.Hour)
 	for _, r := range p.Store.All() {
 		if r.State == store.Finished && r.UpdatedAt.Before(recent) {
@@ -1301,13 +1286,13 @@ func (p *Project) reconcile() {
 		if fresh == nil {
 			continue
 		}
-		if fresh.State == store.Scheduled && fresh.Turns == 0 && !openKeys[r.Key] {
+		if fresh.State == store.Scheduled && fresh.Turns == 0 && !openKeys[r.Key] && p.closed(ctx, r.Key) {
 			p.Store.Remove(r.Key)
 			p.logf("%s: closed before its scheduled start; forgotten", p.ref(r.Key))
 			continue
 		}
 		p.readComments(ctx, fresh)
-		if fresh.State != store.Finished && !fresh.IssueClosedReported && !openKeys[r.Key] {
+		if fresh.State != store.Finished && !fresh.IssueClosedReported && !openKeys[r.Key] && p.closed(ctx, r.Key) {
 			p.Store.Update(r.Key, func(x *store.Record) { x.IssueClosedReported = true })
 			p.enqueue(r.Key, core.Event{Type: core.EvIssue, Action: "closed", At: time.Now().UTC()})
 		}
@@ -1319,11 +1304,22 @@ func (p *Project) reconcile() {
 	p.lastReconcile = time.Now()
 	p.mu.Unlock()
 	claimed := len(p.Store.All()) - before
-	msg := fmt.Sprintf("reconciled: %d open issues, %d tracked", len(open), len(p.Store.Active()))
+	msg := fmt.Sprintf("reconciled: %d open issues, %d tracked", routed, len(p.Store.Active()))
 	if claimed > 0 {
 		msg += fmt.Sprintf(", %d claimed", claimed)
 	}
 	p.logf("%s", msg)
+}
+
+// closed confirms that an issue missing from the tracker's open issues is closed, not just outside the
+// source's filter (moved back to a backlog state, out of the JQL). An issue that can't be read isn't.
+func (p *Project) closed(ctx context.Context, key string) bool {
+	issue, err := p.Tracker.Issue(ctx, key)
+	if err != nil {
+		p.logf("%s: couldn't read it: %s", p.ref(key), logx.ErrText(err))
+		return false
+	}
+	return !issue.Open
 }
 
 // readComments ingests the comments on an issue and its PRs since the last one taken.
@@ -1352,17 +1348,6 @@ func (p *Project) readComments(ctx context.Context, r *store.Record) {
 		p.ingestOpt(r, c, false)
 	}
 	p.hub.schedule()
-}
-
-// reopenedSinceLastClaim: an issue carrying the claimed label counts as reopened when the tracker's last reopen
-// is newer than this supervisor's last claim of it (or it never claimed it but the tracker says reopened).
-func (p *Project) reopenedSinceLastClaim(ctx context.Context, issue core.Issue) bool {
-	at, err := p.Tracker.ReopenedAt(ctx, issue.Key)
-	if err != nil || at.IsZero() {
-		return false
-	}
-	last := p.Store.LastClaim(issue.Key)
-	return last.IsZero() || at.After(last)
 }
 
 // ---- sweep ----------------------------------------------------------------------------------------------

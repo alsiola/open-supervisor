@@ -26,7 +26,11 @@ type binding struct {
 }
 
 // Tracker is a repository's issues.
-type Tracker struct{ *binding }
+type Tracker struct {
+	*binding
+	// shared: the issues are worked in other repositories, so references name this one.
+	shared bool
+}
 
 // Repo is a repository's code and PRs.
 type Repo struct{ *binding }
@@ -66,14 +70,22 @@ type rawIssue struct {
 	CreatedAt   time.Time        `json:"created_at"`
 	UpdatedAt   time.Time        `json:"updated_at"`
 	PullRequest *json.RawMessage `json:"pull_request"`
+	Milestone   *struct {
+		Title string `json:"title"`
+	} `json:"milestone"`
+	Assignees []user `json:"assignees"`
+	Type      *struct {
+		Name string `json:"name"`
+	} `json:"type"`
 }
 
-func (i rawIssue) issue() core.Issue {
+// issue is the issue with the properties routes can match: repo, milestone, assignees and type.
+func (i rawIssue) issue(repo string) core.Issue {
 	labels := make([]string, len(i.Labels))
 	for n, l := range i.Labels {
 		labels[n] = l.Name
 	}
-	return core.Issue{
+	out := core.Issue{
 		Key:       strconv.Itoa(i.Number),
 		Title:     i.Title,
 		Body:      i.Body,
@@ -85,6 +97,17 @@ func (i rawIssue) issue() core.Issue {
 		CreatedAt: i.CreatedAt,
 		UpdatedAt: i.UpdatedAt,
 	}
+	out.SetAttr("repo", repo)
+	if i.Milestone != nil {
+		out.SetAttr("milestone", i.Milestone.Title)
+	}
+	for _, a := range i.Assignees {
+		out.SetAttr("assignees", a.Login)
+	}
+	if i.Type != nil {
+		out.SetAttr("type", i.Type.Name)
+	}
+	return out
 }
 
 type rawComment struct {
@@ -194,7 +217,7 @@ func withMark(body string, mark core.AgentMark) string {
 	return strings.TrimRight(body, "\n") + "\n\n" + marker + "\n"
 }
 
-var refsRe = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\s+#(\d+)\b`)
+var refsRe = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\s+([\w.-]+/[\w.-]+)?#(\d+)\b`)
 
 // ---- shared ---------------------------------------------------------------------------------------------
 
@@ -281,7 +304,7 @@ func (t *Tracker) Candidates(ctx context.Context) ([]core.Issue, error) {
 	var out []core.Issue
 	for _, i := range raw {
 		if i.PullRequest == nil {
-			out = append(out, i.issue())
+			out = append(out, i.issue(t.repo))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { a, _ := strconv.Atoi(out[i].Key); b, _ := strconv.Atoi(out[j].Key); return a < b })
@@ -297,7 +320,7 @@ func (t *Tracker) Issue(ctx context.Context, key string) (core.Issue, error) {
 	if _, err := t.c.call(ctx, false, t.repo, http.MethodGet, t.path("/issues/%d", n), nil, &i); err != nil {
 		return core.Issue{}, err
 	}
-	return i.issue(), nil
+	return i.issue(t.repo), nil
 }
 
 func (t *Tracker) Comments(ctx context.Context, key string, since time.Time) ([]core.Comment, error) {
@@ -393,20 +416,29 @@ func (t *Tracker) IssueURL(key string) string {
 	return fmt.Sprintf("%s/%s/issues/%s", t.c.web, t.repo, strings.TrimPrefix(key, "#"))
 }
 
-// RefsIn finds "Closes #12", "fixes #3", "Refs #9" and the like.
+// RefsIn finds "Closes #12", "fixes #3", "Refs #9" and the like; a shared tracker only "Closes owner/repo#12",
+// since a bare #12 in another repository's PR is that repository's issue.
 func (t *Tracker) RefsIn(text string) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, m := range refsRe.FindAllStringSubmatch(text, -1) {
-		if !seen[m[1]] {
-			seen[m[1]] = true
-			out = append(out, m[1])
+		if m[1] == "" && t.shared || m[1] != "" && !strings.EqualFold(m[1], t.repo) {
+			continue
+		}
+		if !seen[m[2]] {
+			seen[m[2]] = true
+			out = append(out, m[2])
 		}
 	}
 	return out
 }
 
-func (t *Tracker) RefFor(key string) string { return "Closes #" + strings.TrimPrefix(key, "#") }
+func (t *Tracker) RefFor(key string) string {
+	if t.shared {
+		return "Closes " + t.repo + "#" + strings.TrimPrefix(key, "#")
+	}
+	return "Closes #" + strings.TrimPrefix(key, "#")
+}
 
 func (t *Tracker) RunAtMarker(at time.Time) string {
 	return "<!-- runAt: " + at.UTC().Format("2006-01-02T15:04Z") + " -->"
