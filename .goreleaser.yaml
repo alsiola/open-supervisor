@@ -23,7 +23,7 @@ archives:
       - goos: windows
         formats: [zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    files: [README.md, docs/*]
+    files: [README.md, LICENSE, docs/*]
 
 checksum:
   name_template: checksums.txt
@@ -34,9 +34,11 @@ changelog:
     exclude: ["^docs:", "^test:", "^chore:"]
 
 # `brew install alsiola/tap/open-supervisor`. Needs a repo alsiola/homebrew-tap and a HOMEBREW_TAP_TOKEN
-# secret that can push to it.
+# secret that can push to it; without the secret this step is skipped and the release goes ahead.
 homebrew_casks:
   - name: open-supervisor
+    skip_upload: '{{ if index .Env "HOMEBREW_TAP_TOKEN" }}false{{ else }}true{{ end }}'
+    license: MIT
     repository:
       owner: alsiola
       name: homebrew-tap
@@ -56,4 +58,5 @@ nfpms:
     description: Claims issues across your repos and works each in its own coding-agent session
     maintainer: alsiola
     formats: [deb, rpm, apk]
+    license: MIT
     recommends: [git]
