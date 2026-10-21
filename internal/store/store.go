@@ -141,10 +141,11 @@ type Hook struct {
 
 // Data is the whole file.
 type Data struct {
-	Issues    map[string]*Record   `json:"issues"`
-	Hooks     map[string]Hook      `json:"hooks,omitempty"`
-	LastSweep string               `json:"lastSweep,omitempty"`
-	Jobs      map[string]*JobState `json:"jobs,omitempty"`
+	Issues     map[string]*Record   `json:"issues"`
+	Hooks      map[string]Hook      `json:"hooks,omitempty"`
+	LastSweep  string               `json:"lastSweep,omitempty"`
+	LastTriage string               `json:"lastTriage,omitempty"`
+	Jobs       map[string]*JobState `json:"jobs,omitempty"`
 	// Claims are when each issue was last claimed, kept after its record goes, so a labelled issue reopened
 	// since can be told from one another supervisor holds.
 	Claims map[string]time.Time `json:"claims,omitempty"`
@@ -378,6 +379,21 @@ func (s *Store) SetLastSweep(day string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data.LastSweep = day
+	s.changed()
+}
+
+// LastTriage is the local date of the last triage.
+func (s *Store) LastTriage() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.LastTriage
+}
+
+// SetLastTriage records the local date of a triage.
+func (s *Store) SetLastTriage(day string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.LastTriage = day
 	s.changed()
 }
 

@@ -460,3 +460,24 @@ func TestAppTokens(t *testing.T) {
 		t.Errorf("minted %d tokens, want 1 (cached)", mints)
 	}
 }
+
+func TestOpenIssue(t *testing.T) {
+	var got map[string]string
+	tr, _ := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/repos/octo/widgets/issues" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"number": 31, "title": "Skills call reply.sh", "html_url": "https://github.com/octo/widgets/issues/31", "state": "open"}`)
+	}))
+	issue, err := tr.OpenIssue(context.Background(), "Skills call reply.sh", "21 sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["title"] != "Skills call reply.sh" || got["body"] != "21 sessions" {
+		t.Errorf("sent %v", got)
+	}
+	if issue.Key != "31" || issue.URL != "https://github.com/octo/widgets/issues/31" || !issue.Open {
+		t.Errorf("issue %+v", issue)
+	}
+}

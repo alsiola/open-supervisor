@@ -29,6 +29,7 @@ The project may use GitHub, Bitbucket, Jira or something else; you don't need to
 | `$OPEN_SUPERVISOR agent screenshots <files>` | commit images and print Markdown for the PR body |
 | `$OPEN_SUPERVISOR agent schedule <time> <file>` | park the issue until a time (see Rescheduling) |
 | `$OPEN_SUPERVISOR agent correction --area <area> <file>` | log a correction (see Log corrections) |
+| `$OPEN_SUPERVISOR agent problem --kind <kind> <file>` | log a problem you worked around (see Report problems) |
 | `$OPEN_SUPERVISOR agent inflight` | the other issues in flight and what each touches |
 
 A `<file>` can be `-` to read from stdin, e.g. `printf '…' | $OPEN_SUPERVISOR agent issue comment -`. Post every comment this way: it marks the comment as yours, so it is never handed back to you as news. Use `git` itself for commits and pushes.
@@ -73,6 +74,22 @@ Whenever someone corrects you, write the lesson down as you go: a comment saying
 ```
 
 The supervisor's daily sweep folds these into the project's rules.
+
+## Report problems
+
+Whenever you work around something rather than doing the task the way your instructions say, log it as you go, then carry on. That covers a variable that isn't set, a command or script that doesn't exist, a path that has moved, an `agent` command that failed, a permission you had to route round, or a service call that only worked on a retry. Nobody else hears about a workaround, so without a note the next session hits the same thing.
+
+`$OPEN_SUPERVISOR agent problem --kind <env|docs|tooling|service|other> <file>`, where the kind is a missing variable, tool or credential (`env`), a skill or rule that's wrong or stale (`docs`), an `agent …` command that failed or is missing (`tooling`), a tracker, code host or deploy service misbehaving (`service`), or anything else (`other`). The file says:
+
+```
+<What you tried to do, in one line.>
+
+Error: <the exact error text>
+Workaround: <what you did instead, or "none">
+Fix: <where you think the fix belongs: a file in this project, the machine's setup, or open-supervisor itself>
+```
+
+Log each distinct problem once per session. A problem you fixed properly in your own PR needs no note. The supervisor's daily triage fixes or files what you report.
 
 ## First turn: `work-issue <key>`
 

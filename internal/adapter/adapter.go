@@ -149,6 +149,11 @@ type Reactor interface {
 	React(ctx context.Context, c core.Comment) error
 }
 
+// IssueOpener is a tracker that can open issues, for the daily triage to file the causes it finds.
+type IssueOpener interface {
+	OpenIssue(ctx context.Context, title, body string) (core.Issue, error)
+}
+
 // Transitioner is a tracker with workflow statuses of its own (Jira), moved as the agent's state changes.
 // state is "claimed" or one of the agent states.
 type Transitioner interface {

@@ -30,6 +30,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/logx"
 	"github.com/alsiola/open-supervisor/internal/playbooks"
+	"github.com/alsiola/open-supervisor/internal/problems"
 	"github.com/alsiola/open-supervisor/internal/store"
 )
 
@@ -59,7 +60,11 @@ type Supervisor struct {
 	usage    map[string]*core.Usage
 	usageErr map[string]string
 	sweeping bool
+	triaging bool
 	stopping bool
+	// seenProblems are the problem notes already sent to telemetry, by project and file; nil until the first
+	// look, which only takes note of what is there.
+	seenProblems map[string]bool
 
 	shellMu sync.Mutex
 	shells  []*Shell
@@ -187,6 +192,22 @@ func (s *Supervisor) Sweeping() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sweeping
+}
+
+// Triaging reports whether a triage is running.
+func (s *Supervisor) Triaging() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.triaging
+}
+
+// Problems counts the problem notes waiting for the triage, across every project.
+func (s *Supervisor) Problems() int {
+	n := 0
+	for _, p := range s.Projects() {
+		n += p.Problems()
+	}
+	return n
 }
 
 // TurnsRunning counts turns running now, across every project.
@@ -437,6 +458,8 @@ func (s *Supervisor) loop(ctx context.Context) {
 			}
 			go s.wakeDue()
 			go s.sweepIfDue()
+			go s.triageIfDue()
+			go s.reportProblems()
 			// Failed turns become runnable again as their retry time passes.
 			s.schedule()
 		}
@@ -556,28 +579,36 @@ func (s *Supervisor) sweepIfDue() {
 	if at == "" {
 		return
 	}
-	now := time.Now()
-	var h, m int
-	if _, err := fmt.Sscanf(at, "%d:%d", &h, &m); err != nil {
+	today, ok := dailyDue(at, time.Now())
+	if !ok {
 		return
 	}
-	if now.Hour() < h || (now.Hour() == h && now.Minute() < m) {
-		return
-	}
-	today := now.Format("2006-01-02")
-	var due []*Project
+	var projects []*Project
 	for _, p := range s.Projects() {
 		if p.Store.LastSweep() != today && !p.Spec.Sweep.Disabled {
-			due = append(due, p)
+			projects = append(projects, p)
 		}
 	}
-	if len(due) == 0 || s.Sweeping() {
+	// The triage works in the same checkouts; whichever is waiting goes at the next minute.
+	if len(projects) == 0 || s.Sweeping() || s.Triaging() {
 		return
 	}
-	for _, p := range due {
+	for _, p := range projects {
 		p.Store.SetLastSweep(today)
 	}
-	s.RunSweep(due)
+	s.RunSweep(projects)
+}
+
+// dailyDue reports whether a daily HH:MM time has passed today, and today's local date.
+func dailyDue(at string, now time.Time) (string, bool) {
+	var h, m int
+	if _, err := fmt.Sscanf(at, "%d:%d", &h, &m); err != nil {
+		return "", false
+	}
+	if now.Hour() < h || (now.Hour() == h && now.Minute() < m) {
+		return "", false
+	}
+	return now.Format("2006-01-02"), true
 }
 
 // RunSweep sweeps the projects (every one when none are given), one after another.
@@ -602,6 +633,105 @@ func (s *Supervisor) RunSweep(projects []*Project) {
 	for _, p := range projects {
 		p.runSweep()
 	}
+}
+
+// triageIfDue runs, once a day at triageAt, the triage of every project not yet triaged today, one after another.
+func (s *Supervisor) triageIfDue() {
+	at := s.settings().TriageAt
+	if at == "" {
+		return
+	}
+	today, ok := dailyDue(at, time.Now())
+	if !ok {
+		return
+	}
+	var projects []*Project
+	for _, p := range s.Projects() {
+		if p.Store.LastTriage() != today && !p.Spec.Triage.Disabled {
+			projects = append(projects, p)
+		}
+	}
+	if len(projects) == 0 || s.Triaging() || s.Sweeping() {
+		return
+	}
+	for _, p := range projects {
+		p.Store.SetLastTriage(today)
+	}
+	s.RunTriage(projects)
+}
+
+// RunTriage triages the projects (every one when none are given), one after another.
+func (s *Supervisor) RunTriage(projects []*Project) {
+	s.mu.Lock()
+	if s.triaging {
+		s.mu.Unlock()
+		return
+	}
+	s.triaging = true
+	s.mu.Unlock()
+	s.changed()
+	defer func() {
+		s.mu.Lock()
+		s.triaging = false
+		s.mu.Unlock()
+		s.changed()
+	}()
+	if projects == nil {
+		projects = s.Projects()
+	}
+	for _, p := range projects {
+		p.runTriage()
+	}
+}
+
+// reportProblems sends a telemetry event for each problem note the agents have left since the last look, so a
+// spike shows without waiting for the triage.
+func (s *Supervisor) reportProblems() {
+	type found struct {
+		p *Project
+		n problems.Note
+	}
+	var notes []found
+	present := map[string]bool{}
+	for _, p := range s.Projects() {
+		for _, n := range problems.List(p.ProblemsDir()) {
+			id := p.Name + "/" + n.Name
+			present[id] = true
+			notes = append(notes, found{p, n})
+		}
+	}
+	s.mu.Lock()
+	first := s.seenProblems == nil
+	seen := s.seenProblems
+	var fresh []found
+	for _, f := range notes {
+		if !seen[f.p.Name+"/"+f.n.Name] && !first {
+			fresh = append(fresh, f)
+		}
+	}
+	// Forget the notes the triage has deleted.
+	s.seenProblems = present
+	s.mu.Unlock()
+	for _, f := range fresh {
+		s.capture("agent_problem", map[string]any{
+			"project": f.p.Name,
+			"repo":    f.p.Repo.Describe(),
+			"issue":   f.n.Issue,
+			"kind":    f.n.Kind,
+			"problem": truncate(f.n.Body, 1000),
+		})
+	}
+	if len(fresh) > 0 {
+		s.changed()
+	}
+}
+
+// truncate cuts s to at most n bytes, on a character boundary.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return strings.ToValidUTF8(s[:n], "") + "…"
 }
 
 // ---- webhooks -------------------------------------------------------------------------------------------

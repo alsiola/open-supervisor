@@ -17,6 +17,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/logx"
+	"github.com/alsiola/open-supervisor/internal/problems"
 	"github.com/alsiola/open-supervisor/internal/store"
 	"github.com/alsiola/open-supervisor/internal/worktree"
 )
@@ -62,6 +63,7 @@ type Project struct {
 	mu            sync.Mutex
 	running       map[string]adapter.Turn
 	sweep         adapter.Turn
+	triage        adapter.Turn
 	checkTimers   map[string]*time.Timer
 	lastReconcile time.Time
 	reconciling   bool
@@ -101,6 +103,12 @@ func (p *Project) WorktreePath(key string) string {
 // CorrectionsDir is where the agents leave correction notes for the sweep.
 func (p *Project) CorrectionsDir() string { return filepath.Join(p.StateDir, "corrections") }
 
+// ProblemsDir is where the agents leave problem notes for the triage.
+func (p *Project) ProblemsDir() string { return filepath.Join(p.StateDir, "problems") }
+
+// TriageReport is where the triage writes what it found, when it doesn't open issues.
+func (p *Project) TriageReport() string { return filepath.Join(p.StateDir, "triage.md") }
+
 // InflightFile is the courtesy copy of the in-flight list agents can read.
 func (p *Project) InflightFile() string { return filepath.Join(p.StateDir, "inflight.md") }
 
@@ -111,12 +119,15 @@ func (p *Project) Running(key string) adapter.Turn {
 	return p.running[key]
 }
 
-// RunningCount is the number of turns this project has going, the sweep included.
+// RunningCount is the number of turns this project has going, the sweep and the triage included.
 func (p *Project) RunningCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	n := len(p.running)
 	if p.sweep != nil {
+		n++
+	}
+	if p.triage != nil {
 		n++
 	}
 	return n
@@ -127,6 +138,13 @@ func (p *Project) Sweeping() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.sweep != nil
+}
+
+// Triaging reports whether the project's triage is running.
+func (p *Project) Triaging() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.triage != nil
 }
 
 // Reconciled says when the last reconcile finished and whether one is going.
@@ -157,11 +175,13 @@ func (p *Project) stop() {
 	for _, t := range p.checkTimers {
 		t.Stop()
 	}
-	sweep := p.sweep
+	chores := []adapter.Turn{p.sweep, p.triage}
 	p.mu.Unlock()
 	p.Jobs.stop()
-	if sweep != nil {
-		sweep.Kill()
+	for _, t := range chores {
+		if t != nil {
+			t.Kill()
+		}
 	}
 }
 
@@ -1377,12 +1397,6 @@ func (p *Project) runSweep() {
 		p.logf("sweep: no corrections to sweep")
 		return
 	}
-	p.mu.Lock()
-	if p.sweep != nil || p.stopped {
-		p.mu.Unlock()
-		return
-	}
-	p.mu.Unlock()
 	rules := p.Spec.Sweep.RuleFiles
 	if len(rules) == 0 {
 		rules = p.Agent.RulesFiles()
@@ -1394,27 +1408,66 @@ func (p *Project) runSweep() {
 	if p.base != "" {
 		body += "\nMain branch: " + p.base
 	}
-	p.logf("sweep: folding %d correction(s) into the rule files", count)
+	p.runChore("sweep", &p.sweep, body, fmt.Sprintf("folding %d correction(s) into the rule files", count))
+}
+
+// Problems counts the problem notes waiting for the triage.
+func (p *Project) Problems() int { return problems.Count(p.ProblemsDir()) }
+
+// runTriage acts on the problems the agents reported with an agent turn: it fixes what is plainly wrong in the
+// project's own files and reports, or files, the rest.
+func (p *Project) runTriage() {
+	if p.Spec.Triage.Disabled {
+		return
+	}
+	count := p.Problems()
+	if count == 0 {
+		p.logf("triage: no problems to triage")
+		return
+	}
+	body := fmt.Sprintf("Problems folder: %s\nTracker: %s\nCode: %s %s", p.ProblemsDir(), p.Tracker.Describe(), p.Repo.Describe(), p.Repo.WebURL())
+	if p.Spec.Triage.OpenIssues {
+		body += "\nCauses: open or update an issue for each"
+	} else {
+		body += "\nCauses: write them to the report"
+	}
+	body += "\nReport: " + p.TriageReport()
+	if p.base != "" {
+		body += "\nMain branch: " + p.base
+	}
+	p.runChore("triage", &p.triage, body, fmt.Sprintf("triaging %d problem(s)", count))
+}
+
+// runChore runs one of the project's daily maintenance turns (the sweep, the triage) in the main checkout and
+// logs the last line of its report. slot holds the turn while it runs.
+func (p *Project) runChore(name string, slot *adapter.Turn, body, doing string) {
+	p.mu.Lock()
+	if *slot != nil || p.stopped {
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+	p.logf("%s: %s", name, doing)
 	turn, err := p.Agent.Start(context.Background(), adapter.TurnSpec{
 		Cwd:      p.Root,
 		Env:      p.hub.sessionEnv(p, ""),
-		Dir:      filepath.Join(p.StateDir, "turns", "sweep"),
-		Playbook: "sweep",
+		Dir:      filepath.Join(p.StateDir, "turns", name),
+		Playbook: name,
 		Body:     body,
 		DryRun:   p.hub.settings().DryRun,
 	})
 	if err != nil {
-		p.logf("sweep: couldn't start: %s", logx.ErrText(err))
+		p.logf("%s: couldn't start: %s", name, logx.ErrText(err))
 		return
 	}
 	p.mu.Lock()
-	p.sweep = turn
+	*slot = turn
 	p.mu.Unlock()
 	p.hub.changed()
 	<-turn.Done()
 	o := turn.Outcome()
 	p.mu.Lock()
-	p.sweep = nil
+	*slot = nil
 	p.mu.Unlock()
 	if o.OK {
 		last := strings.TrimSpace(o.Text)
@@ -1424,9 +1477,9 @@ func (p *Project) runSweep() {
 		if last == "" {
 			last = "done"
 		}
-		p.logf("sweep: %s", last)
+		p.logf("%s: %s", name, last)
 	} else {
-		p.logf("sweep: failed: %s", o.Error)
+		p.logf("%s: failed: %s", name, o.Error)
 	}
 	p.hub.changed()
 }

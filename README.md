@@ -96,6 +96,7 @@ settings:
   telemetry: [posthog]
   branch: agent/issue-{key}
   sweepAt: "08:41"           # daily corrections sweep; empty turns it off
+  triageAt: "08:51"          # daily triage of the problems agents report; empty turns it off
   labels:
     claimed: agent-in-progress
     scheduled: scheduled
@@ -117,6 +118,7 @@ projects:
     repo:    { connection: github }        # owner/name is read from the checkout's origin
     tracker: { connection: github }
     worktree: { copy: [.env], setup: pnpm install --frozen-lockfile, setupWhen: [pnpm-lock.yaml] }
+    triage: { openIssues: true }        # file an issue per cause; left out, the triage writes a report
   - name: api
     root: ~/Code/api
     repo:    { connection: bb, repo: acme/api }
@@ -142,7 +144,7 @@ sources:
 
 Secrets never go in the file. A secret field holds a reference: `keyring:<name>` (the OS keyring, which is what the wizard uses), `env:VAR`, `cmd:op read …`, or `file:<name>` (`secrets.yaml` next to the config, for machines without a keyring).
 
-State (issue records, turn output, logs, correction notes) goes in `~/.local/state/open-supervisor`. Generated files (the agent plugin, issue worktrees) go in `~/.local/share/open-supervisor`. Nothing is written into your checkouts except through git.
+State (issue records, turn output, logs, correction and problem notes, the triage's report) goes in `~/.local/state/open-supervisor`. Generated files (the agent plugin, issue worktrees) go in `~/.local/share/open-supervisor`. Nothing is written into your checkouts except through git.
 
 ### Jobs
 
@@ -229,15 +231,17 @@ The job learns about the delivery from `OPEN_SUPERVISOR_EVENT`, `OPEN_SUPERVISOR
 - **Webhooks plus reconcile.** Webhooks arrive through the tunnel and are signature-checked. They can also [run a project's jobs](#jobs-on-webhooks). Every few minutes a reconcile reads everything a webhook could have missed, so webhooks are optional.
 - **Retries** a failed turn after 5, then 10, then 15 minutes, then waits for `r`.
 - **Sweeps** once a day: an agent turn folds the corrections agents logged into the project's rule files.
-- **Usage and metrics.** It shows the Claude subscription's 5-hour and 7-day windows in the header. It sends an `agent_turn` event per turn (tokens, cost, duration, state) and an `agent_usage` event to the telemetry connections.
+- **Triages** once a day: agents log what they had to work around with `agent problem` (an unset variable, a stale skill, a failing `agent` command). An agent turn groups the notes by cause, fixes what is plainly wrong in the project's own files with one commit to the main branch, and writes the rest to `triage.md` in the project's state folder. With `triage.openIssues` it opens or updates one issue per cause in the project's tracker instead. Causes in open-supervisor itself come back as a link that opens an issue here, filled in. The header counts the notes waiting.
+- **Usage and metrics.** It shows the Claude subscription's 5-hour and 7-day windows in the header. It sends the telemetry connections an `agent_turn` event per turn (tokens, cost, duration, state), an `agent_usage` event, and an `agent_problem` event for each problem an agent logs.
 
 ### What agents get
 
-The playbooks (`internal/playbooks`) reach Claude Code as a plugin of skills: `/open-supervisor:work-issue`, `/open-supervisor:sweep`. Agents touch the tracker and code host only through `open-supervisor agent …`, so the playbooks are the same everywhere:
+The playbooks (`internal/playbooks`) reach Claude Code as a plugin of skills: `/open-supervisor:work-issue`, `/open-supervisor:sweep`, `/open-supervisor:triage`. Agents touch the tracker and code host only through `open-supervisor agent …`, so the playbooks are the same everywhere:
 
 ```
-agent context | issue view | issue comment | pr list | pr create | pr view | pr comment | pr reply
-agent checks | worktree setup | worktree remove | screenshots | schedule | correction | inflight
+agent context | issue view | issue comment | issue list | issue create | pr list | pr create | pr view
+agent pr comment | pr reply | checks | worktree setup | worktree remove | screenshots | schedule
+agent correction | problem | inflight
 ```
 
 Rules particular to a project (what must pass, how to run its dev server) belong in its own `CLAUDE.md` or `AGENTS.md`. `open-supervisor playbooks` writes the plugin out and prints its path, for `claude --plugin-dir <path>` by hand.
@@ -258,6 +262,7 @@ Rules particular to a project (what must pass, how to run its dev server) belong
 | `!` | run a shell command: pick where (the folder open-supervisor started in, or a project's checkout), then type it. It joins the list as a shell task (`!1`, `!2`…) with its output on its detail page; `r` runs it again, `k` kills it, `d` drops it. Shell tasks belong to this run: quitting kills those still going |
 | `R` | reconcile now |
 | `s` | sweep now |
+| `T` | triage now |
 | `J` | job runs: pick a job, then one of its kept runs, for its trigger, timing, exit code and output; `r` on the run runs the job again |
 | `j` | run a job now: pick it from every project's jobs |
 | `,` | edit the config: general settings, connections (with a connection test), projects |

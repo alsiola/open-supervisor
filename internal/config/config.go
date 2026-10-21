@@ -56,6 +56,8 @@ type Settings struct {
 	Branch string `yaml:"branch"`
 	// SweepAt is the local time (HH:MM) of the daily corrections sweep; empty turns it off.
 	SweepAt string `yaml:"sweepAt"`
+	// TriageAt is the local time (HH:MM) of the daily triage of the problems agents report; empty turns it off.
+	TriageAt string `yaml:"triageAt"`
 	// Jobs runs the projects' jobs.
 	Jobs         bool `yaml:"jobs"`
 	UsageMinutes int  `yaml:"usageMinutes"`
@@ -148,6 +150,7 @@ type Project struct {
 	BaseBranch string            `yaml:"baseBranch,omitempty"`
 	Worktree   Worktree          `yaml:"worktree,omitempty"`
 	Sweep      Sweep             `yaml:"sweep,omitempty"`
+	Triage     Triage            `yaml:"triage,omitempty"`
 	Jobs       []Job             `yaml:"jobs,omitempty"`
 	Env        map[string]string `yaml:"env,omitempty"`
 	Disabled   bool              `yaml:"disabled,omitempty"`
@@ -171,6 +174,15 @@ type Sweep struct {
 	Guide string `yaml:"guide,omitempty"`
 }
 
+// Triage is the daily pass over the problems the agents report: it fixes what is plainly wrong in the project's
+// own files and reports, or files, the rest.
+type Triage struct {
+	Disabled bool `yaml:"disabled,omitempty"`
+	// OpenIssues opens (or updates) one issue per cause in the project's tracker; off, the triage only writes a
+	// report for the owner.
+	OpenIssues bool `yaml:"openIssues,omitempty"`
+}
+
 // DefaultSettings are what a new config starts with and what a missing setting falls back to.
 func DefaultSettings() Settings {
 	return Settings{
@@ -189,6 +201,7 @@ func DefaultSettings() Settings {
 		},
 		Branch:                "agent/issue-{key}",
 		SweepAt:               "08:41",
+		TriageAt:              "08:51",
 		Jobs:                  true,
 		UsageMinutes:          5,
 		MaxAttempts:           3,

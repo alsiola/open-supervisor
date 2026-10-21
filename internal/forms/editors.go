@@ -284,7 +284,10 @@ type ProjectDraft struct {
 	Setup     string
 	SetupWhen string // comma-separated
 	NoSweep   bool
-	Disabled  bool
+	NoTriage  bool
+	// OpenIssues: the triage opens issues for the causes it finds, not only a report.
+	OpenIssues bool
+	Disabled   bool
 
 	RepoFields    *FieldSet
 	TrackerFields *FieldSet
@@ -317,7 +320,7 @@ func NewProjectDraft(cfg *config.Config, p *config.Project, dir string) *Project
 	d := &ProjectDraft{
 		Original: p.Name, Name: p.Name, Root: p.Root, Agent: p.Agent, Branch: p.Branch, Base: p.BaseBranch,
 		Copy: strings.Join(p.Worktree.Copy, ", "), Setup: p.Worktree.Setup, SetupWhen: strings.Join(p.Worktree.SetupWhen, ", "),
-		NoSweep: p.Sweep.Disabled, Disabled: p.Disabled, project: p,
+		NoSweep: p.Sweep.Disabled, NoTriage: p.Triage.Disabled, OpenIssues: p.Triage.OpenIssues, Disabled: p.Disabled, project: p,
 	}
 	if p.Repo != nil {
 		d.Repo = p.Repo.Connection
@@ -583,7 +586,7 @@ func GitRemote(root string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// ExtraGroups ask for the branch template, worktree setup and sweep.
+// ExtraGroups ask for the branch template, worktree setup, sweep and triage.
 func (d *ProjectDraft) ExtraGroups(cfg *config.Config) []*huh.Group {
 	return []*huh.Group{huh.NewGroup(
 		huh.NewInput().Title("Branch").Description("{key} is the issue key. Blank uses the default: "+cfg.Settings.Branch).Value(&d.Branch).Validate(func(s string) error {
@@ -597,6 +600,8 @@ func (d *ProjectDraft) ExtraGroups(cfg *config.Config) []*huh.Group {
 		huh.NewInput().Title("Worktree setup command").Description("Run in a new worktree, and again when a watched file changes.").Value(&d.Setup),
 		huh.NewInput().Title("Rerun setup when these change").Description("Comma-separated, e.g. the lockfile").Value(&d.SetupWhen),
 		huh.NewConfirm().Title("Turn off the daily corrections sweep?").Value(&d.NoSweep),
+		huh.NewConfirm().Title("Turn off the daily triage of the problems agents report?").Value(&d.NoTriage),
+		huh.NewConfirm().Title("Let the triage open issues?").Description("One per cause, in the project's tracker. No: it writes a report for you instead.").Value(&d.OpenIssues),
 	).Title("Worktrees and branches")}
 }
 
@@ -635,6 +640,8 @@ func (d *ProjectDraft) Apply(cfg *config.Config) (*config.Project, error) {
 	p.Worktree.Setup = strings.TrimSpace(d.Setup)
 	p.Worktree.SetupWhen = splitList(d.SetupWhen)
 	p.Sweep.Disabled = d.NoSweep
+	p.Triage.Disabled = d.NoTriage
+	p.Triage.OpenIssues = d.OpenIssues
 	p.Disabled = d.Disabled
 	repoValues := adapter.Values{}
 	if d.RepoFields != nil {
@@ -714,7 +721,7 @@ type SettingsDraft struct {
 	Agent, Tunnel                                   string
 	Telemetry                                       []string
 	Claimed, Scheduled, Skip, Help, Review, Done    string
-	Branch, SweepAt                                 string
+	Branch, SweepAt, TriageAt                       string
 	Jobs                                            bool
 }
 
@@ -727,7 +734,7 @@ func NewSettingsDraft(cfg *config.Config) *SettingsDraft {
 		Agent: s.Agent, Tunnel: s.Tunnel, Telemetry: append([]string(nil), s.Telemetry...),
 		Claimed: s.Labels.Claimed, Scheduled: s.Labels.Scheduled, Skip: strings.Join(s.Labels.Skip, ", "),
 		Help: s.Labels.Help, Review: s.Labels.Review, Done: s.Labels.Done,
-		Branch: s.Branch, SweepAt: s.SweepAt, Jobs: s.Jobs,
+		Branch: s.Branch, SweepAt: s.SweepAt, TriageAt: s.TriageAt, Jobs: s.Jobs,
 	}
 }
 
@@ -797,19 +804,23 @@ func (d *SettingsDraft) Groups(cfg *config.Config) []*huh.Group {
 			}
 			return nil
 		}),
-		huh.NewInput().Title("Daily sweep at").Description("Local HH:MM; blank turns it off").Value(&d.SweepAt).Validate(func(s string) error {
-			if s == "" {
-				return nil
-			}
-			var h, m int
-			if _, err := fmt.Sscanf(s, "%d:%d", &h, &m); err != nil || h < 0 || h > 23 || m < 0 || m > 59 {
-				return errors.New("HH:MM")
-			}
-			return nil
-		}),
+		huh.NewInput().Title("Daily sweep at").Description("Local HH:MM; blank turns it off").Value(&d.SweepAt).Validate(clockTime),
+		huh.NewInput().Title("Daily triage at").Description("Of the problems agents report. Local HH:MM; blank turns it off").Value(&d.TriageAt).Validate(clockTime),
 		huh.NewConfirm().Title("Run the projects' jobs?").Value(&d.Jobs),
-	).Title("Branches, sweep and jobs"))
+	).Title("Branches, sweep, triage and jobs"))
 	return groups
+}
+
+// clockTime checks a daily time: HH:MM, or blank for off.
+func clockTime(s string) error {
+	if s == "" {
+		return nil
+	}
+	var h, m int
+	if _, err := fmt.Sscanf(s, "%d:%d", &h, &m); err != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return errors.New("HH:MM")
+	}
+	return nil
 }
 
 // Apply writes the settings into cfg.
@@ -838,5 +849,6 @@ func (d *SettingsDraft) Apply(cfg *config.Config) {
 		s.Branch = strings.TrimSpace(d.Branch)
 	}
 	s.SweepAt = strings.TrimSpace(d.SweepAt)
+	s.TriageAt = strings.TrimSpace(d.TriageAt)
 	s.Jobs = d.Jobs
 }
