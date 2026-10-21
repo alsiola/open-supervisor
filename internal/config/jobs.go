@@ -16,7 +16,7 @@ import (
 //   - every EveryMinutes minutes;
 //   - at set times: At (UTC, HH:MM) or Cron (five fields, in TimeZone, UTC when left out). A slot missed by
 //     more than six hours waits for the next; the latest one within six hours that hasn't run runs once;
-//   - on webhooks (see JobTrigger), and from the TUI on Key.
+//   - on webhooks (see JobTrigger), and from the TUI (j).
 //
 // The supervisor waits for a run (up to TimeoutMinutes, 5 when left out) and records how it ended from its
 // exit code. A run asked for while one is going waits for it: at most one waits, and a delivery's takes the
@@ -30,7 +30,6 @@ import (
 type Job struct {
 	Name           string      `yaml:"name" json:"name"`
 	Command        []string    `yaml:"command" json:"command"`
-	Key            string      `yaml:"key,omitempty" json:"key,omitempty"`
 	EveryMinutes   int         `yaml:"everyMinutes,omitempty" json:"everyMinutes,omitempty"`
 	TimeoutMinutes int         `yaml:"timeoutMinutes,omitempty" json:"timeoutMinutes,omitempty"`
 	At             []string    `yaml:"at,omitempty" json:"at,omitempty"`

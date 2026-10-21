@@ -47,17 +47,12 @@ func (m *model) jobsPicker() *picker {
 	}}
 }
 
-// runPicker lists every project's jobs; picking one runs it now. A job with a key shows it: the key runs it
-// from the list too.
+// runPicker lists every project's jobs; picking one runs it now.
 func (m *model) runPicker() *picker {
 	var items []pickItem
 	for _, p := range m.sup.Projects() {
 		for _, j := range p.Jobs.Specs {
-			value := p.Jobs.Describe(j)
-			if j.Key != "" && !reserved[j.Key] {
-				value = "key " + j.Key + " · " + value
-			}
-			items = append(items, pickItem{label: p.Name + " " + j.Name, value: value, ref: jobRun{p: p, job: j.Name}})
+			items = append(items, pickItem{label: p.Name + " " + j.Name, value: p.Jobs.Describe(j), ref: jobRun{p: p, job: j.Name}})
 		}
 	}
 	return &picker{title: "run a job now", items: items, done: func(it pickItem) tea.Cmd {

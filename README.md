@@ -122,7 +122,7 @@ projects:
     repo:    { connection: bb, repo: acme/api }
     tracker: { connection: jira, project: API, transitionClaimed: In Progress, transitionReview: In Review }
     jobs:
-      - { name: refresh, command: [pnpm, refresh], at: ["06:00"], status: .local/refresh, key: f }
+      - { name: refresh, command: [pnpm, refresh], at: ["06:00"], status: .local/refresh }
       - { name: deploy, command: [./scripts/deploy.sh], on: { events: [push], branches: [main] } }
       - { name: reindex, command: [pnpm, reindex], on: { webhook: true } }
   - name: web
@@ -169,7 +169,7 @@ jobs:
     status: .local/refresh
 ```
 
-- **When.** `everyMinutes`; `at` (UTC `HH:MM` times); `cron`, five fields read in `timeZone`; webhooks (`on:`, below); or a key in the TUI (`key: f`). A timed slot missed by more than six hours (the supervisor wasn't running) waits for the next. The latest slot within six hours runs once.
+- **When.** `everyMinutes`; `at` (UTC `HH:MM` times); `cron`, five fields read in `timeZone`; webhooks (`on:`, below); or by hand from the TUI (`j`). A timed slot missed by more than six hours (the supervisor wasn't running) waits for the next. The latest slot within six hours runs once.
 - **Clock changes.** A `cron` time follows the zone's summer time. A time the clocks skip (01:30 London on the last Sunday in March) doesn't run that day. A time they repeat (01:30 on the last Sunday in October) runs once. To be safe, keep jobs out of 01:00–02:00 in zones that change.
 - **Runs the supervisor waits for.** A job runs and the supervisor waits for it, up to `timeoutMinutes` (5 by default). The exit code says how it went. One run of a job goes at a time. A run asked for while one is going waits for it to end. At most one run waits: a delivery's takes the place of a timer's, and a later delivery's takes the place of an earlier one's.
 - **Detached runs.** A timed job with `status` is for long runs: it starts detached and keeps `running.json` and `last.json` in that folder itself (see `Job` in `internal/config/jobs.go`). A delivery that arrives while it runs starts nothing.
@@ -259,8 +259,7 @@ Rules particular to a project (what must pass, how to run its dev server) belong
 | `R` | reconcile now |
 | `s` | sweep now |
 | `J` | job runs: pick a job, then one of its kept runs, for its trigger, timing, exit code and output; `r` on the run runs the job again |
-| `j` | run a job now: pick it from every project's jobs (a job's own key shows beside it) |
-| job keys | run that job now; they don't crowd the key bar, `j` lists them |
+| `j` | run a job now: pick it from every project's jobs |
 | `,` | edit the config: general settings, connections (with a connection test), projects |
 | `l` | show or hide the log |
 | `q` | quit; running turns carry on and are adopted at the next start |
