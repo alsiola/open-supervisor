@@ -215,7 +215,8 @@ func (s *Supervisor) changed() {
 }
 
 // sessionEnv is the environment for a project's agent sessions and jobs: the supervisor's own, the project's
-// .env and env settings, and what the agent needs to call back into the supervisor.
+// .env and env settings (secret references resolved), and what the agent needs to call back into the
+// supervisor.
 func (s *Supervisor) sessionEnv(p *Project, key string) []string {
 	env := map[string]string{}
 	order := []string{}
@@ -234,6 +235,14 @@ func (s *Supervisor) sessionEnv(p *Project, key string) []string {
 		set(k, v)
 	}
 	for k, v := range p.Spec.Env {
+		if config.IsReference(v) {
+			got, err := config.ResolveSecret(v)
+			if err != nil {
+				p.logf("env %s: %s", k, logx.ErrText(err))
+				continue
+			}
+			v = got
+		}
 		set(k, v)
 	}
 	set("OPEN_SUPERVISOR", s.exe)

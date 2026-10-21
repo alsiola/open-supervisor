@@ -28,8 +28,12 @@ type HookEvent struct {
 	Name   string
 	Action string
 	// Ref is the git ref the event is about, when it has one ("refs/heads/main" for a push).
-	Ref  string
-	Body []byte
+	Ref string
+	// Before and After are a push's old and new heads.
+	Before, After string
+	// Files are the files a push changed, as far as its delivery says.
+	Files []string
+	Body  []byte
 }
 
 // Signal is one thing a webhook delivery said.

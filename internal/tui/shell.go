@@ -21,7 +21,10 @@ type picker struct {
 	done  func(pickItem) tea.Cmd
 }
 
-type pickItem struct{ label, value string }
+type pickItem struct {
+	label, value string
+	ref          any // what the item stands for, when the value doesn't say
+}
 
 func (m *model) pickerKey(k tea.KeyMsg) tea.Cmd {
 	pk := m.picker
@@ -48,7 +51,7 @@ func (m *model) shellDirs() []pickItem {
 	var out []pickItem
 	seen := map[string]int{}
 	if m.cwd != "" {
-		out = append(out, pickItem{"here", m.cwd})
+		out = append(out, pickItem{label: "here", value: m.cwd})
 		seen[filepath.Clean(m.cwd)] = 0
 	}
 	for _, p := range m.sup.Projects() {
@@ -60,7 +63,7 @@ func (m *model) shellDirs() []pickItem {
 			continue
 		}
 		seen[filepath.Clean(p.Root)] = len(out)
-		out = append(out, pickItem{p.Name, p.Root})
+		out = append(out, pickItem{label: p.Name, value: p.Root})
 	}
 	return out
 }

@@ -36,11 +36,12 @@ const (
 	editorView
 )
 
-// row is an issue (p and r) or a shell task (sh).
+// row is an issue (p and r), a shell task (sh) or, on the detail page only, a job's run.
 type row struct {
-	p  *engine.Project
-	r  *store.Record
-	sh *engine.Shell
+	p   *engine.Project
+	r   *store.Record
+	sh  *engine.Shell
+	run *jobRun
 }
 
 type input struct {
@@ -57,7 +58,8 @@ type model struct {
 	showLog       bool
 	detail        struct {
 		project, key string
-		shell        int // the shell task's id, when the page is one
+		shell        int     // the shell task's id, when the page is one
+		run          *jobRun // the job's run, when the page is one
 	}
 	scroll      int
 	focusT      bool // the transcript box has the scroll keys
@@ -131,6 +133,9 @@ func (m *model) rows() []row {
 
 func (m *model) current() *row {
 	if m.view == detailView {
+		if m.detail.run != nil {
+			return &row{run: m.detail.run}
+		}
 		if m.detail.shell > 0 {
 			if sh := m.sup.Shell(m.detail.shell); sh != nil {
 				return &row{sh: sh}
@@ -155,7 +160,7 @@ func (m *model) current() *row {
 }
 
 // reserved are the keys the TUI uses itself; a job can't take one.
-var reserved = map[string]bool{"!": true, "a": true, "c": true, "d": true, "g": true, "k": true, "l": true, "m": true, "q": true, "r": true, "s": true, "t": true, "R": true, ",": true}
+var reserved = map[string]bool{"!": true, "J": true, "a": true, "c": true, "d": true, "g": true, "k": true, "l": true, "m": true, "q": true, "r": true, "s": true, "t": true, "R": true, ",": true}
 
 type jobKey struct {
 	p   *engine.Project
@@ -329,6 +334,7 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 	case "enter", "right":
 		if cur != nil {
 			m.view = detailView
+			m.detail.run = nil
 			if cur.sh != nil {
 				m.detail.project, m.detail.key, m.detail.shell = "", "", cur.sh.ID
 			} else {
@@ -338,6 +344,12 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 		}
 	case "!":
 		m.picker = m.shellPicker()
+	case "J":
+		if pk := m.jobsPicker(); len(pk.items) > 0 {
+			m.picker = pk
+		} else {
+			m.flash = "no jobs"
+		}
 	case "c":
 		var fallback *engine.Project
 		if cur != nil && cur.p != nil {
@@ -425,6 +437,9 @@ func (m *model) action(s string, cur *row) tea.Cmd {
 	}
 	if cur.sh != nil {
 		return m.shellAction(s, cur.sh)
+	}
+	if cur.run != nil {
+		return m.runAction(s, *cur.run)
 	}
 	p, r := cur.p, cur.r
 	switch s {
