@@ -160,7 +160,7 @@ func (m *model) current() *row {
 }
 
 // reserved are the keys the TUI uses itself; a job can't take one.
-var reserved = map[string]bool{"!": true, "J": true, "a": true, "c": true, "d": true, "g": true, "k": true, "l": true, "m": true, "q": true, "r": true, "s": true, "t": true, "R": true, ",": true}
+var reserved = map[string]bool{"!": true, "J": true, "j": true, "a": true, "c": true, "d": true, "g": true, "k": true, "l": true, "m": true, "q": true, "r": true, "s": true, "t": true, "R": true, ",": true}
 
 type jobKey struct {
 	p   *engine.Project
@@ -344,6 +344,12 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 		}
 	case "!":
 		m.picker = m.shellPicker()
+	case "j":
+		if pk := m.runPicker(); len(pk.items) > 0 {
+			m.picker = pk
+		} else {
+			m.flash = "no jobs"
+		}
 	case "J":
 		if pk := m.jobsPicker(); len(pk.items) > 0 {
 			m.picker = pk

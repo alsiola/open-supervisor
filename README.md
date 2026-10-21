@@ -259,7 +259,8 @@ Rules particular to a project (what must pass, how to run its dev server) belong
 | `R` | reconcile now |
 | `s` | sweep now |
 | `J` | job runs: pick a job, then one of its kept runs, for its trigger, timing, exit code and output; `r` on the run runs the job again |
-| job keys | run that job now |
+| `j` | run a job now: pick it from every project's jobs (a job's own key shows beside it) |
+| job keys | run that job now; they don't crowd the key bar, `j` lists them |
 | `,` | edit the config: general settings, connections (with a connection test), projects |
 | `l` | show or hide the log |
 | `q` | quit; running turns carry on and are adopted at the next start |

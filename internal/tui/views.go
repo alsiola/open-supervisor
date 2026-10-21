@@ -251,16 +251,7 @@ func (m *model) renderList() string {
 			out = append(out, "")
 		}
 	}
-	var jk []string
-	for k, jobs := range m.jobKeys() {
-		jk = append(jk, k+" "+jobs[0].job.Name)
-	}
-	sort.Strings(jk)
-	keys := " ↑↓ select   ⏎ details   g open   m message   a attach   r run now   k kill   d drop   c claim   ! shell   J jobs   R reconcile   s sweep"
-	if len(jk) > 0 {
-		keys += "   " + strings.Join(jk, "   ")
-	}
-	keys += "   l log   , config   q quit"
+	keys := " ↑↓ select   ⏎ details   g open   m message   a attach   r run now   k kill   d drop   c claim   ! shell   j run job   J job runs   R reconcile   s sweep   l log   , config   q quit"
 	out = append(m.overlay(out), m.footer(keys))
 	return m.paint(out)
 }
