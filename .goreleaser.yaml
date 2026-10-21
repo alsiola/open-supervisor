@@ -1,4 +1,5 @@
-# Release builds: `git tag v0.1.0 && git push --tags` runs .github/workflows/release.yml, which runs this.
+# Release builds: the release workflow (.github/workflows/release.yml, run by hand) has semantic-release tag the
+# next version, then runs this with the notes it wrote.
 version: 2
 project_name: open-supervisor
 
@@ -28,10 +29,9 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# semantic-release writes the notes and passes them in with --release-notes.
 changelog:
-  sort: asc
-  filters:
-    exclude: ["^docs:", "^test:", "^chore:"]
+  disable: true
 
 # `brew install alsiola/tap/open-supervisor`. Needs a repo alsiola/homebrew-tap and a HOMEBREW_TAP_TOKEN
 # secret that can push to it; without the secret this step is skipped and the release goes ahead.
