@@ -15,7 +15,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/engine"
 	"github.com/alsiola/open-supervisor/internal/logx"
 	"github.com/alsiola/open-supervisor/internal/store"
@@ -157,38 +156,6 @@ func (m *model) current() *row {
 		return &rows[m.selected]
 	}
 	return nil
-}
-
-// reserved are the keys the TUI uses itself; a job can't take one.
-var reserved = map[string]bool{"!": true, "J": true, "a": true, "c": true, "d": true, "g": true, "k": true, "l": true, "m": true, "q": true, "r": true, "s": true, "t": true, "R": true, ",": true}
-
-type jobKey struct {
-	p   *engine.Project
-	job config.Job
-}
-
-// jobKeys maps each job's key to its jobs, the selected row's project first.
-func (m *model) jobKeys() map[string][]jobKey {
-	out := map[string][]jobKey{}
-	projects := m.sup.Projects()
-	if cur := m.current(); cur != nil && cur.p != nil {
-		ordered := []*engine.Project{cur.p}
-		for _, p := range projects {
-			if p != cur.p {
-				ordered = append(ordered, p)
-			}
-		}
-		projects = ordered
-	}
-	for _, p := range projects {
-		for _, j := range p.Jobs.Specs {
-			if j.Key == "" || reserved[j.Key] {
-				continue
-			}
-			out[j.Key] = append(out[j.Key], jobKey{p, j})
-		}
-	}
-	return out
 }
 
 func (m *model) ask(prompt string, done func(string) tea.Cmd) tea.Cmd {
@@ -344,6 +311,12 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 		}
 	case "!":
 		m.picker = m.shellPicker()
+	case "j":
+		if pk := m.runPicker(); len(pk.items) > 0 {
+			m.picker = pk
+		} else {
+			m.flash = "no jobs"
+		}
 	case "J":
 		if pk := m.jobsPicker(); len(pk.items) > 0 {
 			m.picker = pk
@@ -397,12 +370,6 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 		m.view = editorView
 		return m.editor.init()
 	default:
-		if jobs := m.jobKeys()[s]; len(jobs) > 0 {
-			j := jobs[0]
-			j.p.Jobs.RunNow(j.job)
-			m.flash = fmt.Sprintf("%s: running %s", j.p.Name, j.job.Name)
-			return nil
-		}
 		return m.action(s, cur)
 	}
 	return nil

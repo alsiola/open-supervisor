@@ -47,6 +47,24 @@ func (m *model) jobsPicker() *picker {
 	}}
 }
 
+// runPicker lists every project's jobs; picking one runs it now.
+func (m *model) runPicker() *picker {
+	var items []pickItem
+	for _, p := range m.sup.Projects() {
+		for _, j := range p.Jobs.Specs {
+			items = append(items, pickItem{label: p.Name + " " + j.Name, value: p.Jobs.Describe(j), ref: jobRun{p: p, job: j.Name}})
+		}
+	}
+	return &picker{title: "run a job now", items: items, done: func(it pickItem) tea.Cmd {
+		ref := it.ref.(jobRun)
+		if j, ok := ref.p.Jobs.Find(ref.job); ok {
+			ref.p.Jobs.RunNow(j)
+			return flash(fmt.Sprintf("%s: running %s", ref.p.Name, ref.job))
+		}
+		return flash(fmt.Sprintf("%s: no job %s", ref.p.Name, ref.job))
+	}}
+}
+
 func (m *model) openRun(ref jobRun) {
 	m.view = detailView
 	m.detail.project, m.detail.key, m.detail.shell, m.detail.run = "", "", 0, &ref
