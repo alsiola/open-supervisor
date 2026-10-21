@@ -272,4 +272,6 @@ make build      # bin/open-supervisor
 make snapshot   # every platform's release build into dist/ (needs goreleaser)
 ```
 
-To release, push a `v*` tag. The release workflow builds every platform with goreleaser, publishes the GitHub release and updates the Homebrew tap. The tap update needs an `alsiola/homebrew-tap` repo and a `HOMEBREW_TAP_TOKEN` secret.
+Versions follow [semantic versioning](https://semver.org), worked out from the commits. Write commit messages as [Conventional Commits](https://www.conventionalcommits.org): `fix: …` makes a patch release, `feat: …` a minor one, and a `!` after the type (`feat!: …`) or a `BREAKING CHANGE:` footer a major one. Other types (`docs`, `test`, `ci`, `chore`, `refactor`) don't release anything on their own. A `commitlint` check on each PR holds its commits and its title to this, so a squash merge lands a conventional message whichever one GitHub uses.
+
+To release, run the **release** workflow from the Actions tab (tick *dry run* to see the next version and its notes first). semantic-release picks the version from the commits since the last tag, adds the notes to `CHANGELOG.md`, commits and tags that on `main`, and goreleaser then builds every platform, publishes the GitHub release with the same notes and updates the Homebrew tap. The tap update needs an `alsiola/homebrew-tap` repo and a `HOMEBREW_TAP_TOKEN` secret.
