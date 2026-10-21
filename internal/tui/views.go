@@ -202,6 +202,14 @@ func (m *model) renderList() string {
 	first := max(0, min(m.selected-listH/2, len(rows)-listH))
 	for i := first; i < len(rows) && i < first+listH; i++ {
 		rw := rows[i]
+		if rw.sh != nil {
+			line := m.shellLine(rw.sh, infoW)
+			if i == m.selected {
+				line = invS.Render(pad(ansi.Strip(line), m.width))
+			}
+			out = append(out, line)
+			continue
+		}
 		r := rw.r
 		pr := ""
 		if len(r.PRs) > 0 {
@@ -248,12 +256,12 @@ func (m *model) renderList() string {
 		jk = append(jk, k+" "+jobs[0].job.Name)
 	}
 	sort.Strings(jk)
-	keys := " ↑↓ select   ⏎ details   g open   m message   a attach   r run now   k kill   d drop   c claim   R reconcile   s sweep"
+	keys := " ↑↓ select   ⏎ details   g open   m message   a attach   r run now   k kill   d drop   c claim   ! shell   R reconcile   s sweep"
 	if len(jk) > 0 {
 		keys += "   " + strings.Join(jk, "   ")
 	}
 	keys += "   l log   , config   q quit"
-	out = append(out, m.footer(keys))
+	out = append(m.overlay(out), m.footer(keys))
 	return m.paint(out)
 }
 
@@ -473,7 +481,13 @@ func (m *model) transcriptLines(rw row) []string {
 
 func (m *model) renderDetail(rw row) string {
 	out := m.header()
-	body := m.detailLines(rw)
+	var body, lines []string
+	what := "transcript"
+	if rw.sh != nil {
+		body, lines, what = m.shellDetailLines(rw.sh), m.shellOutputLines(rw.sh), "output"
+	} else {
+		body, lines = m.detailLines(rw), m.transcriptLines(rw)
+	}
 	total := m.height - len(out) - 1
 	box := max(6, total/2)
 	room := max(1, total-box)
@@ -483,7 +497,6 @@ func (m *model) renderDetail(rw row) string {
 	for len(out) < m.height-1-box {
 		out = append(out, "")
 	}
-	lines := m.transcriptLines(rw)
 	view := box - 1
 	m.tPage = max(1, view-1)
 	m.tMax = max(0, len(lines)-view)
@@ -501,7 +514,7 @@ func (m *model) renderDetail(rw row) string {
 			rng += ", following"
 		}
 	}
-	title := " transcript " + dim("("+rng+")") + " "
+	title := " " + what + " " + dim("("+rng+")") + " "
 	if m.focusT {
 		out = append(out, accentS.Render("━━")+boldS.Render(title)+accentS.Render(strings.Repeat("━", max(0, m.width-ansi.StringWidth(title)-2))))
 	} else {
@@ -512,16 +525,22 @@ func (m *model) renderDetail(rw row) string {
 	}
 	for len(out) < m.height-1 {
 		if len(lines) == 0 && len(out) == m.height-box {
-			out = append(out, dim("  no transcript yet"))
+			out = append(out, dim("  no "+what+" yet"))
 			continue
 		}
 		out = append(out, "")
 	}
 	var keys string
-	if m.focusT {
+	switch {
+	case m.focusT && rw.sh != nil:
+		keys = " ↑↓ pgup pgdn home end scroll   t/esc details   r run again   k kill   q quit"
+	case m.focusT:
 		keys = " ↑↓ pgup pgdn home end scroll   t/esc details   g open   m message   a attach   r run now   k kill   q quit"
-	} else {
+	default:
 		keys = " ↑↓ scroll   t transcript   esc back   g open   m message   a attach   r run now   k kill   d drop   q quit"
+		if rw.sh != nil {
+			keys = " ↑↓ scroll   t output   esc back   r run again   k kill   d drop   q quit"
+		}
 		if len(body) > room {
 			keys += fmt.Sprintf("   %d-%d of %d", m.scroll+1, end, len(body))
 		}
