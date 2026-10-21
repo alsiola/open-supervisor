@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.0](https://github.com/alsiola/open-supervisor/compare/v0.2.2...v0.3.0) (2026-10-21)
+
+### Features
+
+* **tui:** run jobs from a j picker and drop job hotkeys ([#10](https://github.com/alsiola/open-supervisor/issues/10)) ([30af7db](https://github.com/alsiola/open-supervisor/commit/30af7db0fcb3002300f350d1b6011fda497a96c5))
+
 ## [0.2.2](https://github.com/alsiola/open-supervisor/compare/v0.2.1...v0.2.2) (2026-10-21)
 
 ### Bug Fixes
