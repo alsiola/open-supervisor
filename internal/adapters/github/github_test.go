@@ -363,6 +363,14 @@ func TestWebhookEvents(t *testing.T) {
 			t.Errorf("%s: %+v", c.event, ev)
 		}
 	}
+	push := `{"ref":"refs/heads/main","before":"aaa","after":"bbb","commits":[{"added":["a.json"],"modified":["b.ts"]},{"removed":["c.md"],"modified":["b.ts"]}],` + repo + `}`
+	for _, s := range deliver(t, rp, "push", push) {
+		if s.Type == core.SigEvent {
+			if ev := s.Event; ev.Before != "aaa" || ev.After != "bbb" || strings.Join(ev.Files, ",") != "a.json,b.ts,c.md" {
+				t.Errorf("push: %+v", ev)
+			}
+		}
+	}
 	for _, s := range deliver(t, tr, "ping", `{`+repo+`}`) {
 		if s.Type == core.SigEvent {
 			t.Error("a ping went to the jobs")

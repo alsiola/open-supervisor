@@ -144,7 +144,38 @@ Secrets never go in the file. A secret field holds a reference: `keyring:<name>`
 
 State (issue records, turn output, logs, correction notes) goes in `~/.local/state/open-supervisor`. Generated files (the agent plugin, issue worktrees) go in `~/.local/share/open-supervisor`. Nothing is written into your checkouts except through git.
 
-A project can also keep jobs in its own checkout, in `.open-supervisor.yaml` under `jobs:`.
+### Jobs
+
+A job is a command the supervisor runs for a project. A project can also keep jobs in its own checkout, in `.open-supervisor.yaml` under `jobs:`.
+
+```yaml
+jobs:
+  - name: x engagement
+    command: [node, pipeline/x/open-issue.ts]
+    cron: "0 9,13,18 * * *"
+    timeZone: Europe/London       # UTC when left out
+  - name: post reels
+    command: [node, pipeline/reels/post.ts]
+    cron: "0 */6 * * *"
+    checkout: fresh
+    on: { events: [push], branches: [main], paths: ['data/reels/*.json', '!data/reels/posted.json'] }
+  - name: smell check
+    command: [./scripts/check.sh]
+    everyMinutes: 10
+    timeoutMinutes: 5
+  - name: refresh                 # long: started detached, reports through its status folder
+    command: [pnpm, refresh]
+    at: ["05:17", "17:17"]
+    status: .local/refresh
+```
+
+- **When.** `everyMinutes`; `at` (UTC `HH:MM` times); `cron`, five fields read in `timeZone`; webhooks (`on:`, below); or a key in the TUI (`key: f`). A timed slot missed by more than six hours (the supervisor wasn't running) waits for the next. The latest slot within six hours runs once.
+- **Clock changes.** A `cron` time follows the zone's summer time. A time the clocks skip (01:30 London on the last Sunday in March) doesn't run that day. A time they repeat (01:30 on the last Sunday in October) runs once. To be safe, keep jobs out of 01:00–02:00 in zones that change.
+- **Runs the supervisor waits for.** A job runs and the supervisor waits for it, up to `timeoutMinutes` (5 by default). The exit code says how it went. One run of a job goes at a time. A run asked for while one is going waits for it to end. At most one run waits: a delivery's takes the place of a timer's, and a later delivery's takes the place of an earlier one's.
+- **Detached runs.** A timed job with `status` is for long runs: it starts detached and keeps `running.json` and `last.json` in that folder itself (see `Job` in `internal/config/jobs.go`). A delivery that arrives while it runs starts nothing.
+- **Where.** Jobs run in the project's main checkout. With `checkout: fresh`, each run gets a new worktree, detached at the base branch's remote head. It has the project's `worktree.copy` files (`.env`), and its `worktree.setup` runs every time. The worktree is removed after a run that passes. After a run that fails, it is kept for a day so you can look at it. A job that commits can `git push origin HEAD:$OPEN_SUPERVISOR_BASE_BRANCH`. The worktree shares the checkout's git config and credentials, so it pushes as the agents do.
+- **Environment.** The project's sessions' environment: the supervisor's own, the checkout's `.env`, and the project's `env:`, with secret references (`keyring:…`) resolved. Each run also gets `OPEN_SUPERVISOR_JOB`, `OPEN_SUPERVISOR_JOB_TRIGGER` and `OPEN_SUPERVISOR_JOB_RUN`.
+- **Run history.** Each run's output goes in `<state>/projects/<project>/job-runs/<job>/<id>.log`, with `<id>.json` beside it. The JSON holds the trigger (`cron 2026-10-21 09:00 Europe/London`, `push 1a2b3c4`, `webhook`, `every 10m`, `by hand`), the start and end, the outcome and the exit code. The supervisor keeps the last `keepRuns` runs (30 by default). A project's health check can read these files to confirm each slot ran. In the TUI, `J` lists the jobs, then a job's runs, then a run's output.
 
 ### Routing issues to projects
 
@@ -182,9 +213,10 @@ Routes using `any:`, `all:` or `not:` are kept as written; the forms ask only ab
 A job with `on:` also runs when a webhook arrives through the tunnel:
 
 - `events` are the code host's own event names, taken through the project's hook (GitHub for now): `push`, `release`, `workflow_run`, or `release.published` for one action. The supervisor adds them to the hook's subscription. `branches` limits events that carry a git ref, such as a push, to those branches, and takes globs (`release/*`).
+- `paths` limits a push to those that change a matching file, as in GitHub Actions. `*` matches within a folder and `**` across folders. A pattern starting `!` takes back the files it matches from the patterns before it. The changed files come from `git diff` between the push's two heads, or else from the delivery's commits.
 - `webhook: true` gives the job a URL of its own, `<tunnel>/jobs/<project>/<job>/<token>`, for any other service to POST to. The token is derived from the supervisor's webhook secret, so the URL stays the same across restarts. The supervisor logs the URL when the tunnel comes up.
 
-The job learns about the delivery from `OPEN_SUPERVISOR_EVENT`, `OPEN_SUPERVISOR_EVENT_ACTION`, `OPEN_SUPERVISOR_EVENT_REF` and `OPEN_SUPERVISOR_EVENT_FILE` (a file holding the body, kept for a day). `OPEN_SUPERVISOR_EVENT` is `webhook` for the job's own URL. A job without `at:` runs and is waited for. If a delivery arrives while it is running, it runs once more when the current run ends, for the latest delivery. A job with `at:` starts detached, and a delivery that arrives while it is running is skipped. With no tunnel, or under `--dry-run`, these jobs don't run on webhooks. Deliveries aren't replayed by the reconcile, so a missed one stays missed.
+The job learns about the delivery from `OPEN_SUPERVISOR_EVENT`, `OPEN_SUPERVISOR_EVENT_ACTION`, `OPEN_SUPERVISOR_EVENT_REF`, `OPEN_SUPERVISOR_EVENT_SHA` (a push's new head) and `OPEN_SUPERVISOR_EVENT_FILE` (a file holding the body, kept for a day). `OPEN_SUPERVISOR_EVENT` is `webhook` for the job's own URL. A delivery that arrives while the job is running waits for that run to end (see Jobs). With no tunnel, or under `--dry-run`, these jobs don't run on webhooks. Deliveries aren't replayed by the reconcile, so a missed one stays missed.
 
 ## What it does
 
@@ -226,6 +258,7 @@ Rules particular to a project (what must pass, how to run its dev server) belong
 | `!` | run a shell command: pick where (the folder open-supervisor started in, or a project's checkout), then type it. It joins the list as a shell task (`!1`, `!2`…) with its output on its detail page; `r` runs it again, `k` kills it, `d` drops it. Shell tasks belong to this run: quitting kills those still going |
 | `R` | reconcile now |
 | `s` | sweep now |
+| `J` | job runs: pick a job, then one of its kept runs, for its trigger, timing, exit code and output; `r` on the run runs the job again |
 | job keys | run that job now |
 | `,` | edit the config: general settings, connections (with a connection test), projects |
 | `l` | show or hide the log |

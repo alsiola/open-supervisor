@@ -70,15 +70,15 @@ func (m *model) jobsText() string {
 	var parts []string
 	for _, p := range m.sup.Projects() {
 		for _, j := range p.Jobs.Specs {
-			if len(j.At) == 0 {
+			if !j.Timed() {
 				continue
 			}
-			name := p.Name + " " + j.Name
-			text := name + " " + p.Jobs.Describe(j)
+			d := p.Jobs.Describe(j)
+			text := p.Name + " " + j.Name + " " + d
 			switch {
-			case strings.HasPrefix(p.Jobs.Describe(j), "running"):
+			case strings.HasPrefix(d, "running"):
 				text = yellowS.Render(text)
-			case strings.HasPrefix(p.Jobs.Describe(j), "stopped"):
+			case strings.HasPrefix(d, "stopped"), strings.HasPrefix(d, "failed"), strings.HasPrefix(d, "timed out"), strings.HasPrefix(d, "couldn't"), strings.HasPrefix(d, "checkout failed"):
 				text = redS.Render(text)
 			default:
 				text = dim(text)
@@ -256,7 +256,7 @@ func (m *model) renderList() string {
 		jk = append(jk, k+" "+jobs[0].job.Name)
 	}
 	sort.Strings(jk)
-	keys := " ↑↓ select   ⏎ details   g open   m message   a attach   r run now   k kill   d drop   c claim   ! shell   R reconcile   s sweep"
+	keys := " ↑↓ select   ⏎ details   g open   m message   a attach   r run now   k kill   d drop   c claim   ! shell   J jobs   R reconcile   s sweep"
 	if len(jk) > 0 {
 		keys += "   " + strings.Join(jk, "   ")
 	}
@@ -483,9 +483,17 @@ func (m *model) renderDetail(rw row) string {
 	out := m.header()
 	var body, lines []string
 	what := "transcript"
-	if rw.sh != nil {
+	switch {
+	case rw.run != nil:
+		what = "output"
+		if r, ok := rw.run.p.Jobs.Run(rw.run.job, rw.run.id); ok {
+			body, lines = m.runDetailLines(*rw.run, r), m.runOutput(r)
+		} else {
+			body = []string{dim("  this run is no longer kept")}
+		}
+	case rw.sh != nil:
 		body, lines, what = m.shellDetailLines(rw.sh), m.shellOutputLines(rw.sh), "output"
-	} else {
+	default:
 		body, lines = m.detailLines(rw), m.transcriptLines(rw)
 	}
 	total := m.height - len(out) - 1
@@ -540,6 +548,9 @@ func (m *model) renderDetail(rw row) string {
 		keys = " ↑↓ scroll   t transcript   esc back   g open   m message   a attach   r run now   k kill   d drop   q quit"
 		if rw.sh != nil {
 			keys = " ↑↓ scroll   t output   esc back   r run again   k kill   d drop   q quit"
+		}
+		if rw.run != nil {
+			keys = " ↑↓ scroll   t output   esc back   r run the job again   q quit"
 		}
 		if len(body) > room {
 			keys += fmt.Sprintf("   %d-%d of %d", m.scroll+1, end, len(body))

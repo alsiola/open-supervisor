@@ -3,11 +3,14 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -22,12 +25,22 @@ import (
 	"github.com/alsiola/open-supervisor/internal/logx"
 	"github.com/alsiola/open-supervisor/internal/proc"
 	"github.com/alsiola/open-supervisor/internal/store"
+	"github.com/alsiola/open-supervisor/internal/worktree"
 )
 
 // RepoFile is a project's own settings, kept in its checkout: the jobs the supervisor runs for it.
 const RepoFile = ".open-supervisor.yaml"
 
-// JobRunning is what a timed job writes to running.json while it runs.
+// catchUp is how late a timed run may start: a slot missed by more than this waits for the next.
+const catchUp = 6 * time.Hour
+
+// jobMinute is a minute of a job's timeout; tests shorten it.
+var jobMinute = time.Minute
+
+// keepFailed is how long a failed run's fresh checkout is kept to look at.
+const keepFailed = 24 * time.Hour
+
+// JobRunning is what a detached job writes to running.json while it runs.
 type JobRunning struct {
 	PID       int       `json:"pid"`
 	Slot      string    `json:"slot"`
@@ -35,7 +48,7 @@ type JobRunning struct {
 	Log       string    `json:"log,omitempty"`
 }
 
-// JobResult is what a timed job writes to last.json when it ends.
+// JobResult is what a detached job writes to last.json when it ends.
 type JobResult struct {
 	Slot       string    `json:"slot"`
 	Outcome    string    `json:"outcome"`
@@ -45,8 +58,15 @@ type JobResult struct {
 	Issues     []any     `json:"issues,omitempty"`
 }
 
-// Jobs are a project's own jobs: checks on an interval, which the supervisor waits for, and long runs at set
-// UTC times, which it starts detached and follows through their status files (see config.Job).
+// jobReq is a run asked for: by what, and the environment a delivery adds.
+type jobReq struct {
+	trigger  string
+	extra    []string
+	delivery bool
+}
+
+// Jobs are a project's own jobs (see config.Job): runs the supervisor waits for, one at a time per job with at
+// most one more waiting, and long timed runs it starts detached and follows through their status files.
 type Jobs struct {
 	Specs []config.Job
 
@@ -55,12 +75,17 @@ type Jobs struct {
 
 	mu      sync.Mutex
 	busy    map[string]bool
-	pending map[string][]string // an interval job's next run, asked for by a delivery while it ran: its env
+	pending map[string]*jobReq // the run asked for while the job went
+	current map[string]JobRun  // the run going now, of a job the supervisor waits for
+	done    map[string]JobRun  // the last run that ended
 	running map[string]JobRunning
 	last    map[string]JobResult
+	// detached is the run record of each detached job going now.
+	detached map[string]*JobRun
 }
 
-// loadJobs is the project's jobs: those in the config, then those in its checkout's .open-supervisor.yaml.
+// loadJobs is the project's jobs: those in the config, then those in its checkout's .open-supervisor.yaml. A
+// job from the checkout that isn't right is logged and left out.
 func loadJobs(p *Project) *Jobs {
 	specs := append([]config.Job(nil), p.Spec.Jobs...)
 	if data, err := os.ReadFile(filepath.Join(p.Root, RepoFile)); err == nil {
@@ -70,12 +95,25 @@ func loadJobs(p *Project) *Jobs {
 		if err := yaml.Unmarshal(data, &own); err != nil {
 			p.logf("%s: %v", RepoFile, err)
 		}
-		specs = append(specs, own.Jobs...)
+		for _, job := range own.Jobs {
+			if errs := job.Validate(); len(errs) > 0 {
+				p.logf("%s: left out: %s", RepoFile, strings.Join(errs, "; "))
+				continue
+			}
+			specs = append(specs, job)
+		}
 	}
-	return &Jobs{Specs: specs, p: p, busy: map[string]bool{}, pending: map[string][]string{}, running: map[string]JobRunning{}, last: map[string]JobResult{}}
+	j := &Jobs{Specs: specs, p: p, busy: map[string]bool{}, pending: map[string]*jobReq{}, current: map[string]JobRun{},
+		done: map[string]JobRun{}, running: map[string]JobRunning{}, last: map[string]JobResult{}, detached: map[string]*JobRun{}}
+	for _, job := range specs {
+		if r, ok := j.lastRun(job.Name); ok && r.EndedAt != nil {
+			j.done[job.Name] = r
+		}
+	}
+	return j
 }
 
-// Running is the job's timed run going now, if any.
+// Running is the job's detached run going now, if any.
 func (j *Jobs) Running(name string) (JobRunning, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -83,11 +121,19 @@ func (j *Jobs) Running(name string) (JobRunning, bool) {
 	return r, ok
 }
 
-// Last is how the job's last timed run ended, if known.
+// Last is how the job's last detached run ended, if known.
 func (j *Jobs) Last(name string) (JobResult, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	r, ok := j.last[name]
+	return r, ok
+}
+
+// Current is the job's run going now, if the supervisor is waiting for one.
+func (j *Jobs) Current(name string) (JobRun, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	r, ok := j.current[name]
 	return r, ok
 }
 
@@ -98,48 +144,42 @@ func (j *Jobs) start() {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	j.cancel = cancel
+	every := func(d time.Duration, f func()) {
+		go func() {
+			f()
+			t := time.NewTicker(d)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					f()
+				}
+			}
+		}()
+	}
 	for _, job := range j.Specs {
 		job := job
 		switch {
 		case job.EveryMinutes > 0:
-			go func() {
-				j.runCheck(job, nil)
-				t := time.NewTicker(time.Duration(job.EveryMinutes) * time.Minute)
-				defer t.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-t.C:
-						j.runCheck(job, nil)
-					}
+			trigger := fmt.Sprintf("every %dm", job.EveryMinutes)
+			every(time.Duration(job.EveryMinutes)*time.Minute, func() { j.request(job, &jobReq{trigger: trigger}) })
+		case job.Timed():
+			if job.Detached() {
+				if r, ok := j.readRunning(job); ok {
+					j.mu.Lock()
+					j.running[job.Name] = r
+					j.mu.Unlock()
+					j.p.logf("%s: the %s run is going (pid %d)", job.Name, r.Slot, r.PID)
 				}
-			}()
-		case len(job.At) > 0:
-			if r, ok := j.readRunning(job); ok {
-				j.mu.Lock()
-				j.running[job.Name] = r
-				j.mu.Unlock()
-				j.p.logf("%s: the %s run is going (pid %d)", job.Name, r.Slot, r.PID)
-			}
-			if last, ok := j.readLast(job); ok {
-				j.mu.Lock()
-				j.last[job.Name] = last
-				j.mu.Unlock()
-			}
-			go func() {
-				j.runIfDue(job, false, nil)
-				t := time.NewTicker(time.Minute)
-				defer t.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-t.C:
-						j.runIfDue(job, false, nil)
-					}
+				if last, ok := j.readLast(job); ok {
+					j.mu.Lock()
+					j.last[job.Name] = last
+					j.mu.Unlock()
 				}
-			}()
+			}
+			every(time.Minute, func() { j.runIfDue(job) })
 		}
 	}
 }
@@ -150,19 +190,23 @@ func (j *Jobs) stop() {
 	}
 }
 
-// RunNow runs a job now: a check at once, a timed run whatever the time.
+// RunNow runs a job now, whatever the time.
 func (j *Jobs) RunNow(job config.Job) {
 	if j.p.hub.settings().DryRun {
 		return
 	}
-	if len(job.At) > 0 {
-		go j.runIfDue(job, true, nil)
+	if job.Detached() {
+		go j.startDetachedNow(job, "by hand", nil)
 	} else {
-		go j.runCheck(job, nil)
+		j.request(job, &jobReq{trigger: "by hand"})
 	}
 }
 
-func (j *Jobs) env(extra []string) []string { return append(j.p.hub.sessionEnv(j.p, ""), extra...) }
+// env is the environment of a run: the project's sessions', the job's own and what a delivery adds.
+func (j *Jobs) env(job config.Job, run *JobRun, extra []string) []string {
+	env := append(j.p.hub.sessionEnv(j.p, ""), "OPEN_SUPERVISOR_JOB="+job.Name, "OPEN_SUPERVISOR_JOB_TRIGGER="+run.Trigger, "OPEN_SUPERVISOR_JOB_RUN="+run.ID)
+	return append(env, extra...)
+}
 
 // Events are the event names the jobs run on, without their actions: what the project's hooks subscribe to.
 func (j *Jobs) Events() []string {
@@ -203,7 +247,8 @@ func (j *Jobs) Find(name string) (config.Job, bool) {
 }
 
 // matches reports whether a job runs on the event: one of its events names it ("push"), or it and its action
-// ("release.published"), and its ref is on one of the job's branches when it has any.
+// ("release.published"), and its ref is on one of the job's branches when it has any. Paths are checked apart,
+// since they need the files the push changed.
 func matches(job config.Job, ev core.HookEvent) bool {
 	if job.On == nil {
 		return false
@@ -236,12 +281,120 @@ func matches(job config.Job, ev core.HookEvent) bool {
 
 // OnEvent runs each job that runs on the event.
 func (j *Jobs) OnEvent(ev core.HookEvent) {
+	var files []string
+	known, looked := false, false
 	for _, job := range j.Specs {
-		if matches(job, ev) {
-			j.Trigger(job, ev)
+		if !matches(job, ev) {
+			continue
 		}
+		if len(job.On.Paths) > 0 && ev.Name == "push" {
+			if !looked {
+				files, known = j.changedFiles(ev)
+				looked = true
+			}
+			switch {
+			case !known:
+				j.p.logf("%s: couldn't tell which files the push changed; running it anyway", job.Name)
+			case !pathsMatch(job.On.Paths, files):
+				j.p.logf("%s: not run on push %s: it changed no file the job's paths take", job.Name, short(ev.After))
+				continue
+			}
+		}
+		j.Trigger(job, ev)
 	}
 }
+
+// zeroSHA is the head a push names for a branch created or deleted.
+func zeroSHA(sha string) bool { return strings.Trim(sha, "0") == "" }
+
+// changedFiles are the files a push changed, from git where it has both heads, else from the delivery.
+func (j *Jobs) changedFiles(ev core.HookEvent) ([]string, bool) {
+	if ev.After != "" && zeroSHA(ev.After) {
+		return nil, true // a deleted branch changes nothing
+	}
+	if ev.Before != "" && ev.After != "" && !zeroSHA(ev.Before) {
+		_ = exec.Command("git", "-C", j.p.Root, "fetch", "-q", "origin").Run()
+		out, err := exec.Command("git", "-C", j.p.Root, "diff", "--name-only", ev.Before, ev.After).Output()
+		if err == nil {
+			return strings.Fields(string(out)), true
+		}
+	}
+	if len(ev.Files) > 0 {
+		return ev.Files, true
+	}
+	return nil, false
+}
+
+// pathsMatch reports whether any of the files is taken by the patterns, as GitHub Actions reads them: a file
+// is taken when the last pattern that matches it doesn't start with !.
+func pathsMatch(patterns, files []string) bool {
+	for _, f := range files {
+		in := false
+		for _, p := range patterns {
+			neg := strings.HasPrefix(p, "!")
+			if globRe(strings.TrimPrefix(p, "!")).MatchString(f) {
+				in = !neg
+			}
+		}
+		if in {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	globMu    sync.Mutex
+	globCache = map[string]*regexp.Regexp{}
+)
+
+// globRe is a path glob as a regexp: * and ? within a folder, ** across folders, [...] a class.
+func globRe(glob string) *regexp.Regexp {
+	globMu.Lock()
+	defer globMu.Unlock()
+	if re, ok := globCache[glob]; ok {
+		return re
+	}
+	var b strings.Builder
+	b.WriteString("^")
+	for i := 0; i < len(glob); i++ {
+		c := glob[i]
+		switch {
+		case strings.HasPrefix(glob[i:], "**/"):
+			b.WriteString("(?:.*/)?")
+			i += 2
+		case strings.HasPrefix(glob[i:], "**"):
+			b.WriteString(".*")
+			i++
+		case c == '*':
+			b.WriteString("[^/]*")
+		case c == '?':
+			b.WriteString("[^/]")
+		case c == '[':
+			if end := strings.IndexByte(glob[i+1:], ']'); end >= 0 {
+				class := glob[i+1 : i+1+end]
+				if strings.HasPrefix(class, "!") {
+					class = "^" + class[1:]
+				}
+				b.WriteString("[" + class + "]")
+				i += end + 1
+				continue
+			}
+			b.WriteString(`\[`)
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+		}
+	}
+	b.WriteString("$")
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		re = regexp.MustCompile("^" + regexp.QuoteMeta(glob) + "$")
+	}
+	globCache[glob] = re
+	return re
+}
+
+func short(sha string) string { return sha[:min(7, len(sha))] }
 
 // Trigger runs a job for a delivery, telling it about the delivery through its environment.
 func (j *Jobs) Trigger(job config.Job, ev core.HookEvent) {
@@ -254,18 +407,22 @@ func (j *Jobs) Trigger(job config.Job, ev core.HookEvent) {
 		j.p.logf("%s: not run on %s (jobs are off)", job.Name, what)
 		return
 	}
-	extra := []string{"OPEN_SUPERVISOR_EVENT=" + ev.Name, "OPEN_SUPERVISOR_EVENT_ACTION=" + ev.Action, "OPEN_SUPERVISOR_EVENT_REF=" + ev.Ref}
+	extra := []string{"OPEN_SUPERVISOR_EVENT=" + ev.Name, "OPEN_SUPERVISOR_EVENT_ACTION=" + ev.Action, "OPEN_SUPERVISOR_EVENT_REF=" + ev.Ref, "OPEN_SUPERVISOR_EVENT_SHA=" + ev.After}
 	if file, err := j.writeEvent(job, ev.Body); err != nil {
 		j.p.logf("%s: couldn't keep the %s delivery: %v", job.Name, what, err)
 	} else {
 		extra = append(extra, "OPEN_SUPERVISOR_EVENT_FILE="+file)
 	}
-	j.p.logf("%s: running on %s", job.Name, what)
-	if len(job.At) > 0 {
-		go j.runIfDue(job, true, extra)
-	} else if j.begin(job.Name, extra) {
-		// Queued here rather than in the goroutine, so the run after the current one is the latest delivery's.
-		go j.loop(job, extra)
+	trigger := what
+	if ev.After != "" {
+		trigger += " " + short(ev.After)
+	}
+	j.p.logf("%s: running on %s", job.Name, trigger)
+	if job.Detached() {
+		go j.startDetachedNow(job, trigger, extra)
+	} else {
+		// Queued here rather than in a goroutine, so the run after the current one is the latest delivery's.
+		j.request(job, &jobReq{trigger: trigger, extra: extra, delivery: true})
 	}
 }
 
@@ -282,26 +439,29 @@ func (j *Jobs) writeEvent(job config.Job, body []byte) (string, error) {
 			}
 		}
 	}
-	file := filepath.Join(dir, fmt.Sprintf("%s-%d.json", job.Name, time.Now().UnixNano()))
+	file := filepath.Join(dir, fmt.Sprintf("%s-%d.json", safeName(job.Name), time.Now().UnixNano()))
 	return file, os.WriteFile(file, body, 0o600)
 }
 
-// runCheck runs an interval job and waits for it. A run asked for by a delivery while the job is going runs
-// once it ends; one asked for by the timer is dropped.
-func (j *Jobs) runCheck(job config.Job, extra []string) {
-	if j.begin(job.Name, extra) {
-		j.loop(job, extra)
+// request runs a job the supervisor waits for, or keeps the run for after the one going now.
+func (j *Jobs) request(job config.Job, req *jobReq) {
+	if j.begin(job.Name, req) {
+		go j.loop(job, req)
 	}
 }
 
-// begin marks the job running and reports true; when it's running already, a delivery's run (extra set) is
-// kept for after it, and it reports false.
-func (j *Jobs) begin(name string, extra []string) bool {
+// begin marks the job running and reports true. When it's running already, the run waits for it and begin
+// reports false: at most one waits, and a delivery's takes the place of a timer's, which it carries no news
+// for.
+func (j *Jobs) begin(name string, req *jobReq) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.busy[name] {
-		if extra != nil {
-			j.pending[name] = extra
+		if old := j.pending[name]; old == nil || req.delivery {
+			j.pending[name] = req
+			if old == nil {
+				j.p.logf("%s: the %s run waits for the one going now", name, req.trigger)
+			}
 		}
 		return false
 	}
@@ -309,39 +469,138 @@ func (j *Jobs) begin(name string, extra []string) bool {
 	return true
 }
 
-// loop runs the job, then each run asked for while it went, until none is left.
-func (j *Jobs) loop(job config.Job, extra []string) {
+// loop runs the job, then the run asked for while it went, until none is left.
+func (j *Jobs) loop(job config.Job, req *jobReq) {
 	for {
-		j.check(job, extra)
+		j.execute(job, req)
 		j.mu.Lock()
-		next, ok := j.pending[job.Name]
+		next := j.pending[job.Name]
 		delete(j.pending, job.Name)
-		if !ok {
+		if next == nil {
 			delete(j.busy, job.Name)
 			j.mu.Unlock()
 			return
 		}
 		j.mu.Unlock()
-		extra = next
+		req = next
 	}
 }
 
-func (j *Jobs) check(job config.Job, extra []string) {
+// execute runs the job once and waits for it, in the main checkout or a fresh one, keeping its output.
+func (j *Jobs) execute(job config.Job, req *jobReq) {
+	run, file := j.newRun(job, req.trigger)
+	var out io.Writer = io.Discard
+	if file != nil {
+		defer file.Close()
+		out = file
+	}
+	j.setCurrent(job.Name, run)
+	defer func() {
+		j.endRun(job, run)
+		j.mu.Lock()
+		delete(j.current, job.Name)
+		j.done[job.Name] = *run
+		j.mu.Unlock()
+		j.p.hub.changed()
+	}()
+	env := j.env(job, run, req.extra)
+	dir := j.p.Root
+	if job.Fresh() {
+		j.sweepFresh(job)
+		base := j.base()
+		wt := j.p.Spec.Worktree
+		spec := worktree.Spec{Root: j.p.Root, Path: j.freshDir(job, run), Base: base, Copy: wt.Copy, Setup: wt.Setup, Log: out}
+		got, err := worktree.Fresh(spec)
+		run.Dir = got
+		if err != nil {
+			run.Outcome, run.Error = "checkout failed", err.Error()
+			fmt.Fprintf(out, "open-supervisor: %v\n", err)
+			j.p.logf("%s: checkout failed: %s", job.Name, logx.ErrText(err))
+			return
+		}
+		dir = got
+		env = append(env, "OPEN_SUPERVISOR_BASE_BRANCH="+base)
+		defer func() {
+			if run.Outcome == "ok" {
+				spec.Log = nil
+				if err := worktree.Remove(spec); err == nil {
+					run.Dir = ""
+				}
+			}
+		}()
+	} else {
+		run.Dir = dir
+	}
+	j.setCurrent(job.Name, run)
+
 	timeout := job.TimeoutMinutes
 	if timeout <= 0 {
 		timeout = 5
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*jobMinute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, job.Command[0], job.Command[1:]...)
-	cmd.Dir = j.p.Root
-	cmd.Env = j.env(extra)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		tail := strings.TrimSpace(string(out))
-		if i := strings.LastIndex(tail, "\n"); i >= 0 {
-			tail = tail[i+1:]
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.Stdout, cmd.Stderr = out, out
+	// Its own process group, so a timeout stops everything it started.
+	proc.Detach(cmd)
+	cmd.Cancel = func() error { return proc.TerminateGroup(cmd.Process.Pid) }
+	cmd.WaitDelay = 10 * time.Second
+	err := cmd.Run()
+	if cmd.ProcessState != nil {
+		code := cmd.ProcessState.ExitCode()
+		run.Exit = &code
+	}
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		run.Outcome = "timed out"
+		j.p.logf("%s timed out after %dm", job.Name, timeout)
+	case err == nil:
+		run.Outcome = "ok"
+	case cmd.ProcessState == nil:
+		run.Outcome, run.Error = "couldn't start", logx.ErrText(err)
+		j.p.logf("%s: couldn't start: %s", job.Name, run.Error)
+	default:
+		run.Outcome = "failed"
+		j.p.logf("%s failed: %s %s", job.Name, logx.ErrText(err), lastLine(run.Log))
+	}
+}
+
+func (j *Jobs) setCurrent(name string, run *JobRun) {
+	j.mu.Lock()
+	j.current[name] = *run
+	j.mu.Unlock()
+	j.p.hub.changed()
+}
+
+// base is the branch a fresh checkout starts from.
+func (j *Jobs) base() string {
+	if j.p.base != "" {
+		return j.p.base
+	}
+	if j.p.Repo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if b, err := j.p.Repo.DefaultBranch(ctx); err == nil && b != "" {
+			return b
 		}
-		j.p.logf("%s failed: %s %s", job.Name, logx.ErrText(err), tail)
+	}
+	return "main"
+}
+
+// freshDir is where a run's fresh checkout goes, beside the project's issue worktrees.
+func (j *Jobs) freshDir(job config.Job, run *JobRun) string {
+	return filepath.Join(j.p.hub.dataDir(), "worktrees", j.p.Name, "job-"+safeName(job.Name)+"-"+run.ID)
+}
+
+// sweepFresh removes the job's fresh checkouts kept from failed runs more than a day ago.
+func (j *Jobs) sweepFresh(job config.Job) {
+	old, _ := filepath.Glob(filepath.Join(j.p.hub.dataDir(), "worktrees", j.p.Name, "job-"+safeName(job.Name)+"-*"))
+	for _, dir := range old {
+		if info, err := os.Stat(dir); err == nil && time.Since(info.ModTime()) > keepFailed {
+			_ = worktree.Remove(worktree.Spec{Root: j.p.Root, Path: dir})
+		}
 	}
 }
 
@@ -389,6 +648,9 @@ func (j *Jobs) readLast(job config.Job) (JobResult, bool) {
 // dueSlot is the latest of the job's times within the last six hours, if any: a run missed by more than that
 // waits for the next.
 func dueSlot(job config.Job, now time.Time) string {
+	if job.Cron != "" {
+		return cronSlot(job, now)
+	}
 	type cand struct {
 		hm string
 		t  time.Time
@@ -407,7 +669,7 @@ func dueSlot(job config.Job, now time.Time) string {
 		}
 		for back := 0; back <= 1; back++ {
 			t := time.Date(now.Year(), now.Month(), now.Day()-back, hh, mm, 0, 0, time.UTC)
-			if !t.After(now) && now.Sub(t) < 6*time.Hour {
+			if !t.After(now) && now.Sub(t) < catchUp {
 				cands = append(cands, cand{hm, t})
 			}
 		}
@@ -419,16 +681,84 @@ func dueSlot(job config.Job, now time.Time) string {
 	return cands[0].t.Format("2006-01-02") + " " + cands[0].hm
 }
 
-// runIfDue starts a timed job when its time comes, and notes how the last run ended. It runs detached, like a
-// turn. extra is the environment a delivery adds.
-func (j *Jobs) runIfDue(job config.Job, force bool, extra []string) {
+// cronSlot is the latest time of a cron job's within the last six hours, if any, named by its wall-clock time
+// in the job's zone. The cron library only steps forward, so it steps from six hours ago to now.
+//
+// On a night the clocks change, a time they skip (01:30 London on the last Sunday in March) has no run that
+// day, and a time they repeat (01:30 on the last Sunday in October) comes twice but is one slot by its name, so
+// it runs once. A schedule within the hour, like */30, runs at each of the repeated times it hasn't run yet.
+func cronSlot(job config.Job, now time.Time) string {
+	sched, err := job.Schedule()
+	if err != nil {
+		return ""
+	}
+	loc, err := job.Location()
+	if err != nil {
+		return ""
+	}
+	var latest time.Time
+	for t := sched.Next(now.Add(-catchUp).In(loc)); !t.IsZero() && !t.After(now); t = sched.Next(t) {
+		latest = t
+	}
+	if latest.IsZero() {
+		return ""
+	}
+	return latest.In(loc).Format("2006-01-02 15:04") + " " + loc.String()
+}
+
+// slotTrigger names a timed run for its record.
+func slotTrigger(job config.Job, slot string) string {
+	if job.Cron != "" {
+		return "cron " + slot
+	}
+	return "at " + slot + " UTC"
+}
+
+// runIfDue starts a timed job when its time comes.
+func (j *Jobs) runIfDue(job config.Job) {
+	if job.Detached() && j.followDetached(job) {
+		return
+	}
+	slot := dueSlot(job, time.Now())
+	state := j.p.Store.Job(job.Name, nil)
+	if state.LastSlot == "" && state.RetryAfter == nil {
+		// First start with this job: wait for its next time rather than run a slot someone may already have run.
+		j.p.Store.Job(job.Name, func(s *store.JobState) {
+			s.LastSlot = slot
+			if s.LastSlot == "" {
+				s.LastSlot = "none"
+			}
+		})
+		return
+	}
+	if slot == "" || state.LastSlot == slot {
+		return
+	}
+	if state.RetryAfter != nil && time.Now().Before(*state.RetryAfter) {
+		return
+	}
+	j.p.Store.Job(job.Name, func(s *store.JobState) {
+		s.LastSlot = slot
+		s.RetryAfter = nil
+	})
+	if job.Detached() {
+		j.startDetached(job, slot, slotTrigger(job, slot), nil)
+	} else {
+		j.request(job, &jobReq{trigger: slotTrigger(job, slot)})
+	}
+}
+
+// followDetached notes how a detached job's last run ended once it has, and reports whether one is going.
+func (j *Jobs) followDetached(job config.Job) bool {
 	running, isRunning := j.readRunning(job)
 	j.mu.Lock()
 	_, wasRunning := j.running[job.Name]
 	j.mu.Unlock()
 	if wasRunning && !isRunning {
+		outcome := "no result"
 		last, ok := j.readLast(job)
 		if ok {
+			outcome = last.Outcome
 			j.mu.Lock()
 			j.last[job.Name] = last
 			j.mu.Unlock()
@@ -454,6 +784,7 @@ func (j *Jobs) runIfDue(job config.Job, force bool, extra []string) {
 		} else {
 			j.p.logf("%s: ended with no result", job.Name)
 		}
+		j.endDetached(job, outcome)
 		j.mu.Lock()
 		delete(j.running, job.Name)
 		j.mu.Unlock()
@@ -463,67 +794,113 @@ func (j *Jobs) runIfDue(job config.Job, force bool, extra []string) {
 		j.mu.Lock()
 		j.running[job.Name] = running
 		j.mu.Unlock()
-		if extra != nil {
-			j.p.logf("%s: the %s run is still going; this delivery doesn't start another", job.Name, running.Slot)
+	}
+	return isRunning
+}
+
+// endDetached closes the record of a detached job's run: the one this supervisor started, else the newest
+// left going by one before it.
+func (j *Jobs) endDetached(job config.Job, outcome string) {
+	j.mu.Lock()
+	run := j.detached[job.Name]
+	delete(j.detached, job.Name)
+	j.mu.Unlock()
+	if run == nil {
+		if r, ok := j.lastRun(job.Name); ok && r.Detached && r.EndedAt == nil {
+			run = &r
+		}
+	}
+	if run == nil {
+		return
+	}
+	j.mu.Lock()
+	run.Outcome = outcome
+	j.endRun(job, run)
+	j.done[job.Name] = *run
+	j.mu.Unlock()
+}
+
+// startDetachedNow starts a detached job's run now, by hand or on a delivery, unless one is going.
+func (j *Jobs) startDetachedNow(job config.Job, trigger string, extra []string) {
+	if j.followDetached(job) {
+		if r, ok := j.Running(job.Name); ok && extra != nil {
+			j.p.logf("%s: the %s run is still going; this delivery doesn't start another", job.Name, r.Slot)
 		}
 		return
 	}
 	slot := dueSlot(job, time.Now())
-	state := j.p.Store.Job(job.Name, nil)
-	if !force {
-		if state.LastSlot == "" && state.RetryAfter == nil {
-			// First start with this job: wait for its next time rather than run a slot someone may already have run.
-			j.p.Store.Job(job.Name, func(s *store.JobState) {
-				s.LastSlot = slot
-				if s.LastSlot == "" {
-					s.LastSlot = "none"
-				}
-			})
-			return
-		}
-		if slot == "" || state.LastSlot == slot {
-			return
-		}
-		if state.RetryAfter != nil && time.Now().Before(*state.RetryAfter) {
-			return
-		}
-	}
 	j.p.Store.Job(job.Name, func(s *store.JobState) {
 		if slot != "" {
 			s.LastSlot = slot
 		}
 		s.RetryAfter = nil
 	})
+	label := "by hand"
+	if extra != nil {
+		label = "on an event"
+	}
+	j.startDetached(job, label, trigger, extra)
+}
+
+// startDetached starts a long run that outlives the supervisor, its output going to the run's log.
+func (j *Jobs) startDetached(job config.Job, label, trigger string, extra []string) {
+	run, file := j.newRun(job, trigger)
+	run.Detached = true
+	run.Dir = j.p.Root
 	cmd := exec.Command(job.Command[0], job.Command[1:]...)
 	cmd.Dir = j.p.Root
-	cmd.Env = j.env(extra)
+	cmd.Env = j.env(job, run, extra)
+	if file != nil {
+		cmd.Stdout, cmd.Stderr = file, file
+	}
 	proc.Detach(cmd)
-	if err := cmd.Start(); err != nil {
+	err := cmd.Start()
+	if file != nil {
+		_ = file.Close()
+	}
+	if err != nil {
+		run.Outcome, run.Error = "couldn't start", logx.ErrText(err)
+		j.endRun(job, run)
 		j.p.logf("%s: couldn't start: %v", job.Name, err)
 		return
 	}
-	go func() { _ = cmd.Wait() }()
-	label := slot
-	switch {
-	case extra != nil:
-		label = "on an event"
-	case label == "":
-		label = "by hand"
-	}
+	j.saveRun(*run)
 	j.mu.Lock()
 	j.running[job.Name] = JobRunning{PID: cmd.Process.Pid, Slot: label, StartedAt: time.Now().UTC()}
+	j.detached[job.Name] = run
 	j.mu.Unlock()
+	go func() {
+		_ = cmd.Wait()
+		code := cmd.ProcessState.ExitCode()
+		j.mu.Lock()
+		if j.detached[job.Name] == run {
+			run.Exit = &code
+			j.saveRun(*run)
+		}
+		j.mu.Unlock()
+	}()
 	j.p.logf("%s: started the %s run (pid %d)", job.Name, label, cmd.Process.Pid)
 	j.p.hub.changed()
 }
 
-// Describe is a timed job's state in a few words, for the TUI header.
+// Describe is a job's state in a few words, for the TUI.
 func (j *Jobs) Describe(job config.Job) string {
 	if r, ok := j.Running(job.Name); ok {
 		return fmt.Sprintf("running %s", time.Since(r.StartedAt).Round(time.Minute))
 	}
-	if l, ok := j.Last(job.Name); ok {
-		return fmt.Sprintf("%s %s ago", l.Outcome, time.Since(l.FinishedAt).Round(time.Minute))
+	if r, ok := j.Current(job.Name); ok {
+		return fmt.Sprintf("running %s", time.Since(r.StartedAt).Round(time.Second))
+	}
+	if job.Detached() {
+		if l, ok := j.Last(job.Name); ok {
+			return fmt.Sprintf("%s %s ago", l.Outcome, time.Since(l.FinishedAt).Round(time.Minute))
+		}
+	}
+	j.mu.Lock()
+	r, ok := j.done[job.Name]
+	j.mu.Unlock()
+	if ok && r.EndedAt != nil {
+		return fmt.Sprintf("%s %s ago", r.Outcome, time.Since(*r.EndedAt).Round(time.Minute))
 	}
 	return "not run yet"
 }

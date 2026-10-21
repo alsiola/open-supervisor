@@ -93,6 +93,14 @@ type payload struct {
 	State   string `json:"state"`
 	Ref     string `json:"ref"`
 	RefType string `json:"ref_type"`
+	// A push's heads and commits.
+	Before  string `json:"before"`
+	After   string `json:"after"`
+	Commits []struct {
+		Added    []string `json:"added"`
+		Removed  []string `json:"removed"`
+		Modified []string `json:"modified"`
+	} `json:"commits"`
 }
 
 // decode checks a delivery's signature and reads it, returning nil for a delivery about another repository.
@@ -121,7 +129,19 @@ func hookEvent(event string, p *payload, body []byte) core.Signal {
 			ref = "refs/heads/" + ref
 		}
 	}
-	return core.Signal{Type: core.SigEvent, Event: &core.HookEvent{Name: event, Action: p.Action, Ref: ref, Body: body}}
+	var files []string
+	seen := map[string]bool{}
+	for _, c := range p.Commits {
+		for _, list := range [][]string{c.Added, c.Removed, c.Modified} {
+			for _, f := range list {
+				if !seen[f] {
+					seen[f] = true
+					files = append(files, f)
+				}
+			}
+		}
+	}
+	return core.Signal{Type: core.SigEvent, Event: &core.HookEvent{Name: event, Action: p.Action, Ref: ref, Before: p.Before, After: p.After, Files: files, Body: body}}
 }
 
 // ParseWebhook turns a delivery into issue signals; the repo takes the PR and check ones.

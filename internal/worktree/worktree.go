@@ -90,6 +90,16 @@ func Setup(s Spec) (string, error) {
 		}
 	}
 	// Copied on every run, not only when missing, so a reused worktree picks up keys added since.
+	s.copyFiles()
+	if s.Setup != "" {
+		if err := runSetup(s); err != nil {
+			return s.Path, err
+		}
+	}
+	return s.Path, nil
+}
+
+func (s Spec) copyFiles() {
 	for _, name := range s.Copy {
 		from := filepath.Join(s.Root, name)
 		to := filepath.Join(s.Path, name)
@@ -100,6 +110,29 @@ func Setup(s Spec) (string, error) {
 			s.logf("copied %s", name)
 		}
 	}
+}
+
+// Fresh makes a new worktree at the base branch's remote head, detached, for one run of a job; it copies the
+// project's files into it and runs its setup whatever has changed. On a setup failure it returns the path
+// with the error, so the worktree can be kept to look at.
+func Fresh(s Spec) (string, error) {
+	base := s.Base
+	if base == "" {
+		base = "main"
+	}
+	if _, err := git(s.Root, "fetch", "-q", "origin", base); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
+		return "", err
+	}
+	if _, err := git(s.Root, "worktree", "add", "-q", "--detach", s.Path, "origin/"+base); err != nil {
+		return "", err
+	}
+	if head, err := git(s.Path, "rev-parse", "--short", "HEAD"); err == nil {
+		s.logf("checked out origin/%s at %s in %s", base, head, s.Path)
+	}
+	s.copyFiles()
 	if s.Setup != "" {
 		if err := runSetup(s); err != nil {
 			return s.Path, err
