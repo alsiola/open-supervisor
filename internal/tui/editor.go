@@ -508,6 +508,7 @@ func (e *editor) generalLines() []string {
 		f("labels", fmt.Sprintf("%s, %s, %s, %s, %s; skip %s", s.Labels.Claimed, s.Labels.Scheduled, s.Labels.Help, s.Labels.Review, s.Labels.Done, strings.Join(s.Labels.Skip, ", "))),
 		f("branch", s.Branch),
 		f("daily sweep", or(s.SweepAt, "off")),
+		f("daily triage", or(s.TriageAt, "off")),
 		f("jobs", map[bool]string{true: "on", false: "off"}[s.Jobs]),
 	}
 }

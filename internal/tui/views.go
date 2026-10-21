@@ -31,6 +31,14 @@ func (m *model) header() []string {
 	if sup.Sweeping() {
 		parts = append(parts, yellowS.Render("sweep running"))
 	}
+	if sup.Triaging() {
+		parts = append(parts, yellowS.Render("triage running"))
+	}
+	if n := sup.Problems(); n == 1 {
+		parts = append(parts, yellowS.Render("1 problem"))
+	} else if n > 1 {
+		parts = append(parts, yellowS.Render(fmt.Sprintf("%d problems", n)))
+	}
 	if j := m.jobsText(); j != "" {
 		parts = append(parts, j)
 	}
@@ -251,7 +259,7 @@ func (m *model) renderList() string {
 			out = append(out, "")
 		}
 	}
-	keys := " ↑↓ select   ⏎ details   g open   m message   a attach   r run now   k kill   d drop   c claim   ! shell   j run job   J job runs   R reconcile   s sweep   l log   , config   q quit"
+	keys := " ↑↓ select   ⏎ details   g open   m message   a attach   r run now   k kill   d drop   c claim   ! shell   j run job   J job runs   R reconcile   s sweep   T triage   l log   , config   q quit"
 	out = append(m.overlay(out), m.footer(keys))
 	return m.paint(out)
 }

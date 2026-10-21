@@ -202,6 +202,7 @@ var (
 	_ adapter.Tracker      = (*Tracker)(nil)
 	_ adapter.Hooked       = (*Tracker)(nil)
 	_ adapter.Transitioner = (*Tracker)(nil)
+	_ adapter.IssueOpener  = (*Tracker)(nil)
 )
 
 func (t *Tracker) Describe() string { return "linear " + strings.Join(t.teams, ",") }
@@ -571,6 +572,37 @@ func (t *Tracker) Comment(ctx context.Context, key, body string, mark core.Agent
 		return "", err
 	}
 	return r.CommentCreate.Comment.URL, nil
+}
+
+// OpenIssue opens an issue in the tracker's first team.
+func (t *Tracker) OpenIssue(ctx context.Context, title, body string) (core.Issue, error) {
+	if t.c.dryRun {
+		return core.Issue{}, nil
+	}
+	var teams struct {
+		Teams struct {
+			Nodes []struct {
+				ID string `json:"id"`
+			} `json:"nodes"`
+		} `json:"teams"`
+	}
+	if err := t.c.query(ctx, `query($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { id } } }`, map[string]any{"key": t.teams[0]}, &teams); err != nil {
+		return core.Issue{}, err
+	}
+	if len(teams.Teams.Nodes) == 0 {
+		return core.Issue{}, fmt.Errorf("linear: no team %s", t.teams[0])
+	}
+	var r struct {
+		IssueCreate struct {
+			Issue rawIssue `json:"issue"`
+		} `json:"issueCreate"`
+	}
+	q := `mutation($input: IssueCreateInput!) { issueCreate(input: $input) { issue { ` + issueFields + ` } } }`
+	input := map[string]any{"teamId": teams.Teams.Nodes[0].ID, "title": title, "description": body}
+	if err := t.c.query(ctx, q, map[string]any{"input": input}, &r); err != nil {
+		return core.Issue{}, err
+	}
+	return t.issue(r.IssueCreate.Issue), nil
 }
 
 // ---- labels and workflow --------------------------------------------------------------------------------

@@ -36,12 +36,13 @@ type Tracker struct {
 type Repo struct{ *binding }
 
 var (
-	_ adapter.Tracker = (*Tracker)(nil)
-	_ adapter.Repo    = (*Repo)(nil)
-	_ adapter.Reactor = (*Tracker)(nil)
-	_ adapter.Reactor = (*Repo)(nil)
-	_ adapter.Hooked  = (*Tracker)(nil)
-	_ adapter.Hooked  = (*Repo)(nil)
+	_ adapter.Tracker     = (*Tracker)(nil)
+	_ adapter.Repo        = (*Repo)(nil)
+	_ adapter.Reactor     = (*Tracker)(nil)
+	_ adapter.IssueOpener = (*Tracker)(nil)
+	_ adapter.Reactor     = (*Repo)(nil)
+	_ adapter.Hooked      = (*Tracker)(nil)
+	_ adapter.Hooked      = (*Repo)(nil)
 
 	_ adapter.EventHooked = (*Tracker)(nil)
 	_ adapter.EventHooked = (*Repo)(nil)
@@ -410,6 +411,14 @@ func (t *Tracker) Comment(ctx context.Context, key, body string, mark core.Agent
 		return "", err
 	}
 	return t.post(ctx, t.path("/issues/%d/comments", n), withMark(body, mark))
+}
+
+func (t *Tracker) OpenIssue(ctx context.Context, title, body string) (core.Issue, error) {
+	var i rawIssue
+	if _, err := t.c.call(ctx, true, t.repo, http.MethodPost, t.path("/issues"), map[string]string{"title": title, "body": body}, &i); err != nil {
+		return core.Issue{}, err
+	}
+	return i.issue(t.repo), nil
 }
 
 func (t *Tracker) IssueURL(key string) string {

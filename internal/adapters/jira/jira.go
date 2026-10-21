@@ -554,6 +554,26 @@ func (t *Tracker) Comment(ctx context.Context, key, body string, mark core.Agent
 	return t.IssueURL(key) + "?focusedCommentId=" + r.ID, nil
 }
 
+// OpenIssue opens a Task in the tracker's first project.
+func (t *Tracker) OpenIssue(ctx context.Context, title, body string) (core.Issue, error) {
+	if t.c.dryRun {
+		return core.Issue{}, nil
+	}
+	req := map[string]any{"fields": map[string]any{
+		"project":     map[string]string{"key": t.projects[0]},
+		"summary":     title,
+		"description": ToWiki(body),
+		"issuetype":   map[string]string{"name": "Task"},
+	}}
+	var r struct {
+		Key string `json:"key"`
+	}
+	if _, err := t.c.api.Do(ctx, "POST", "rest/api/2/issue", req, &r); err != nil {
+		return core.Issue{}, err
+	}
+	return core.Issue{Key: r.Key, Title: title, Body: body, URL: t.IssueURL(r.Key), Open: true}, nil
+}
+
 // ---- labels and workflow --------------------------------------------------------------------------------
 
 func (t *Tracker) EditLabels(ctx context.Context, key string, add, remove []string) error {

@@ -363,6 +363,9 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 	case "s":
 		go m.sup.RunSweep(nil)
 		m.flash = "sweeping…"
+	case "T":
+		go m.sup.RunTriage(nil)
+		m.flash = "triaging…"
 	case "l":
 		m.showLog = !m.showLog
 	case ",":

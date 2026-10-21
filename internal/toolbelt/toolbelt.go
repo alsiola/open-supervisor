@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/engine"
+	"github.com/alsiola/open-supervisor/internal/problems"
 	"github.com/alsiola/open-supervisor/internal/worktree"
 )
 
@@ -170,7 +172,7 @@ func Command() *cobra.Command {
 	root.PersistentFlags().StringVar(&f.config, "config", "", "config file (default $OPEN_SUPERVISOR_CONFIG or ~/.config/open-supervisor/config.yaml)")
 	root.PersistentFlags().StringVar(&f.project, "project", "", "project name (default $OPEN_SUPERVISOR_PROJECT or the current checkout's)")
 	root.PersistentFlags().StringVar(&f.issue, "issue", "", "issue key (default $OPEN_SUPERVISOR_ISSUE or the current branch's)")
-	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), worktreeCmd(f), screenshotsCmd(f), scheduleCmd(f), correctionCmd(f), inflightCmd(f))
+	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), worktreeCmd(f), screenshotsCmd(f), scheduleCmd(f), correctionCmd(f), problemCmd(f), inflightCmd(f))
 	return root
 }
 
@@ -234,7 +236,7 @@ func printComments(out io.Writer, comments []core.Comment) {
 }
 
 func issueCmd(f *flags) *cobra.Command {
-	cmd := &cobra.Command{Use: "issue", Short: "Read or comment on the issue"}
+	cmd := &cobra.Command{Use: "issue", Short: "Read, comment on, list or open issues"}
 	view := &cobra.Command{
 		Use:   "view",
 		Short: "Print the issue and every comment on it",
@@ -291,8 +293,82 @@ func issueCmd(f *flags) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.AddCommand(view, comment)
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List the tracker's open issues, to check for one before opening another",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			s, err := open(f, false)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := timeout()
+			defer cancel()
+			issues, err := s.b.Tracker.Candidates(ctx)
+			if err != nil {
+				return err
+			}
+			for _, i := range issues {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\n", i.Key, i.Title, strings.Join(i.Labels, ","))
+			}
+			return nil
+		},
+	}
+	var title string
+	var upstream bool
+	create := &cobra.Command{
+		Use:   "create --title <title> <file|->",
+		Short: "Open an issue in the project's tracker (with --upstream, print a link that opens one on open-supervisor)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(title) == "" {
+				return errors.New("--title is required")
+			}
+			body, err := readBody(args[0])
+			if err != nil {
+				return err
+			}
+			if upstream {
+				fmt.Fprintln(cmd.OutOrStdout(), upstreamIssueURL(title, body))
+				return nil
+			}
+			s, err := open(f, false)
+			if err != nil {
+				return err
+			}
+			opener, ok := s.b.Tracker.(adapter.IssueOpener)
+			if !ok {
+				return fmt.Errorf("%s can't open issues from here: report the cause instead", s.b.Tracker.Describe())
+			}
+			if s.dryRun {
+				fmt.Fprintln(cmd.OutOrStdout(), "dry run: would open", title)
+				return nil
+			}
+			ctx, cancel := timeout()
+			defer cancel()
+			issue, err := opener.OpenIssue(ctx, title, body)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", issue.Key, issue.URL)
+			return nil
+		},
+	}
+	create.Flags().StringVar(&title, "title", "", "the issue's title")
+	create.Flags().BoolVar(&upstream, "upstream", false, "the cause is in open-supervisor itself: print a link that opens the issue there")
+	cmd.AddCommand(view, comment, list, create)
 	return cmd
+}
+
+// upstreamIssueURL opens a new open-supervisor issue with the title and body filled in. It is a link for the
+// owner to follow rather than an issue opened for them, since open-supervisor's tracker is public.
+func upstreamIssueURL(title, body string) string {
+	const limit = 6000 // keep the link under what browsers and GitHub accept
+	if len(body) > limit {
+		body = strings.ToValidUTF8(body[:limit], "") + "\n\n…"
+	}
+	q := url.Values{"title": {title}, "body": {body}}
+	return "https://github.com/alsiola/open-supervisor/issues/new?" + q.Encode()
 }
 
 // issuePRs are the PRs that belong to the issue: from its branch, or referring to it.
@@ -690,6 +766,39 @@ func correctionCmd(f *flags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&area, "area", "", "writing, design, data, code or workflow")
+	return cmd
+}
+
+func problemCmd(f *flags) *cobra.Command {
+	var kind string
+	cmd := &cobra.Command{
+		Use:   "problem --kind <kind> <file|->",
+		Short: "Log a problem you worked around, for the daily triage to fix or file",
+		Long: "Log a problem you worked around rather than doing the task the way your instructions say: an unset variable, a missing command, a moved path, a failing `agent` command, a service that needed a retry.\n" +
+			"The file says what you tried to do, what went wrong (the exact error), the workaround and where you think the fix belongs.\n" +
+			"Kinds: " + strings.Join(problems.Kinds, ", ") + ".",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !problems.ValidKind(kind) {
+				return fmt.Errorf("--kind must be one of %s", strings.Join(problems.Kinds, ", "))
+			}
+			s, err := open(f, false)
+			if err != nil {
+				return err
+			}
+			body, err := readBody(args[0])
+			if err != nil {
+				return err
+			}
+			file, err := problems.Write(filepath.Join(s.b.StateDir, "problems"), problems.Note{Issue: s.key, Kind: kind, Body: body})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), file)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&kind, "kind", "", strings.Join(problems.Kinds, ", "))
 	return cmd
 }
 
