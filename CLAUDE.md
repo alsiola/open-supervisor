@@ -12,6 +12,8 @@ Add a scope when the change sits in one area: `feat(jobs): â€¦`, `fix(linear): â
 
 When a commit both fixes and adds, use the type of the bigger change, or split it into two commits.
 
+The `commitlint` check lints every commit on a PR and the PR title (`.commitlintrc.json`). Give the PR a conventional title too: a squash merge of more than one commit lands under it. If a commit fails the check, reword it and force-push the branch.
+
 ## Before a PR
 
 `go vet ./...` and `go test -race ./...` must pass (CI runs both on Linux and macOS, and builds on Windows).
