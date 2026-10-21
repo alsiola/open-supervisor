@@ -146,14 +146,21 @@ func refExists(dir, ref string) bool {
 	return err == nil
 }
 
-// runSetup runs the setup command when what it depends on has changed since it last ran.
+// runSetup runs the setup command when what it depends on has changed since it last ran. When it watches
+// files and the checkout has none of them (a pnpm install in a repo with no pnpm-lock.yaml), it doesn't run.
 func runSetup(s Spec) error {
 	h := sha256.New()
 	h.Write([]byte(s.Setup))
+	found := false
 	for _, name := range s.SetupWhen {
 		if data, err := os.ReadFile(filepath.Join(s.Path, name)); err == nil {
 			h.Write(data)
+			found = true
 		}
+	}
+	if len(s.SetupWhen) > 0 && !found {
+		s.logf("skipping setup: none of %s is in the checkout", strings.Join(s.SetupWhen, ", "))
+		return nil
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
 	stamp := filepath.Join(gitDir(s.Path), "open-supervisor-setup")

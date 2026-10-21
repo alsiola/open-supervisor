@@ -52,6 +52,23 @@ func TestSetupAndRemove(t *testing.T) {
 	}
 }
 
+func TestSetupSkippedWithoutWatchedFiles(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "repo")
+	_ = os.MkdirAll(root, 0o755)
+	runGit(t, root, "init", "-q", "-b", "main")
+	_ = os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x"), 0o644)
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-qm", "init")
+	var log strings.Builder
+	spec := Spec{Root: root, Path: Dir(filepath.Join(dir, "data"), "demo", "1"), Branch: "agent/issue-1", Base: "main",
+		Setup: "exit 1", SetupWhen: []string{"pnpm-lock.yaml"}, Log: &log}
+	if _, err := Setup(spec); err != nil {
+		t.Fatalf("setup ran with none of its watched files in the checkout: %v", err)
+	}
+	_ = Remove(spec)
+}
+
 func TestFresh(t *testing.T) {
 	dir := t.TempDir()
 	origin, root, other := filepath.Join(dir, "origin.git"), filepath.Join(dir, "repo"), filepath.Join(dir, "other")
