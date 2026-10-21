@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.0](https://github.com/alsiola/open-supervisor/compare/v0.3.0...v0.4.0) (2026-10-21)
+
+### Features
+
+* agents report the problems they work around, and a daily triage acts on them ([#12](https://github.com/alsiola/open-supervisor/issues/12)) ([d66ad28](https://github.com/alsiola/open-supervisor/commit/d66ad2809517b9bb38388941a67df6881eff3983)), closes [#11](https://github.com/alsiola/open-supervisor/issues/11)
+
 ## [0.3.0](https://github.com/alsiola/open-supervisor/compare/v0.2.2...v0.3.0) (2026-10-21)
 
 ### Features
