@@ -61,6 +61,10 @@ type Supervisor struct {
 	sweeping bool
 	stopping bool
 
+	shellMu sync.Mutex
+	shells  []*Shell
+	shellN  int
+
 	schedMu sync.Mutex
 	server  *http.Server
 	cancel  context.CancelFunc
@@ -430,7 +434,7 @@ func (s *Supervisor) loop(ctx context.Context) {
 	}
 }
 
-// Stop leaves running turns running (the next start adopts them) and stops everything else.
+// Stop leaves running turns running (the next start adopts them) and stops everything else, shell tasks too.
 func (s *Supervisor) Stop() {
 	s.mu.Lock()
 	s.stopping = true
@@ -448,6 +452,7 @@ func (s *Supervisor) Stop() {
 	for _, p := range s.Projects() {
 		p.stop()
 	}
+	s.stopShells()
 	if s.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = s.server.Shutdown(ctx)

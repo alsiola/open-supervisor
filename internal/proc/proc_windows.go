@@ -33,6 +33,8 @@ func alive(pid int) bool {
 
 func terminate(pid int) error { return kill(pid) }
 
+func terminateGroup(pid int) error { return kill(pid) }
+
 func kill(pid int) error {
 	p, err := os.FindProcess(pid)
 	if err != nil {

@@ -18,4 +18,7 @@ func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }
 
 func terminate(pid int) error { return syscall.Kill(pid, syscall.SIGTERM) }
 
+// terminateGroup signals the process group Setsid gave it, whose id is its pid.
+func terminateGroup(pid int) error { return syscall.Kill(-pid, syscall.SIGTERM) }
+
 func kill(pid int) error { return syscall.Kill(pid, syscall.SIGKILL) }

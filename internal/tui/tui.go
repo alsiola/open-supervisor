@@ -5,6 +5,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -35,9 +36,11 @@ const (
 	editorView
 )
 
+// row is an issue (p and r) or a shell task (sh).
 type row struct {
-	p *engine.Project
-	r *store.Record
+	p  *engine.Project
+	r  *store.Record
+	sh *engine.Shell
 }
 
 type input struct {
@@ -52,16 +55,21 @@ type model struct {
 	view          view
 	selected      int
 	showLog       bool
-	detail        struct{ project, key string }
-	scroll        int
-	focusT        bool // the transcript box has the scroll keys
-	tTop          int  // first transcript line shown; -1 follows the end
-	tMax, tPage   int
-	tCache        struct {
+	detail        struct {
+		project, key string
+		shell        int // the shell task's id, when the page is one
+	}
+	scroll      int
+	focusT      bool // the transcript box has the scroll keys
+	tTop        int  // first transcript line shown; -1 follows the end
+	tMax, tPage int
+	tCache      struct {
 		key   string
 		lines []string
 	}
 	input  *input
+	picker *picker
+	cwd    string // where open-supervisor was started: the first place a shell task can run
 	editor *editor
 	flash  string
 	logs   <-chan struct{}
@@ -78,7 +86,8 @@ type attachedMsg struct {
 type flashMsg string
 
 func newModel(sup *engine.Supervisor) *model {
-	return &model{sup: sup, showLog: true, tTop: -1, logs: logx.Default.Subscribe(), width: 120, height: 40}
+	cwd, _ := os.Getwd()
+	return &model{sup: sup, showLog: true, tTop: -1, logs: logx.Default.Subscribe(), width: 120, height: 40, cwd: cwd}
 }
 
 func (m *model) waitChange() tea.Cmd {
@@ -110,15 +119,24 @@ func (m *model) rows() []row {
 	for _, p := range m.sup.Projects() {
 		for _, r := range p.Store.All() {
 			if r.State != store.Finished {
-				out = append(out, row{p, r})
+				out = append(out, row{p: p, r: r})
 			}
 		}
+	}
+	for _, sh := range m.sup.Shells() {
+		out = append(out, row{sh: sh})
 	}
 	return out
 }
 
 func (m *model) current() *row {
 	if m.view == detailView {
+		if m.detail.shell > 0 {
+			if sh := m.sup.Shell(m.detail.shell); sh != nil {
+				return &row{sh: sh}
+			}
+			return nil
+		}
 		p := m.sup.Project(m.detail.project)
 		if p == nil {
 			return nil
@@ -127,7 +145,7 @@ func (m *model) current() *row {
 		if r == nil {
 			return nil
 		}
-		return &row{p, r}
+		return &row{p: p, r: r}
 	}
 	rows := m.rows()
 	if m.selected >= 0 && m.selected < len(rows) {
@@ -137,7 +155,7 @@ func (m *model) current() *row {
 }
 
 // reserved are the keys the TUI uses itself; a job can't take one.
-var reserved = map[string]bool{"a": true, "c": true, "d": true, "g": true, "k": true, "l": true, "m": true, "q": true, "r": true, "s": true, "t": true, "R": true, ",": true}
+var reserved = map[string]bool{"!": true, "a": true, "c": true, "d": true, "g": true, "k": true, "l": true, "m": true, "q": true, "r": true, "s": true, "t": true, "R": true, ",": true}
 
 type jobKey struct {
 	p   *engine.Project
@@ -148,7 +166,7 @@ type jobKey struct {
 func (m *model) jobKeys() map[string][]jobKey {
 	out := map[string][]jobKey{}
 	projects := m.sup.Projects()
-	if cur := m.current(); cur != nil {
+	if cur := m.current(); cur != nil && cur.p != nil {
 		ordered := []*engine.Project{cur.p}
 		for _, p := range projects {
 			if p != cur.p {
@@ -222,6 +240,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) key(k tea.KeyMsg) tea.Cmd {
+	if m.picker != nil {
+		return m.pickerKey(k)
+	}
 	if m.input != nil {
 		switch k.Type {
 		case tea.KeyEsc:
@@ -308,12 +329,18 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 	case "enter", "right":
 		if cur != nil {
 			m.view = detailView
-			m.detail.project, m.detail.key = cur.p.Name, cur.r.Key
+			if cur.sh != nil {
+				m.detail.project, m.detail.key, m.detail.shell = "", "", cur.sh.ID
+			} else {
+				m.detail.project, m.detail.key, m.detail.shell = cur.p.Name, cur.r.Key, 0
+			}
 			m.scroll, m.focusT, m.tTop = 0, false, -1
 		}
+	case "!":
+		m.picker = m.shellPicker()
 	case "c":
 		var fallback *engine.Project
-		if cur != nil {
+		if cur != nil && cur.p != nil {
 			fallback = cur.p
 		} else if ps := m.sup.Projects(); len(ps) > 0 {
 			fallback = ps[0]
@@ -395,6 +422,9 @@ func (m *model) action(s string, cur *row) tea.Cmd {
 	}
 	if cur == nil {
 		return nil
+	}
+	if cur.sh != nil {
+		return m.shellAction(s, cur.sh)
 	}
 	p, r := cur.p, cur.r
 	switch s {
@@ -501,6 +531,9 @@ func (m *model) paint(lines []string) string {
 }
 
 func (m *model) footer(keys string) string {
+	if m.picker != nil {
+		return dim(" ↑↓ choose   ⏎ pick   esc cancel")
+	}
 	if m.input != nil {
 		return " " + m.input.prompt + m.input.ti.View()
 	}

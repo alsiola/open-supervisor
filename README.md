@@ -223,6 +223,7 @@ Rules particular to a project (what must pass, how to run its dev server) belong
 | `k` | kill the running turn |
 | `d` | drop the issue from the list |
 | `c` | claim an issue by key: `12`, `PROJ-12` (through the routes, for a project fed by a source), `project#12` (into that project whatever the routes say) |
+| `!` | run a shell command: pick where (the folder open-supervisor started in, or a project's checkout), then type it. It joins the list as a shell task (`!1`, `!2`…) with its output on its detail page; `r` runs it again, `k` kills it, `d` drops it. Shell tasks belong to this run: quitting kills those still going |
 | `R` | reconcile now |
 | `s` | sweep now |
 | job keys | run that job now |

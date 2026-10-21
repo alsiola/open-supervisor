@@ -20,3 +20,6 @@ func Terminate(pid int) error { return terminate(pid) }
 
 // Kill stops a process at once.
 func Kill(pid int) error { return kill(pid) }
+
+// TerminateGroup asks a process started with Detach, and everything it started, to stop.
+func TerminateGroup(pid int) error { return terminateGroup(pid) }
