@@ -24,6 +24,7 @@ type Status struct {
 	PRs     []int      `json:"prs,omitempty"`
 	Preview string     `json:"preview,omitempty"`
 	Touches string     `json:"touches,omitempty"`
+	Handoff string     `json:"handoff,omitempty"`
 }
 
 // StatusSchema is the JSON schema an agent is asked to end each issue turn with.
@@ -41,6 +42,8 @@ var StatusSchema = map[string]any{
 		"prs":     map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "Every PR number that belongs to this issue."},
 		"preview": map[string]any{"type": "string", "description": "The deploy preview URL, once known."},
 		"touches": map[string]any{"type": "string", "description": "What the work changes (pages, data, pipeline steps), in a few words, for other agents."},
+		"handoff": map[string]any{"type": "string", "description": "A note to the session that picks this issue up next if this one has gone cold: " +
+			"what is pending, the judgement calls you made and why, and what to check next. Intent only; the issue, the PR and git hold the facts."},
 	},
 	"required":             []string{"state", "summary"},
 	"additionalProperties": false,
@@ -48,14 +51,17 @@ var StatusSchema = map[string]any{
 
 // Outcome is how a turn ended, as the agent adapter read it.
 type Outcome struct {
-	OK       bool          `json:"ok"`
-	Status   *Status       `json:"status,omitempty"`
-	Text     string        `json:"text,omitempty"`
-	Cost     float64       `json:"cost,omitempty"`
-	Tokens   *Tokens       `json:"tokens,omitempty"`
-	Models   []string      `json:"models,omitempty"`
-	Error    string        `json:"error,omitempty"`
-	Duration time.Duration `json:"duration"`
+	OK     bool     `json:"ok"`
+	Status *Status  `json:"status,omitempty"`
+	Text   string   `json:"text,omitempty"`
+	Cost   float64  `json:"cost,omitempty"`
+	Tokens *Tokens  `json:"tokens,omitempty"`
+	Models []string `json:"models,omitempty"`
+	// ModelCalls and ToolCalls are what the turn did: its model requests and the tools those called.
+	ModelCalls int           `json:"modelCalls,omitempty"`
+	ToolCalls  int           `json:"toolCalls,omitempty"`
+	Error      string        `json:"error,omitempty"`
+	Duration   time.Duration `json:"duration"`
 }
 
 // runAtRe finds a runAt marker: `<!-- runAt: 2026-10-25T09:00Z -->` (hidden in Markdown hosts) or a line of its

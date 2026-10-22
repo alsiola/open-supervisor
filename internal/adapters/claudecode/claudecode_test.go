@@ -181,6 +181,20 @@ func TestSetupCommand(t *testing.T) {
 	}
 }
 
+func TestParseCountsCalls(t *testing.T) {
+	out := strings.Join([]string{
+		`{"type":"system","subtype":"init"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"a tool_use"},{"type":"tool_use","name":"Bash"},{"type":"tool_use","name":"Read"}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","content":"\"tool_use\""}]}}`,
+		`{"type":"assistant","parent_tool_use_id":"x","message":{"content":[{"type":"tool_use","name":"Grep"}]}}`,
+		`{"type":"result","subtype":"success","num_turns":4,"total_cost_usd":0.1}`,
+	}, "\n")
+	o := parse(out, "", nil, false)
+	if o.ModelCalls != 4 || o.ToolCalls != 3 {
+		t.Fatalf("model calls %d, tool calls %d", o.ModelCalls, o.ToolCalls)
+	}
+}
+
 func TestPerTurnTakesOffTheSessionsEarlierTotals(t *testing.T) {
 	dir := t.TempDir()
 	res := func(session string, cost float64, read int) string {

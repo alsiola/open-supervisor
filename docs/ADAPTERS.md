@@ -6,7 +6,7 @@ Every service open-supervisor talks to sits behind a small Go interface in [`int
 | --- | --- | --- | --- |
 | agent | `Agent`, optionally `Transcripts`, `UsageReporter` | Claude Code | Codex CLI, Gemini CLI, an Anthropic API tool loop |
 | repo | `RepoProvider` → `Repo`, optionally `Reactor`, `Hooked` | GitHub, Bitbucket Cloud | GitLab, Bitbucket Data Center, Gitea |
-| tracker | `TrackerProvider` → `Tracker`, optionally `Reactor`, `Transitioner`, `Hooked` | GitHub Issues, Jira, Linear | GitLab Issues, Shortcut |
+| tracker | `TrackerProvider` → `Tracker`, optionally `Reactor`, `ReactionReader`, `Transitioner`, `Hooked` | GitHub Issues, Jira, Linear | GitLab Issues, Shortcut |
 | telemetry | `Telemetry` | PostHog | OpenTelemetry (OTLP), Datadog, StatsD |
 | tunnel | `Tunnel` | ngrok, Cloudflare Tunnel, static URL | Tailscale Funnel |
 
@@ -60,7 +60,7 @@ Then add the package to [`internal/adapters/all/all.go`](../internal/adapters/al
 
 An `Agent` runs one turn at a time per issue, detached, so turns outlive the supervisor:
 
-- `Start` gets a `TurnSpec`, holding the playbook name and its arguments ("work-issue", "12 events"), the message body, the session id, whether to resume, and whether to end with the structured `core.Status` (its JSON schema is `core.StatusSchema`). Write output to files under `spec.Dir`, and return a `TurnHandle` (pid, output files) that a later supervisor can `Adopt`.
+- `Start` gets a `TurnSpec`, holding the playbook name and its arguments ("work-issue", "12 events", or "12 handoff" for a fresh session on an issue that has had turns), the message body, the session id, whether to resume, and whether to end with the structured `core.Status` (its JSON schema is `core.StatusSchema`). Write output to files under `spec.Dir`, and return a `TurnHandle` (pid, output files) that a later supervisor can `Adopt`.
 - `Send` hands the running agent a message mid-turn. Return false if your agent can't take one, and it waits for the next turn.
 - `Prepare` gets the playbooks (`internal/playbooks/*.md`). Claude Code installs them as a plugin of skills. An agent without skills can put `playbooks.Body(text)` at the top of the first prompt instead.
 - The playbooks tell the agent to use `$OPEN_SUPERVISOR agent …` for everything that touches a service. Keep `OPEN_SUPERVISOR*` in the environment you pass on.

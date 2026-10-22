@@ -67,8 +67,14 @@ type Settings struct {
 	MaxAttempts           int `yaml:"maxAttempts"`
 	ChecksDebounceSeconds int `yaml:"checksDebounceSeconds"`
 	// NoChecksMinutes is how long a PR head with no checks at all waits before the agent hears none ran.
-	NoChecksMinutes int  `yaml:"noChecksMinutes"`
-	DryRun          bool `yaml:"dryRun,omitempty"`
+	NoChecksMinutes int `yaml:"noChecksMinutes"`
+	// HandoffMinutes: a turn due this long after the last one ended, when the old session's prompt cache has
+	// expired, may start a fresh session from the last turn's handoff note instead of resuming. 0: every turn may.
+	HandoffMinutes *int `yaml:"handoffMinutes,omitempty"`
+	// HandoffShare is the share of those turns, picked at random, that start from the handoff; the rest resume,
+	// so the two can be compared. 0 always resumes, 1 always hands off.
+	HandoffShare *float64 `yaml:"handoffShare,omitempty"`
+	DryRun       bool     `yaml:"dryRun,omitempty"`
 }
 
 // Labels are the labels the supervisor uses.
@@ -263,8 +269,12 @@ func DefaultSettings() Settings {
 		MaxAttempts:           3,
 		ChecksDebounceSeconds: 20,
 		NoChecksMinutes:       10,
+		HandoffMinutes:        ptr(55),
+		HandoffShare:          ptr(0.5),
 	}
 }
+
+func ptr[T any](v T) *T { return &v }
 
 // New is an empty config with the defaults.
 func New(path string) *Config {
@@ -377,6 +387,12 @@ func (c *Config) fill() {
 	}
 	if s.NoChecksMinutes <= 0 {
 		s.NoChecksMinutes = d.NoChecksMinutes
+	}
+	if s.HandoffMinutes == nil || *s.HandoffMinutes < 0 {
+		s.HandoffMinutes = d.HandoffMinutes
+	}
+	if s.HandoffShare == nil || *s.HandoffShare < 0 || *s.HandoffShare > 1 {
+		s.HandoffShare = d.HandoffShare
 	}
 	s.Labels = s.Labels.Merge(d.Labels)
 	if c.Connections == nil {
