@@ -285,6 +285,7 @@ func Clone(c *config.Config) *config.Config {
 	out := &config.Config{Version: c.Version, Settings: c.Settings, Path: c.Path, Connections: map[string]*config.Connection{}}
 	out.Settings.Telemetry = append([]string(nil), c.Settings.Telemetry...)
 	out.Settings.Labels.Skip = append([]string(nil), c.Settings.Labels.Skip...)
+	out.Settings.Labels.Require = append([]string(nil), c.Settings.Labels.Require...)
 	for k, v := range c.Connections {
 		out.Connections[k] = &config.Connection{Type: v.Type, Values: copyValues(v.Values)}
 	}
@@ -309,6 +310,7 @@ func CloneProject(p *config.Project) *config.Project {
 	if p.Labels != nil {
 		l := *p.Labels
 		l.Skip = append([]string(nil), p.Labels.Skip...)
+		l.Require = append([]string(nil), p.Labels.Require...)
 		cp.Labels = &l
 	}
 	cp.Worktree.Copy = append([]string(nil), p.Worktree.Copy...)

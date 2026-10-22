@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Act on the problems issue agents have reported for this project, the things they had to work around. Fix what is plainly wrong in the project's own files with one commit to the main branch, report or file an issue for each remaining cause, and delete the notes. open-supervisor runs it once a day in each project it watches; the message names the problems folder and the report file, and says whether to open issues.
+description: Act on the problems issue agents have reported for this project, the things they had to work around. Fix what is plainly wrong in the project's own files with one commit, landed on the main branch (a push, or a PR), report or file an issue for each remaining cause, and delete the notes. open-supervisor runs it once a day in each project it watches; the message names the problems folder and the report file, and says whether to open issues and how to land the commit.
 ---
 
 # Triage problems
@@ -23,7 +23,9 @@ The message also names a report file and says what to do with the causes you can
 4. Fix the causes in the project's own files, in one commit:
    - Check the main checkout is on the main branch and has no uncommitted changes. If it isn't, fix nothing: treat these causes as "not plainly" and carry on. Otherwise `git pull --ff-only`.
    - Make the smallest edit that removes the cause (replace the stale command with the right one, fix the path). Search the checkout for every other place with the same mistake and fix those too.
-   - Commit only those files on the main branch, with `--no-gpg-sign` and a message listing each fix and the problem it removes. Push. If the push is rejected, `git pull --rebase` and push again. If it still fails, treat these causes as "not plainly".
+   - Commit only those files, with a message listing each fix and the problem it removes. Land it as the message's `Land` line says, on its `Remote`:
+     - **push to the main branch**: commit on the main branch and push. If the push is rejected, `git pull --rebase` and push again. If it still fails, treat these causes as "not plainly".
+     - **open a PR**: `git switch -c open-supervisor/triage-<YYYY-MM-DD>` first, commit there, `git push -u <remote> <branch>`, then `$OPEN_SUPERVISOR agent pr create --head <branch> --title <title> --body-file <file>`, with the same list in the body. Then `git switch <main branch>`, so the checkout is back where it was. Count these causes as fixed, and give the PR's link in your report.
 5. For each remaining cause:
    - **Opening issues**: `$OPEN_SUPERVISOR agent issue list` first. If an open issue already covers the cause, comment on it with today's count, the issues and an exact error (`$OPEN_SUPERVISOR agent issue comment --issue <key> <file>`). Otherwise open one with `$OPEN_SUPERVISOR agent issue create --title <title> <file>`. For an open-supervisor cause, `agent issue create --upstream --title <title> <file>` prints a link that opens the issue on open-supervisor's tracker with your text filled in; put the cause and its link in the report rather than following it. When the message's code line shows this project is open-supervisor itself, open its issues here without `--upstream`.
    - **Writing the report**: one section per cause.

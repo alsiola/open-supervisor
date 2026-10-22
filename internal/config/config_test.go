@@ -83,3 +83,52 @@ func TestSecrets(t *testing.T) {
 		t.Fatal("an unset variable should fail")
 	}
 }
+
+func TestLabelsAdmits(t *testing.T) {
+	has := func(labels ...string) func(string) bool {
+		return func(l string) bool {
+			for _, x := range labels {
+				if x == l {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	all := DefaultSettings().Labels
+	if !all.Admits(has()) || all.Admits(has("backlog")) {
+		t.Fatal("without require, everything but the skip labels is claimed")
+	}
+	only := Labels{Require: []string{"agent"}}.Merge(all)
+	for _, c := range []struct {
+		labels []string
+		want   bool
+	}{{nil, false}, {[]string{"agent"}, true}, {[]string{"agent", "backlog"}, false}, {[]string{"scheduled"}, true}, {[]string{"agent-in-progress"}, true}} {
+		if got := only.Admits(has(c.labels...)); got != c.want {
+			t.Errorf("Admits(%v) = %v; want %v", c.labels, got, c.want)
+		}
+	}
+}
+
+func TestGitFor(t *testing.T) {
+	c := New("")
+	p := &Project{Name: "a"}
+	if g := c.GitFor(p); g.RemoteName() != "origin" || g.Sign {
+		t.Fatalf("default: %+v", g)
+	}
+	c.Settings.Git = Git{Remote: "upstream"}
+	p.Git = &Git{Sign: true}
+	if g := c.GitFor(p); g.RemoteName() != "upstream" || !g.Sign {
+		t.Fatalf("project over settings: %+v", g)
+	}
+}
+
+func TestValidateLand(t *testing.T) {
+	c := New("")
+	c.Settings.Agent = "a"
+	c.Connections["a"] = &Connection{Type: "nope"}
+	c.Projects = []*Project{{Name: "p", Root: "/x", Repo: &Binding{Connection: "a"}, Sweep: Sweep{Land: "merge"}}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), `sweep.land is push or pr, not "merge"`) {
+		t.Fatalf("err: %v", err)
+	}
+}

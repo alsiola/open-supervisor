@@ -645,7 +645,3 @@ func (r *Repo) CommentPR(ctx context.Context, id int, body string, mark core.Age
 func (r *Repo) ReplyInline(ctx context.Context, id int, commentID, body string, mark core.AgentMark) (string, error) {
 	return r.post(ctx, r.path("/pulls/%d/comments/%s/replies", id, url.PathEscape(commentID)), withMark(body, mark))
 }
-
-func (r *Repo) RawURL(sha, path string) string {
-	return fmt.Sprintf("%s/%s/blob/%s/%s?raw=true", r.c.web, r.repo, sha, strings.TrimLeft(path, "/"))
-}

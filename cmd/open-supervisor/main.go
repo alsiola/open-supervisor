@@ -338,12 +338,7 @@ func claimableIssue(i core.Issue, labels config.Labels) bool {
 	if !i.Open || i.Waiting || i.HasLabel(labels.Claimed) {
 		return false
 	}
-	for _, s := range labels.Skip {
-		if i.HasLabel(s) {
-			return false
-		}
-	}
-	return true
+	return labels.Admits(i.HasLabel)
 }
 
 // doctorSource reads a source's open issues and says where its routes send them.

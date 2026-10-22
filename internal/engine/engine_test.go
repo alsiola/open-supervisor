@@ -14,6 +14,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/adapter"
 	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/core"
+	"github.com/alsiola/open-supervisor/internal/playbooks"
 	"github.com/alsiola/open-supervisor/internal/store"
 )
 
@@ -156,7 +157,6 @@ func (h *fakeHost) CommentPR(context.Context, int, string, core.AgentMark) (stri
 func (h *fakeHost) ReplyInline(context.Context, int, string, string, core.AgentMark) (string, error) {
 	return "", nil
 }
-func (h *fakeHost) RawURL(sha, path string) string { return "" }
 
 // fakeAgent runs each turn by calling script with the spec; the turn ends when script returns.
 type fakeAgent struct {
@@ -490,5 +490,40 @@ func TestDotEnv(t *testing.T) {
 	got := readDotEnv(f)
 	if got["A"] != "1" || got["B"] != "two" || got["C"] != "3" || len(got) != 3 {
 		t.Fatalf("%v", got)
+	}
+}
+
+func TestOptInClaimingAndTheTurnsGitAndAdditions(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "")
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("did it") }, func(s *config.Settings) {
+		s.Labels.Require = []string{"agent"}
+		s.Git.Remote = "upstream"
+	})
+	dir := filepath.Join(p.Root, playbooks.ProjectDir)
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "work-issue.md"), []byte("Run `make lint` before the PR.\n"), 0o644)
+	host.issues["1"] = &core.Issue{Key: "1", Title: "Unmarked", Open: true}
+	host.issues["2"] = &core.Issue{Key: "2", Title: "Marked", Open: true, Labels: []string{"agent"}}
+	p.reconcile()
+	waitFor(t, "issue 2 in review", func() bool { return state(p, "2") == store.Review })
+	if p.Store.Get("1") != nil {
+		t.Fatal("claimed an issue without the required label")
+	}
+	specs := agent.turns()
+	if len(specs) != 1 || !strings.Contains(specs[0].Body, "## This project's additions to the playbook") || !strings.Contains(specs[0].Body, "Run `make lint` before the PR.") {
+		t.Fatalf("turn specs: %+v", specs)
+	}
+	env := strings.Join(specs[0].Env, "\n")
+	for _, want := range []string{"OPEN_SUPERVISOR_REMOTE=upstream", "commit.gpgsign", "GIT_CONFIG_VALUE_0=false"} {
+		if !strings.Contains(env, want) {
+			t.Fatalf("session env lacks %s", want)
+		}
+	}
+}
+
+func TestSigningKeptWhenAskedFor(t *testing.T) {
+	s, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") }, func(s *config.Settings) { s.Git.Sign = true })
+	if env := strings.Join(s.sessionEnv(p, "1"), "\n"); strings.Contains(env, "gpgsign") {
+		t.Fatalf("signing turned off: %s", env)
 	}
 }

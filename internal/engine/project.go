@@ -17,6 +17,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/logx"
+	"github.com/alsiola/open-supervisor/internal/playbooks"
 	"github.com/alsiola/open-supervisor/internal/problems"
 	"github.com/alsiola/open-supervisor/internal/store"
 	"github.com/alsiola/open-supervisor/internal/worktree"
@@ -55,6 +56,7 @@ type Project struct {
 	fingerprint string
 	branchTmpl  string
 	branchRe    *regexp.Regexp
+	git         config.Git
 	base        string
 	hub         hub
 	// src is the source that feeds the project; a reload can swap it for an equal one.
@@ -477,10 +479,8 @@ func (p *Project) maybeClaim(issue core.Issue, reopened bool) {
 	if !issue.Open || issue.Waiting || src.Holder(issue.Key) != nil {
 		return
 	}
-	for _, s := range p.Labels.Skip {
-		if issue.HasLabel(s) {
-			return
-		}
+	if !p.Labels.Admits(issue.HasLabel) {
+		return
 	}
 	if issue.HasLabel(p.Labels.Claimed) && !reopened {
 		return
@@ -916,6 +916,7 @@ func (p *Project) runTurn(key string) {
 		kind = "start"
 	}
 	args, body := p.turnBody(r, events)
+	body = withExtra(body, playbooks.Project(p.Root, "work-issue"))
 	// A session that has run before is resumed, even when its first turn never ended.
 	resume := p.Agent.SessionExists(p.Root, r.Session)
 	ctx := context.Background()
@@ -1405,9 +1406,7 @@ func (p *Project) runSweep() {
 	if p.Spec.Sweep.Guide != "" {
 		body += "\nGuide: " + p.Spec.Sweep.Guide
 	}
-	if p.base != "" {
-		body += "\nMain branch: " + p.base
-	}
+	body += p.landing(p.Spec.Sweep.Land)
 	p.runChore("sweep", &p.sweep, body, fmt.Sprintf("folding %d correction(s) into the rule files", count))
 }
 
@@ -1432,10 +1431,34 @@ func (p *Project) runTriage() {
 		body += "\nCauses: write them to the report"
 	}
 	body += "\nReport: " + p.TriageReport()
-	if p.base != "" {
-		body += "\nMain branch: " + p.base
-	}
+	body += p.landing(p.Spec.Triage.Land)
 	p.runChore("triage", &p.triage, body, fmt.Sprintf("triaging %d problem(s)", count))
+}
+
+// withExtra adds a project's additions to a playbook (see playbooks.Project) to a turn's message.
+func withExtra(body, extra string) string {
+	if extra == "" {
+		return body
+	}
+	add := "## This project's additions to the playbook\n\nFollow these as well as the playbook. They add to its steps and never replace them.\n\n" + extra
+	if body == "" {
+		return add
+	}
+	return body + "\n\n" + add
+}
+
+// landing are the lines of a chore's message that say where its commit goes: the main branch, the remote, and
+// whether to push it or open a PR.
+func (p *Project) landing(land string) string {
+	out := ""
+	if p.base != "" {
+		out += "\nMain branch: " + p.base
+	}
+	out += "\nRemote: " + p.git.RemoteName()
+	if land == config.LandPR {
+		return out + "\nLand: open a PR"
+	}
+	return out + "\nLand: push to the main branch"
 }
 
 // runChore runs one of the project's daily maintenance turns (the sweep, the triage) in the main checkout and
@@ -1453,7 +1476,7 @@ func (p *Project) runChore(name string, slot *adapter.Turn, body, doing string) 
 		Env:      p.hub.sessionEnv(p, ""),
 		Dir:      filepath.Join(p.StateDir, "turns", name),
 		Playbook: name,
-		Body:     body,
+		Body:     withExtra(body, playbooks.Project(p.Root, name)),
 		DryRun:   p.hub.settings().DryRun,
 	})
 	if err != nil {

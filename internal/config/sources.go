@@ -409,6 +409,7 @@ func (s *Source) Clone() *Source {
 	if s.Labels != nil {
 		l := *s.Labels
 		l.Skip = append([]string(nil), s.Labels.Skip...)
+		l.Require = append([]string(nil), s.Labels.Require...)
 		cp.Labels = &l
 	}
 	return &cp

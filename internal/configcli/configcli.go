@@ -514,7 +514,7 @@ func projectCmd(path func() string) *cobra.Command {
 	}
 	var root, code, issues, source, agent, branch, base, setup, copyFiles, setupWhen string
 	var repoSets, trackerSets []string
-	var disabled, noSweep, noTriage, openIssues bool
+	var disabled, noSweep, noTriage, openIssues, landPR bool
 	set := &cobra.Command{
 		Use:   "set <name> --root <checkout> --code <connection> (--issues <connection> | --source <source>)",
 		Short: "Add a project, or change one",
@@ -576,6 +576,9 @@ func projectCmd(path func() string) *cobra.Command {
 			}
 			if f.Changed("triage-issues") {
 				d.OpenIssues = openIssues
+			}
+			if f.Changed("land-pr") {
+				d.LandPR = landPR
 			}
 			if _, ok := cfg.Connections[d.Repo]; !ok {
 				return fmt.Errorf("no code host connection %q (add one with `config connection set`, and pass --code)", d.Repo)
@@ -658,6 +661,7 @@ func projectCmd(path func() string) *cobra.Command {
 	f.BoolVar(&disabled, "disabled", false, "leave the project off")
 	f.BoolVar(&noSweep, "no-sweep", false, "turn off its daily corrections sweep")
 	f.BoolVar(&noTriage, "no-triage", false, "turn off its daily triage of the problems agents report")
+	f.BoolVar(&landPR, "land-pr", false, "let the sweep and triage open PRs instead of pushing to the main branch")
 	f.BoolVar(&openIssues, "triage-issues", false, "let the triage open an issue per cause in its tracker, not only a report")
 	rm := &cobra.Command{
 		Use:   "remove <name>",

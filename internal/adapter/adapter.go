@@ -134,8 +134,6 @@ type Repo interface {
 	CommentPR(ctx context.Context, id int, body string, mark core.AgentMark) (string, error)
 	// ReplyInline answers in an inline review thread.
 	ReplyInline(ctx context.Context, id int, commentID, body string, mark core.AgentMark) (string, error)
-	// RawURL is a link that serves a file's raw bytes at a commit, for images in PR bodies.
-	RawURL(sha, path string) string
 }
 
 // PRRequest is a PR to open.

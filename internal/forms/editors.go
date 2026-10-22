@@ -287,7 +287,9 @@ type ProjectDraft struct {
 	NoTriage  bool
 	// OpenIssues: the triage opens issues for the causes it finds, not only a report.
 	OpenIssues bool
-	Disabled   bool
+	// LandPR: the sweep and triage open PRs rather than pushing to the main branch.
+	LandPR   bool
+	Disabled bool
 
 	RepoFields    *FieldSet
 	TrackerFields *FieldSet
@@ -321,6 +323,7 @@ func NewProjectDraft(cfg *config.Config, p *config.Project, dir string) *Project
 		Original: p.Name, Name: p.Name, Root: p.Root, Agent: p.Agent, Branch: p.Branch, Base: p.BaseBranch,
 		Copy: strings.Join(p.Worktree.Copy, ", "), Setup: p.Worktree.Setup, SetupWhen: strings.Join(p.Worktree.SetupWhen, ", "),
 		NoSweep: p.Sweep.Disabled, NoTriage: p.Triage.Disabled, OpenIssues: p.Triage.OpenIssues, Disabled: p.Disabled, project: p,
+		LandPR: p.Sweep.Land == config.LandPR || p.Triage.Land == config.LandPR,
 	}
 	if p.Repo != nil {
 		d.Repo = p.Repo.Connection
@@ -602,6 +605,7 @@ func (d *ProjectDraft) ExtraGroups(cfg *config.Config) []*huh.Group {
 		huh.NewConfirm().Title("Turn off the daily corrections sweep?").Value(&d.NoSweep),
 		huh.NewConfirm().Title("Turn off the daily triage of the problems agents report?").Value(&d.NoTriage),
 		huh.NewConfirm().Title("Let the triage open issues?").Description("One per cause, in the project's tracker. No: it writes a report for you instead.").Value(&d.OpenIssues),
+		huh.NewConfirm().Title("Land the sweep's and triage's commits as PRs?").Description("For a protected main branch. No: they push to it.").Value(&d.LandPR),
 	).Title("Worktrees and branches")}
 }
 
@@ -642,6 +646,10 @@ func (d *ProjectDraft) Apply(cfg *config.Config) (*config.Project, error) {
 	p.Sweep.Disabled = d.NoSweep
 	p.Triage.Disabled = d.NoTriage
 	p.Triage.OpenIssues = d.OpenIssues
+	p.Sweep.Land, p.Triage.Land = "", ""
+	if d.LandPR {
+		p.Sweep.Land, p.Triage.Land = config.LandPR, config.LandPR
+	}
 	p.Disabled = d.Disabled
 	repoValues := adapter.Values{}
 	if d.RepoFields != nil {
@@ -721,6 +729,7 @@ type SettingsDraft struct {
 	Agent, Tunnel                                   string
 	Telemetry                                       []string
 	Claimed, Scheduled, Skip, Help, Review, Done    string
+	Require                                         string
 	Branch, SweepAt, TriageAt                       string
 	Jobs                                            bool
 }
@@ -733,7 +742,8 @@ func NewSettingsDraft(cfg *config.Config) *SettingsDraft {
 		Port: strconv.Itoa(s.Port), MaxAttempts: strconv.Itoa(s.MaxAttempts),
 		Agent: s.Agent, Tunnel: s.Tunnel, Telemetry: append([]string(nil), s.Telemetry...),
 		Claimed: s.Labels.Claimed, Scheduled: s.Labels.Scheduled, Skip: strings.Join(s.Labels.Skip, ", "),
-		Help: s.Labels.Help, Review: s.Labels.Review, Done: s.Labels.Done,
+		Require: strings.Join(s.Labels.Require, ", "),
+		Help:    s.Labels.Help, Review: s.Labels.Review, Done: s.Labels.Done,
 		Branch: s.Branch, SweepAt: s.SweepAt, TriageAt: s.TriageAt, Jobs: s.Jobs,
 	}
 }
@@ -758,6 +768,7 @@ func (d *SettingsDraft) LimitGroups() []*huh.Group {
 			huh.NewInput().Title("Claimed").Description("Put on an issue an agent has").Value(&d.Claimed),
 			huh.NewInput().Title("Scheduled").Description("Held until a runAt time, or opened on a timer").Value(&d.Scheduled),
 			huh.NewInput().Title("Leave alone").Description("Comma-separated: issues with any of these are never claimed").Value(&d.Skip),
+			huh.NewInput().Title("Only claim").Description("Comma-separated: when set, only issues with one of these are claimed. Empty claims every issue not left alone").Value(&d.Require),
 			huh.NewInput().Title("Needs help").Value(&d.Help),
 			huh.NewInput().Title("Ready for review").Value(&d.Review),
 			huh.NewInput().Title("Might be done").Value(&d.Done),
@@ -842,7 +853,7 @@ func (d *SettingsDraft) Apply(cfg *config.Config) {
 	s.Telemetry = append([]string(nil), d.Telemetry...)
 	sort.Strings(s.Telemetry)
 	s.Labels = config.Labels{
-		Claimed: strings.TrimSpace(d.Claimed), Scheduled: strings.TrimSpace(d.Scheduled), Skip: splitList(d.Skip),
+		Claimed: strings.TrimSpace(d.Claimed), Scheduled: strings.TrimSpace(d.Scheduled), Skip: splitList(d.Skip), Require: splitList(d.Require),
 		Help: strings.TrimSpace(d.Help), Review: strings.TrimSpace(d.Review), Done: strings.TrimSpace(d.Done),
 	}.Merge(config.DefaultSettings().Labels)
 	if strings.Contains(d.Branch, "{key}") {

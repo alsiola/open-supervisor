@@ -146,10 +146,6 @@ func (r *Repo) Describe() string { return "bitbucket " + r.ws + "/" + r.slug }
 
 func (r *Repo) WebURL() string { return "https://bitbucket.org/" + r.ws + "/" + r.slug }
 
-func (r *Repo) RawURL(sha, path string) string {
-	return r.WebURL() + "/raw/" + sha + "/" + strings.TrimLeft(path, "/")
-}
-
 func (r *Repo) DefaultBranch(ctx context.Context) (string, error) {
 	var repo struct {
 		MainBranch struct {
