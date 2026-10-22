@@ -362,10 +362,13 @@ func (p *Project) ingest(r *store.Record, c core.Comment) bool {
 // ingestOpt is ingest; schedule false queues the comment without starting a turn, so a batch read in one go
 // becomes one turn.
 func (p *Project) ingestOpt(r *store.Record, c core.Comment, schedule bool) bool {
-	if c.Bot {
-		return false
-	}
-	if c.Agent != nil && (c.Agent.From == "" || c.Agent.From == r.Key) {
+	// The mark comes first: agents post through a bot app when one is set up, and another agent's comment
+	// still has to reach this one.
+	if c.Agent != nil {
+		if c.Agent.From == "" || c.Agent.From == r.Key {
+			return false
+		}
+	} else if c.Bot {
 		return false
 	}
 	fresh := false
