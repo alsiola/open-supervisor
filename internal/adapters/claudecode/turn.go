@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -158,7 +159,7 @@ func (a *Agent) Start(ctx context.Context, spec adapter.TurnSpec) (adapter.Turn,
 			} else if werr != nil {
 				code = -1
 			}
-			o = parse(read(outPath), read(errPath), &code, spec.Structured)
+			o = perTurn(outPath, parse(read(outPath), read(errPath), &code, spec.Structured))
 		}
 		o.Duration = time.Since(started)
 		keep(outPath, map[string]any{"args": args, "prompt": prompt, "result": o})
@@ -275,7 +276,7 @@ func (a *Agent) Adopt(h adapter.TurnHandle, structured bool) adapter.Turn {
 		if killed {
 			o = core.Outcome{Error: "killed"}
 		} else {
-			o = parse(read(h.Out), read(h.Err), nil, structured)
+			o = perTurn(h.Out, parse(read(h.Out), read(h.Err), nil, structured))
 		}
 		o.Duration = time.Since(h.StartedAt)
 		keep(h.Out, map[string]any{"adopted": true, "result": o})
@@ -308,6 +309,7 @@ type result struct {
 	Subtype          string                    `json:"subtype"`
 	IsError          bool                      `json:"is_error"`
 	Result           any                       `json:"result"`
+	SessionID        string                    `json:"session_id"`
 	TotalCostUSD     *float64                  `json:"total_cost_usd"`
 	StructuredOutput json.RawMessage           `json:"structured_output"`
 	ModelUsage       map[string]map[string]any `json:"modelUsage"`
@@ -335,6 +337,66 @@ func num(m map[string]any, k string) int64 {
 		return int64(f)
 	}
 	return 0
+}
+
+// usage sums the tokens per model, less what before had for the same model, and lists the models that used any.
+func usage(models, before map[string]map[string]any) (*core.Tokens, []string) {
+	if len(models) == 0 {
+		return nil, nil
+	}
+	t := &core.Tokens{}
+	var used []string
+	for model, m := range models {
+		b := before[model]
+		u := core.Tokens{
+			Input:         num(m, "inputTokens") - num(b, "inputTokens"),
+			Output:        num(m, "outputTokens") - num(b, "outputTokens"),
+			CacheRead:     num(m, "cacheReadInputTokens") - num(b, "cacheReadInputTokens"),
+			CacheCreation: num(m, "cacheCreationInputTokens") - num(b, "cacheCreationInputTokens"),
+		}
+		if u == (core.Tokens{}) {
+			continue
+		}
+		used = append(used, model)
+		t = t.Add(&u)
+	}
+	sort.Strings(used)
+	return t, used
+}
+
+// perTurn makes an outcome this turn's alone. On a resumed session claude reports the cost and tokens since the
+// session began, so the totals in the session's previous result (the latest earlier output in the same folder
+// with one) come off. A session that has gone backwards, as after a fork, is left as it is.
+func perTurn(out string, o core.Outcome) core.Outcome {
+	cur := lastResult(read(out))
+	if cur == nil || cur.SessionID == "" {
+		return o
+	}
+	files, _ := filepath.Glob(filepath.Join(filepath.Dir(out), "*.out"))
+	sort.Strings(files)
+	var prev *result
+	for i := len(files) - 1; i >= 0 && prev == nil; i-- {
+		if files[i] >= out {
+			continue
+		}
+		if r := lastResult(read(files[i])); r != nil && r.SessionID == cur.SessionID {
+			prev = r
+		}
+	}
+	if prev == nil || prev.TotalCostUSD == nil || cur.TotalCostUSD == nil || *prev.TotalCostUSD > *cur.TotalCostUSD {
+		return o
+	}
+	for model, b := range prev.ModelUsage {
+		m := cur.ModelUsage[model]
+		for _, k := range []string{"inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"} {
+			if num(b, k) > num(m, k) {
+				return o
+			}
+		}
+	}
+	o.Cost = *cur.TotalCostUSD - *prev.TotalCostUSD
+	o.Tokens, o.Models = usage(cur.ModelUsage, prev.ModelUsage)
+	return o
 }
 
 // parse turns claude's output into an outcome. code is nil for an adopted turn, whose exit code is unknown.
@@ -372,17 +434,7 @@ func parse(stdout, stderr string, code *int, structured bool) core.Outcome {
 	if s, ok := r.Result.(string); ok {
 		o.Text = s
 	}
-	if len(r.ModelUsage) > 0 {
-		t := &core.Tokens{}
-		for model, m := range r.ModelUsage {
-			o.Models = append(o.Models, model)
-			t.Input += num(m, "inputTokens")
-			t.Output += num(m, "outputTokens")
-			t.CacheRead += num(m, "cacheReadInputTokens")
-			t.CacheCreation += num(m, "cacheCreationInputTokens")
-		}
-		o.Tokens = t
-	}
+	o.Tokens, o.Models = usage(r.ModelUsage, nil)
 	if r.IsError || (code != nil && *code != 0) {
 		sub := r.Subtype
 		if sub == "" {
