@@ -172,7 +172,7 @@ func Command() *cobra.Command {
 	root.PersistentFlags().StringVar(&f.config, "config", "", "config file (default $OPEN_SUPERVISOR_CONFIG or ~/.config/open-supervisor/config.yaml)")
 	root.PersistentFlags().StringVar(&f.project, "project", "", "project name (default $OPEN_SUPERVISOR_PROJECT or the current checkout's)")
 	root.PersistentFlags().StringVar(&f.issue, "issue", "", "issue key (default $OPEN_SUPERVISOR_ISSUE or the current branch's)")
-	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), worktreeCmd(f), screenshotsCmd(f), scheduleCmd(f), correctionCmd(f), problemCmd(f), inflightCmd(f))
+	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), worktreeCmd(f), scheduleCmd(f), correctionCmd(f), problemCmd(f), inflightCmd(f))
 	return root
 }
 
@@ -202,6 +202,7 @@ func contextCmd(f *flags) *cobra.Command {
 				cancel()
 			}
 			fmt.Fprintf(out, "base:      %s\n", base)
+			fmt.Fprintf(out, "remote:    %s\n", s.b.Git.RemoteName())
 			fmt.Fprintf(out, "inflight:  %s\n", filepath.Join(s.b.StateDir, "inflight.md"))
 			fmt.Fprintf(out, "rules:     %s\n", strings.Join(s.b.Agent.RulesFiles(), "; "))
 			return nil
@@ -459,14 +460,14 @@ func prCmd(f *flags) *cobra.Command {
 			return nil
 		},
 	}
-	var title, bodyFile, base string
+	var title, bodyFile, base, head string
 	var draft bool
 	create := &cobra.Command{
 		Use:   "create --title <title> --body-file <file|->",
-		Short: "Open a PR from the issue's branch",
+		Short: "Open a PR from the issue's branch, or from --head outside an issue",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			s, err := open(f, true)
+			s, err := open(f, head == "")
 			if err != nil {
 				return err
 			}
@@ -477,8 +478,11 @@ func prCmd(f *flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if ref := s.b.Tracker.RefFor(s.key); !strings.Contains(body, ref) {
-				body = ref + "\n\n" + body
+			if head == "" {
+				head = s.branch()
+				if ref := s.b.Tracker.RefFor(s.key); !strings.Contains(body, ref) {
+					body = ref + "\n\n" + body
+				}
 			}
 			ctx, cancel := timeout()
 			defer cancel()
@@ -491,10 +495,10 @@ func prCmd(f *flags) *cobra.Command {
 				}
 			}
 			if s.dryRun {
-				fmt.Fprintf(cmd.OutOrStdout(), "dry run: would open %s → %s\n", s.branch(), base)
+				fmt.Fprintf(cmd.OutOrStdout(), "dry run: would open %s → %s\n", head, base)
 				return nil
 			}
-			pr, err := s.b.Repo.CreatePR(ctx, adapter.PRRequest{Title: title, Body: body, Head: s.branch(), Base: base, Draft: draft})
+			pr, err := s.b.Repo.CreatePR(ctx, adapter.PRRequest{Title: title, Body: body, Head: head, Base: base, Draft: draft})
 			if err != nil {
 				return err
 			}
@@ -505,6 +509,7 @@ func prCmd(f *flags) *cobra.Command {
 	create.Flags().StringVar(&title, "title", "", "the PR's title")
 	create.Flags().StringVar(&bodyFile, "body-file", "", "a file with the PR's body, or - for stdin")
 	create.Flags().StringVar(&base, "base", "", "the branch to merge into (default the project's base branch)")
+	create.Flags().StringVar(&head, "head", "", "the branch to open it from, for a PR outside an issue (a sweep's or triage's)")
 	create.Flags().BoolVar(&draft, "draft", false, "open it as a draft")
 	comment := &cobra.Command{
 		Use:   "comment <pr> <file|->",
@@ -641,7 +646,7 @@ func (s *session) worktreeSpec(log io.Writer) worktree.Spec {
 		cancel()
 	}
 	w := s.b.Spec.Worktree
-	return worktree.Spec{Root: s.b.Root, Path: s.worktree(), Branch: s.branch(), Base: base, Copy: w.Copy, Setup: w.Setup, SetupWhen: w.SetupWhen, Log: log}
+	return worktree.Spec{Root: s.b.Root, Remote: s.b.Git.RemoteName(), Path: s.worktree(), Branch: s.branch(), Base: base, Copy: w.Copy, Setup: w.Setup, SetupWhen: w.SetupWhen, Log: log}
 }
 
 func worktreeCmd(f *flags) *cobra.Command {

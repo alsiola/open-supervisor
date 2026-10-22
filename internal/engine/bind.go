@@ -23,6 +23,7 @@ type Bound struct {
 	Agent          adapter.Agent
 	AgentName      string
 	BranchTemplate string
+	Git            config.Git
 	branchRe       *regexp.Regexp
 }
 
@@ -53,7 +54,8 @@ func Bind(cfg *config.Config, spec *config.Project, conns *Connections, stateDir
 	if src == nil {
 		return nil, fmt.Errorf("needs a tracker, or a source with a route to it")
 	}
-	info := adapter.ProjectInfo{Name: spec.Name, Root: root, Remote: gitRemote(root)}
+	git := cfg.GitFor(spec)
+	info := adapter.ProjectInfo{Name: spec.Name, Root: root, Remote: gitRemote(root, git.RemoteName())}
 	agentName := cfg.AgentFor(spec)
 	agentConn, err := conns.Get(agentName)
 	if err != nil {
@@ -86,6 +88,7 @@ func Bind(cfg *config.Config, spec *config.Project, conns *Connections, stateDir
 		Agent:          agent,
 		AgentName:      agentName,
 		BranchTemplate: tmpl,
+		Git:            git,
 		branchRe:       re,
 	}, nil
 }
@@ -144,7 +147,7 @@ func BindSource(cfg *config.Config, src *config.Source, conns *Connections) (ada
 	}
 	spec := cfg.Project(src.Name)
 	root := config.ExpandHome(spec.Root)
-	info := adapter.ProjectInfo{Name: spec.Name, Root: root, Remote: gitRemote(root)}
+	info := adapter.ProjectInfo{Name: spec.Name, Root: root, Remote: gitRemote(root, cfg.GitFor(spec).RemoteName())}
 	var binding adapter.Values
 	if spec.Repo != nil && spec.Repo.Connection == src.Tracker.Connection {
 		_, b, err := bindRepo(spec, conns, info)

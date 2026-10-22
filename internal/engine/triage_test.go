@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/alsiola/open-supervisor/internal/adapter"
+	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/problems"
 )
@@ -32,7 +33,7 @@ func TestTriageRunsOnTheProblems(t *testing.T) {
 	if len(specs) != 1 || specs[0].Playbook != "triage" || specs[0].Cwd != p.Root {
 		t.Fatalf("turn specs: %+v", specs)
 	}
-	for _, want := range []string{"Problems folder: " + p.ProblemsDir(), "Report: " + p.TriageReport(), "Causes: write them to the report"} {
+	for _, want := range []string{"Problems folder: " + p.ProblemsDir(), "Report: " + p.TriageReport(), "Causes: write them to the report", "Remote: origin", "Land: push to the main branch"} {
 		if !strings.Contains(specs[0].Body, want) {
 			t.Fatalf("body lacks %q:\n%s", want, specs[0].Body)
 		}
@@ -42,8 +43,9 @@ func TestTriageRunsOnTheProblems(t *testing.T) {
 	}
 
 	p.Spec.Triage.OpenIssues = true
+	p.Spec.Triage.Land = config.LandPR
 	s.RunTriage(nil)
-	if specs := agent.turns(); len(specs) != 2 || !strings.Contains(specs[1].Body, "Causes: open or update an issue for each") {
+	if specs := agent.turns(); len(specs) != 2 || !strings.Contains(specs[1].Body, "Causes: open or update an issue for each") || !strings.Contains(specs[1].Body, "Land: open a PR") {
 		t.Fatalf("turn specs: %+v", specs)
 	}
 

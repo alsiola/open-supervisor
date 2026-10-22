@@ -109,3 +109,26 @@ func TestFresh(t *testing.T) {
 		t.Errorf("worktree still listed: %s", out)
 	}
 }
+
+func TestSetupFromAnotherRemote(t *testing.T) {
+	dir := t.TempDir()
+	upstream, root := filepath.Join(dir, "upstream.git"), filepath.Join(dir, "repo")
+	runGit(t, dir, "init", "-q", "--bare", "-b", "main", upstream)
+	runGit(t, dir, "clone", "-q", "-o", "upstream", upstream, root)
+	_ = os.WriteFile(filepath.Join(root, "a.txt"), []byte("v1"), 0o644)
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-qm", "one")
+	runGit(t, root, "push", "-q", "upstream", "HEAD:main", "HEAD:refs/heads/agent/issue-2")
+	var log strings.Builder
+	spec := Spec{Root: root, Remote: "upstream", Path: filepath.Join(dir, "data", "issue-2"), Branch: "agent/issue-2", Base: "main", Log: &log}
+	path, err := Setup(spec)
+	if err != nil {
+		t.Fatal(err, log.String())
+	}
+	if strings.Contains(log.String(), "fetch failed") {
+		t.Fatalf("fetched from origin: %s", log.String())
+	}
+	if out, _ := exec.Command("git", "-C", path, "rev-parse", "--abbrev-ref", "@{upstream}").Output(); strings.TrimSpace(string(out)) != "upstream/agent/issue-2" {
+		t.Fatalf("tracks %q", out)
+	}
+}

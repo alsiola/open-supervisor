@@ -95,12 +95,16 @@ settings:
   tunnel: ngrok              # empty: no webhooks, poll only
   telemetry: [posthog]
   branch: agent/issue-{key}
+  git:
+    remote: origin           # where branches are fetched from and pushed to
+    sign: false              # off: agents' and jobs' commits are never signed, so nothing waits on a signer
   sweepAt: "08:41"           # daily corrections sweep; empty turns it off
   triageAt: "08:51"          # daily triage of the problems agents report; empty turns it off
   labels:
     claimed: agent-in-progress
     scheduled: scheduled
     skip: [backlog, human, milestone]
+    require: []              # set, e.g. [agent]: only issues with one of these (or `scheduled`) are claimed
     help: agent-needs-help
     review: ready-for-review
     done: might-be-done
@@ -118,7 +122,8 @@ projects:
     repo:    { connection: github }        # owner/name is read from the checkout's origin
     tracker: { connection: github }
     worktree: { copy: [.env], setup: pnpm install --frozen-lockfile, setupWhen: [pnpm-lock.yaml] }
-    triage: { openIssues: true }        # file an issue per cause; left out, the triage writes a report
+    triage: { openIssues: true, land: pr }   # file an issue per cause; land its fixes as a PR, not a push
+    sweep: { land: pr }                      # the same for the corrections sweep (push by default)
   - name: api
     root: ~/Code/api
     repo:    { connection: bb, repo: acme/api }
@@ -222,7 +227,7 @@ The job learns about the delivery from `OPEN_SUPERVISOR_EVENT`, `OPEN_SUPERVISOR
 
 ## What it does
 
-- **Claims** every open issue nobody has, in the project its source's routes name. An issue is skipped if it carries the claimed label or any of the skip labels. Claiming adds the label, makes a session and starts the first turn with the project's in-flight list.
+- **Claims** every open issue nobody has, in the project its source's routes name. An issue is skipped if it carries the claimed label or any of the skip labels. With `labels.require`, claiming is opt-in: only issues carrying one of those labels (or the scheduled label) are claimed, which suits a shared team tracker. Claiming adds the label, makes a session and starts the first turn with the project's in-flight list.
 - **Runs turns.** A turn is one agent invocation on the issue's session, from the project's checkout. It ends with a structured status: `building`, `review`, `help`, `done` or `finished`, with a summary, PRs, preview and what it touches. Turns run detached: quitting leaves them running, and the next start adopts them.
 - **Queues events** per issue for the next turn: human comments on the issue and its PRs (inline threads and reviews too), checks finishing on the PR head (with the preview URL, or the failures; a head with no checks after 10 minutes is reported as such), PRs merged or closed, the issue closed or reopened. Bots' comments and agents' own comments are dropped. A comment from another agent on this issue gets through.
 - **Interjects.** A comment or TUI message that arrives mid-turn goes into the running turn. The agent takes it in after its current tool call.
@@ -230,8 +235,8 @@ The job learns about the delivery from `OPEN_SUPERVISOR_EVENT`, `OPEN_SUPERVISOR
 - **Schedules.** An agent parks an issue until a time with `agent schedule`. An issue labelled `scheduled` with a `runAt` marker waits until then.
 - **Webhooks plus reconcile.** Webhooks arrive through the tunnel and are signature-checked. They can also [run a project's jobs](#jobs-on-webhooks). Every few minutes a reconcile reads everything a webhook could have missed, so webhooks are optional.
 - **Retries** a failed turn after 5, then 10, then 15 minutes, then waits for `r`.
-- **Sweeps** once a day: an agent turn folds the corrections agents logged into the project's rule files.
-- **Triages** once a day: agents log what they had to work around with `agent problem` (an unset variable, a stale skill, a failing `agent` command). An agent turn groups the notes by cause, fixes what is plainly wrong in the project's own files with one commit to the main branch, and writes the rest to `triage.md` in the project's state folder. With `triage.openIssues` it opens or updates one issue per cause in the project's tracker instead. Causes in open-supervisor itself come back as a link that opens an issue here, filled in. The header counts the notes waiting.
+- **Sweeps** once a day: an agent turn folds the corrections agents logged into the project's rule files. It pushes to the main branch, or opens a PR with `sweep.land: pr` (for a protected branch).
+- **Triages** once a day: agents log what they had to work around with `agent problem` (an unset variable, a stale skill, a failing `agent` command). An agent turn groups the notes by cause, fixes what is plainly wrong in the project's own files with one commit to the main branch (or a PR, with `triage.land: pr`), and writes the rest to `triage.md` in the project's state folder. With `triage.openIssues` it opens or updates one issue per cause in the project's tracker instead. Causes in open-supervisor itself come back as a link that opens an issue here, filled in. The header counts the notes waiting.
 - **Usage and metrics.** It shows the Claude subscription's 5-hour and 7-day windows in the header. It sends the telemetry connections an `agent_turn` event per turn (tokens, cost, duration, state), an `agent_usage` event, and an `agent_problem` event for each problem an agent logs.
 
 ### What agents get
@@ -240,11 +245,13 @@ The playbooks (`internal/playbooks`) reach Claude Code as a plugin of skills: `/
 
 ```
 agent context | issue view | issue comment | issue list | issue create | pr list | pr create | pr view
-agent pr comment | pr reply | checks | worktree setup | worktree remove | screenshots | schedule
+agent pr comment | pr reply | checks | worktree setup | worktree remove | schedule
 agent correction | problem | inflight
 ```
 
-Rules particular to a project (what must pass, how to run its dev server) belong in its own `CLAUDE.md` or `AGENTS.md`. `open-supervisor playbooks` writes the plugin out and prints its path, for `claude --plugin-dir <path>` by hand.
+Rules particular to a project (what must pass, how to run its dev server, whether to take screenshots and where they go) belong in its own `CLAUDE.md` or `AGENTS.md`. A project can also add to a playbook in its checkout, in `.open-supervisor/playbooks/<name>.md` (`work-issue`, `sweep`, `triage`). Each turn hands the file over after the message, under "This project's additions to the playbook". Additions only ever add to the playbook; nothing replaces it.
+
+The supervisor sets `OPEN_SUPERVISOR_REMOTE` for every turn. Unless `git.sign` is on, it also turns off commit and tag signing through `GIT_CONFIG_*`. `open-supervisor playbooks` writes the plugin out and prints its path, for `claude --plugin-dir <path>` by hand.
 
 ## The TUI
 

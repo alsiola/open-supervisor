@@ -7,6 +7,8 @@ package playbooks
 
 import (
 	"embed"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -32,6 +34,19 @@ func All() map[string]string {
 		out[strings.TrimSuffix(e.Name(), ".md")] = string(data)
 	}
 	return out
+}
+
+// ProjectDir is where a project keeps its own playbooks, in its checkout.
+const ProjectDir = ".open-supervisor/playbooks"
+
+// Project reads a project's additions to a playbook, <root>/.open-supervisor/playbooks/<name>.md, without any
+// frontmatter; empty when the project has none. They only ever add to the built-in playbook, never replace it.
+func Project(root, name string) string {
+	data, err := os.ReadFile(filepath.Join(root, ProjectDir, name+".md"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(Body(strings.ReplaceAll(string(data), "\r\n", "\n")))
 }
 
 // Body is a playbook without its frontmatter, for agents that take it in the prompt.

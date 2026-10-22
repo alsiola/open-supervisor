@@ -313,7 +313,7 @@ func (j *Jobs) changedFiles(ev core.HookEvent) ([]string, bool) {
 		return nil, true // a deleted branch changes nothing
 	}
 	if ev.Before != "" && ev.After != "" && !zeroSHA(ev.Before) {
-		_ = exec.Command("git", "-C", j.p.Root, "fetch", "-q", "origin").Run()
+		_ = exec.Command("git", "-C", j.p.Root, "fetch", "-q", j.p.git.RemoteName()).Run()
 		out, err := exec.Command("git", "-C", j.p.Root, "diff", "--name-only", ev.Before, ev.After).Output()
 		if err == nil {
 			return strings.Fields(string(out)), true
@@ -509,7 +509,7 @@ func (j *Jobs) execute(job config.Job, req *jobReq) {
 		j.sweepFresh(job)
 		base := j.base()
 		wt := j.p.Spec.Worktree
-		spec := worktree.Spec{Root: j.p.Root, Path: j.freshDir(job, run), Base: base, Copy: wt.Copy, Setup: wt.Setup, Log: out}
+		spec := worktree.Spec{Root: j.p.Root, Remote: j.p.git.RemoteName(), Path: j.freshDir(job, run), Base: base, Copy: wt.Copy, Setup: wt.Setup, Log: out}
 		got, err := worktree.Fresh(spec)
 		run.Dir = got
 		if err != nil {

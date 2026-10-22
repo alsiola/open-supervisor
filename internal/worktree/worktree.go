@@ -24,6 +24,8 @@ type Spec struct {
 	// Path is where the worktree goes.
 	Path   string
 	Branch string
+	// Remote is the remote to fetch from; empty is origin.
+	Remote string
 	// Base is the branch a new one starts from.
 	Base      string
 	Copy      []string
@@ -49,6 +51,14 @@ func git(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// remote is the remote to fetch from.
+func (s Spec) remote() string {
+	if s.Remote != "" {
+		return s.Remote
+	}
+	return "origin"
+}
+
 func (s Spec) logf(format string, args ...any) {
 	if s.Log != nil {
 		fmt.Fprintf(s.Log, format+"\n", args...)
@@ -57,7 +67,7 @@ func (s Spec) logf(format string, args ...any) {
 
 // Setup creates or reuses the worktree and returns its path.
 func Setup(s Spec) (string, error) {
-	if _, err := git(s.Root, "fetch", "-q", "origin"); err != nil {
+	if _, err := git(s.Root, "fetch", "-q", s.remote()); err != nil {
 		s.logf("fetch failed, carrying on: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
@@ -71,17 +81,17 @@ func Setup(s Spec) (string, error) {
 		if _, err := git(s.Root, "worktree", "add", "-q", s.Path, s.Branch); err != nil {
 			return "", err
 		}
-	case refExists(s.Root, "refs/remotes/origin/"+s.Branch):
-		if _, err := git(s.Root, "worktree", "add", "-q", "-b", s.Branch, s.Path, "origin/"+s.Branch); err != nil {
+	case refExists(s.Root, "refs/remotes/"+s.remote()+"/"+s.Branch):
+		if _, err := git(s.Root, "worktree", "add", "-q", "-b", s.Branch, s.Path, s.remote()+"/"+s.Branch); err != nil {
 			return "", err
 		}
-		_, _ = git(s.Path, "branch", "-q", "--set-upstream-to", "origin/"+s.Branch)
+		_, _ = git(s.Path, "branch", "-q", "--set-upstream-to", s.remote()+"/"+s.Branch)
 	default:
 		base := s.Base
 		if base == "" {
 			base = "main"
 		}
-		start := "origin/" + base
+		start := s.remote() + "/" + base
 		if !refExists(s.Root, "refs/remotes/"+start) {
 			start = base
 		}
@@ -120,17 +130,17 @@ func Fresh(s Spec) (string, error) {
 	if base == "" {
 		base = "main"
 	}
-	if _, err := git(s.Root, "fetch", "-q", "origin", base); err != nil {
+	if _, err := git(s.Root, "fetch", "-q", s.remote(), base); err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
 		return "", err
 	}
-	if _, err := git(s.Root, "worktree", "add", "-q", "--detach", s.Path, "origin/"+base); err != nil {
+	if _, err := git(s.Root, "worktree", "add", "-q", "--detach", s.Path, s.remote()+"/"+base); err != nil {
 		return "", err
 	}
 	if head, err := git(s.Path, "rev-parse", "--short", "HEAD"); err == nil {
-		s.logf("checked out origin/%s at %s in %s", base, head, s.Path)
+		s.logf("checked out %s/%s at %s in %s", s.remote(), base, head, s.Path)
 	}
 	s.copyFiles()
 	if s.Setup != "" {

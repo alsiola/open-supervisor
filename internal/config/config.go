@@ -54,6 +54,8 @@ type Settings struct {
 	Labels Labels `yaml:"labels"`
 	// Branch names an issue's branch; {key} is the issue key.
 	Branch string `yaml:"branch"`
+	// Git is how agents use git; a project can override it.
+	Git Git `yaml:"git,omitempty"`
 	// SweepAt is the local time (HH:MM) of the daily corrections sweep; empty turns it off.
 	SweepAt string `yaml:"sweepAt"`
 	// TriageAt is the local time (HH:MM) of the daily triage of the problems agents report; empty turns it off.
@@ -74,9 +76,12 @@ type Labels struct {
 	Claimed   string   `yaml:"claimed,omitempty"`
 	Scheduled string   `yaml:"scheduled,omitempty"`
 	Skip      []string `yaml:"skip,omitempty"`
-	Help      string   `yaml:"help,omitempty"`
-	Review    string   `yaml:"review,omitempty"`
-	Done      string   `yaml:"done,omitempty"`
+	// Require, when set, makes claiming opt-in: only issues with one of these labels (or the scheduled label) are
+	// claimed. Empty claims every issue the skip labels don't rule out.
+	Require []string `yaml:"require,omitempty"`
+	Help    string   `yaml:"help,omitempty"`
+	Review  string   `yaml:"review,omitempty"`
+	Done    string   `yaml:"done,omitempty"`
 	// Unrouted marks an issue no route of its source takes, on sources that ask for it.
 	Unrouted string `yaml:"unrouted,omitempty"`
 }
@@ -97,11 +102,34 @@ func (l Labels) Merge(base Labels) Labels {
 		Done:      pick(l.Done, base.Done),
 		Unrouted:  pick(l.Unrouted, base.Unrouted),
 		Skip:      l.Skip,
+		Require:   l.Require,
 	}
 	if out.Skip == nil {
 		out.Skip = base.Skip
 	}
+	if out.Require == nil {
+		out.Require = base.Require
+	}
 	return out
+}
+
+// Admits reports whether the labels let an issue be claimed: none of the skip labels, and one of the required
+// ones when there are any. has says whether the issue carries a label.
+func (l Labels) Admits(has func(string) bool) bool {
+	for _, s := range l.Skip {
+		if has(s) {
+			return false
+		}
+	}
+	if len(l.Require) == 0 || (l.Scheduled != "" && has(l.Scheduled)) || (l.Claimed != "" && has(l.Claimed)) {
+		return true
+	}
+	for _, r := range l.Require {
+		if has(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // Status is the label for an agent state, if it has one.
@@ -146,6 +174,7 @@ type Project struct {
 	Tracker *Binding `yaml:"tracker,omitempty"`
 	Labels  *Labels  `yaml:"labels,omitempty"`
 	Branch  string   `yaml:"branch,omitempty"`
+	Git     *Git     `yaml:"git,omitempty"`
 	// BaseBranch is where new branches start and PRs go; empty asks the code host.
 	BaseBranch string            `yaml:"baseBranch,omitempty"`
 	Worktree   Worktree          `yaml:"worktree,omitempty"`
@@ -154,6 +183,23 @@ type Project struct {
 	Jobs       []Job             `yaml:"jobs,omitempty"`
 	Env        map[string]string `yaml:"env,omitempty"`
 	Disabled   bool              `yaml:"disabled,omitempty"`
+}
+
+// Git is how the supervisor and its agents use git in a project's checkout.
+type Git struct {
+	// Remote is the remote branches are fetched from and pushed to; empty is origin.
+	Remote string `yaml:"remote,omitempty"`
+	// Sign keeps commit signing as the checkout has it. Off, the supervisor turns it off for its agents and jobs,
+	// so commits never wait on a signer.
+	Sign bool `yaml:"sign,omitempty"`
+}
+
+// RemoteName is the remote to use.
+func (g Git) RemoteName() string {
+	if g.Remote != "" {
+		return g.Remote
+	}
+	return "origin"
 }
 
 // Worktree is how an issue's worktree is set up.
@@ -172,6 +218,8 @@ type Sweep struct {
 	RuleFiles []string `yaml:"ruleFiles,omitempty"`
 	// Guide says which file each kind of rule goes in, if the project has one.
 	Guide string `yaml:"guide,omitempty"`
+	// Land is how its commit reaches the main branch: push (the default) or pr.
+	Land string `yaml:"land,omitempty"`
 }
 
 // Triage is the daily pass over the problems the agents report: it fixes what is plainly wrong in the project's
@@ -181,7 +229,15 @@ type Triage struct {
 	// OpenIssues opens (or updates) one issue per cause in the project's tracker; off, the triage only writes a
 	// report for the owner.
 	OpenIssues bool `yaml:"openIssues,omitempty"`
+	// Land is how its fixes reach the main branch: push (the default) or pr.
+	Land string `yaml:"land,omitempty"`
 }
+
+// How a sweep's or triage's commit reaches the main branch.
+const (
+	LandPush = "push"
+	LandPR   = "pr"
+)
 
 // DefaultSettings are what a new config starts with and what a missing setting falls back to.
 func DefaultSettings() Settings {
@@ -418,6 +474,11 @@ func (c *Config) Validate() error {
 			errs = append(errs, where+": no agent (set settings.agent)")
 		}
 		role(where+" agent", agent, adapter.RoleAgent)
+		for _, l := range []struct{ what, land string }{{"sweep", p.Sweep.Land}, {"triage", p.Triage.Land}} {
+			if l.land != "" && l.land != LandPush && l.land != LandPR {
+				errs = append(errs, fmt.Sprintf("%s: %s.land is push or pr, not %q", where, l.what, l.land))
+			}
+		}
 		for _, j := range p.Jobs {
 			for _, e := range j.Validate() {
 				errs = append(errs, where+": "+e)
@@ -468,6 +529,18 @@ func (c *Config) AgentFor(p *Project) string {
 		return p.Agent
 	}
 	return c.Settings.Agent
+}
+
+// GitFor is how a project uses git: its own git settings, else the config's.
+func (c *Config) GitFor(p *Project) Git {
+	if p.Git == nil {
+		return c.Settings.Git
+	}
+	g := *p.Git
+	if g.Remote == "" {
+		g.Remote = c.Settings.Git.Remote
+	}
+	return g
 }
 
 // LabelsFor are a project's labels: its source's, when a source feeds it.

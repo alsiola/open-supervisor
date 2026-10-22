@@ -505,7 +505,7 @@ func (e *editor) generalLines() []string {
 		f("default agent", or(s.Agent, "none")),
 		f("tunnel", or(s.Tunnel, "none: poll only")),
 		f("telemetry", or(tele, "none")),
-		f("labels", fmt.Sprintf("%s, %s, %s, %s, %s; skip %s", s.Labels.Claimed, s.Labels.Scheduled, s.Labels.Help, s.Labels.Review, s.Labels.Done, strings.Join(s.Labels.Skip, ", "))),
+		f("labels", fmt.Sprintf("%s, %s, %s, %s, %s; skip %s%s", s.Labels.Claimed, s.Labels.Scheduled, s.Labels.Help, s.Labels.Review, s.Labels.Done, strings.Join(s.Labels.Skip, ", "), onlyClaim(s.Labels.Require))),
 		f("branch", s.Branch),
 		f("daily sweep", or(s.SweepAt, "off")),
 		f("daily triage", or(s.TriageAt, "off")),
@@ -598,4 +598,12 @@ func (e *editor) sourceLines() []string {
 		out = append(out, "", dim("  no sources: every project reads its own tracker. Press a to share one between projects."))
 	}
 	return out
+}
+
+// onlyClaim describes the labels claiming is limited to, if any.
+func onlyClaim(require []string) string {
+	if len(require) == 0 {
+		return ""
+	}
+	return "; only " + strings.Join(require, ", ")
 }

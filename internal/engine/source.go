@@ -183,6 +183,9 @@ func (s *Source) labelSpecs() []adapter.Label {
 	for _, sk := range l.Skip {
 		out = append(out, adapter.Label{Name: sk, Color: "EDEDED", Description: "The supervisor leaves this issue alone"})
 	}
+	for _, r := range l.Require {
+		out = append(out, adapter.Label{Name: r, Color: "5319E7", Description: "An agent may claim this issue"})
+	}
 	if s.Spec.Unrouted == config.UnroutedLabel && l.Unrouted != "" {
 		out = append(out, adapter.Label{Name: l.Unrouted, Color: "F9D0C4", Description: "No project's route takes this issue"})
 	}
@@ -194,12 +197,7 @@ func (s *Source) claimable(issue core.Issue) bool {
 	if !issue.Open || issue.Waiting || issue.HasLabel(s.Labels.Claimed) {
 		return false
 	}
-	for _, sk := range s.Labels.Skip {
-		if issue.HasLabel(sk) {
-			return false
-		}
-	}
-	return true
+	return s.Labels.Admits(issue.HasLabel)
 }
 
 // dispatch sends an issue nobody holds to its route's project to claim. reopened lets a labelled issue through.

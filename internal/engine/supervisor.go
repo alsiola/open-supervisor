@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -273,6 +274,16 @@ func (s *Supervisor) sessionEnv(p *Project, key string) []string {
 		set("OPEN_SUPERVISOR_ISSUE", key)
 		set("OPEN_SUPERVISOR_BRANCH", p.BranchFor(key))
 		set("OPEN_SUPERVISOR_WORKTREE", p.WorktreePath(key))
+	}
+	set("OPEN_SUPERVISOR_REMOTE", p.git.RemoteName())
+	if !p.git.Sign {
+		// GIT_CONFIG_COUNT adds config to every git the session runs, after any the environment already adds.
+		n, _ := strconv.Atoi(env["GIT_CONFIG_COUNT"])
+		set(fmt.Sprintf("GIT_CONFIG_KEY_%d", n), "commit.gpgsign")
+		set(fmt.Sprintf("GIT_CONFIG_VALUE_%d", n), "false")
+		set(fmt.Sprintf("GIT_CONFIG_KEY_%d", n+1), "tag.gpgsign")
+		set(fmt.Sprintf("GIT_CONFIG_VALUE_%d", n+1), "false")
+		set("GIT_CONFIG_COUNT", strconv.Itoa(n+2))
 	}
 	out := make([]string, 0, len(order))
 	for _, k := range order {
@@ -1194,7 +1205,8 @@ func fingerprint(cfg *config.Config, p *config.Project, src *Source) string {
 		L      config.Labels
 		B, Agt string
 		S      string
-	}{p, conns, cfg.LabelsFor(p), cfg.BranchFor(p), agent, src.trackerFingerprint})
+		G      config.Git
+	}{p, conns, cfg.LabelsFor(p), cfg.BranchFor(p), agent, src.trackerFingerprint, cfg.GitFor(p)})
 	return string(b)
 }
 
@@ -1242,6 +1254,7 @@ func (s *Supervisor) openProject(cfg *config.Config, spec *config.Project, src *
 		repoConn:    spec.Repo.Connection,
 		fingerprint: fp,
 		branchTmpl:  b.BranchTemplate,
+		git:         b.Git,
 		branchRe:    b.branchRe,
 		base:        spec.BaseBranch,
 		hub:         s,
@@ -1269,8 +1282,8 @@ func (s *Supervisor) openSinks(cfg *config.Config) []adapter.Telemetry {
 	return out
 }
 
-func gitRemote(root string) string {
-	out, err := exec.Command("git", "-C", root, "remote", "get-url", "origin").Output()
+func gitRemote(root, remote string) string {
+	out, err := exec.Command("git", "-C", root, "remote", "get-url", remote).Output()
 	if err != nil {
 		return ""
 	}
