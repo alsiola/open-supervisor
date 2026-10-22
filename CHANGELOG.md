@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.0.0](https://github.com/alsiola/open-supervisor/compare/v0.4.0...v1.0.0) (2026-10-22)
+
+### ⚠ BREAKING CHANGES
+
+* `agent screenshots` and the open-supervisor-screenshots
+branch are gone, and work-issue no longer asks for screenshots or warns
+about a shared local database. Projects that want either should say so in
+their own rules or in .open-supervisor/playbooks/work-issue.md.
+
+Co-authored-by: claudesworth[bot] <342356163+claudesworth[bot]@users.noreply.github.com>
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+
+### Features
+
+* **engine:** hand off cold sessions to a fresh one, as an a/b test ([#18](https://github.com/alsiola/open-supervisor/issues/18)) ([85e5838](https://github.com/alsiola/open-supervisor/commit/85e583899aaba165633486fb11df3d2a1cb868c7)), closes [#17](https://github.com/alsiola/open-supervisor/issues/17)
+* loosen the coupling to one way of working ([#15](https://github.com/alsiola/open-supervisor/issues/15)) ([ef3891c](https://github.com/alsiola/open-supervisor/commit/ef3891c33676bebcff15cbda075e454a6a2a4475))
+
+### Bug Fixes
+
+* **claudecode:** count a resumed turn's own cost and tokens, not the session's running total ([#16](https://github.com/alsiola/open-supervisor/issues/16)) ([bd0bb5a](https://github.com/alsiola/open-supervisor/commit/bd0bb5afcb3ec244e2d5a161b51f575cc02d6b7d))
+
 ## [0.4.0](https://github.com/alsiola/open-supervisor/compare/v0.3.0...v0.4.0) (2026-10-21)
 
 ### Features
