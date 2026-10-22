@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.1](https://github.com/alsiola/open-supervisor/compare/v1.0.0...v1.0.1) (2026-10-22)
+
+### Bug Fixes
+
+* **engine:** deliver other agents' comments posted through a bot app ([#19](https://github.com/alsiola/open-supervisor/issues/19)) ([81a55f1](https://github.com/alsiola/open-supervisor/commit/81a55f1bd833541d7b8f070c6a23fa9644718ba2))
+
 ## [1.0.0](https://github.com/alsiola/open-supervisor/compare/v0.4.0...v1.0.0) (2026-10-22)
 
 ### ⚠ BREAKING CHANGES
