@@ -53,6 +53,7 @@ Every turn ends with a status (the structured result the supervisor asks for):
 - `prs`: every PR number that belongs to this issue, once there is one.
 - `preview`: the deploy preview's URL, once you know it.
 - `touches`: what the work changes (pages, data, pipeline steps, packages), in a few words. Other agents on the same project read it to spot overlap.
+- `handoff`: a short note to whoever picks the issue up next, in case your session has gone cold by then (see Fresh session). Write it every turn. Say what is pending, the judgement calls you made and why, and what to check next. Leave out what the issue, the PR and git already show.
 
 The supervisor sets the issue's status labels (and, on some trackers, its workflow status) from `state`; never change those yourself.
 
@@ -160,6 +161,10 @@ The message lists what happened since your last turn, each under its own heading
 A comment or a message from the owner that lands while you're working is handed to you straight away, as a message headed `## Arrived during this turn`. Take it in now: if it changes the ask, change course before you go further, and handle it like any event above (reply, log a correction). Don't end the turn early to deal with it, and don't expect it again in the next turn's events.
 
 If you pushed, end with `building`; the supervisor comes back with the checks. Otherwise end with `help` if you asked something back, `done` if the owner approved or nothing is left, and `review` otherwise.
+
+## Fresh session: `work-issue <key> handoff`
+
+When your last turn ended long enough ago that resuming would cost more than starting again, the supervisor may start a new session instead. The message carries the handoff note the last turn wrote, under `## Handoff from your last session`, then the events. You don't have the earlier session's memory, so first rebuild the picture: read the issue (`agent issue view`) and every PR (`agent pr list`, `agent pr view <pr>`), run `agent worktree setup` and look at the branch's commits. Then take the events as in Later turns, with the note as your guide to what was pending and why. Where the note and the thread disagree, the thread wins.
 
 ## Cleaning up
 

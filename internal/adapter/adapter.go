@@ -147,6 +147,13 @@ type Reactor interface {
 	React(ctx context.Context, c core.Comment) error
 }
 
+// ReactionReader is a tracker whose comments carry reactions, so the supervisor can ask for a 👎 on a comment of
+// its own and hear about it.
+type ReactionReader interface {
+	// Reactions counts each reaction ("+1", "-1") on an issue comment, given the URL Comment returned for it.
+	Reactions(ctx context.Context, commentURL string) (map[string]int, error)
+}
+
 // IssueOpener is a tracker that can open issues, for the daily triage to file the causes it finds.
 type IssueOpener interface {
 	OpenIssue(ctx context.Context, title, body string) (core.Issue, error)

@@ -311,6 +311,7 @@ type result struct {
 	Result           any                       `json:"result"`
 	SessionID        string                    `json:"session_id"`
 	TotalCostUSD     *float64                  `json:"total_cost_usd"`
+	NumTurns         int                       `json:"num_turns"`
 	StructuredOutput json.RawMessage           `json:"structured_output"`
 	ModelUsage       map[string]map[string]any `json:"modelUsage"`
 }
@@ -330,6 +331,33 @@ func lastResult(stdout string) *result {
 		}
 	}
 	return nil
+}
+
+// toolCalls counts the tool calls in the turn's assistant messages, a subagent's included.
+func toolCalls(stdout string) int {
+	n := 0
+	for _, line := range strings.Split(stdout, "\n") {
+		if !strings.Contains(line, `"tool_use"`) {
+			continue
+		}
+		var m struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content []struct {
+					Type string `json:"type"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &m) != nil || m.Type != "assistant" {
+			continue
+		}
+		for _, c := range m.Message.Content {
+			if c.Type == "tool_use" {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 func num(m map[string]any, k string) int64 {
@@ -434,6 +462,7 @@ func parse(stdout, stderr string, code *int, structured bool) core.Outcome {
 	if s, ok := r.Result.(string); ok {
 		o.Text = s
 	}
+	o.ModelCalls, o.ToolCalls = r.NumTurns, toolCalls(stdout)
 	o.Tokens, o.Models = usage(r.ModelUsage, nil)
 	if r.IsError || (code != nil && *code != 0) {
 		sub := r.Subtype

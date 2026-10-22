@@ -21,13 +21,15 @@ import (
 // ---- fakes ------------------------------------------------------------------------------------------------
 
 type fakeHost struct {
-	mu       sync.Mutex
-	issues   map[string]*core.Issue
-	comments map[string][]core.Comment
-	prs      map[int]core.PR
-	checks   map[string]core.Checks
-	labelOps []string
-	reads    int
+	mu        sync.Mutex
+	issues    map[string]*core.Issue
+	comments  map[string][]core.Comment
+	prs       map[int]core.PR
+	checks    map[string]core.Checks
+	labelOps  []string
+	reads     int
+	posted    []string
+	reactions map[string]map[string]int
 }
 
 func newHost() *fakeHost {
@@ -106,7 +108,20 @@ func (h *fakeHost) hasLabel(key, label string) bool {
 }
 func (h *fakeHost) EnsureLabels(context.Context, []adapter.Label) error { return nil }
 func (h *fakeHost) Comment(_ context.Context, key, body string, mark core.AgentMark) (string, error) {
-	return "", nil
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.posted = append(h.posted, body)
+	return fmt.Sprintf("https://fake/issues/%s#issuecomment-%d", key, len(h.posted)), nil
+}
+func (h *fakeHost) Reactions(_ context.Context, url string) (map[string]int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.reactions[url], nil
+}
+func (h *fakeHost) comments_() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.posted...)
 }
 func (h *fakeHost) IssueURL(key string) string { return "https://fake/issues/" + key }
 func (h *fakeHost) RefsIn(text string) []string {
@@ -165,10 +180,19 @@ type fakeAgent struct {
 	script func(spec adapter.TurnSpec, t *fakeTurn) core.Outcome
 }
 
-func (a *fakeAgent) Check(context.Context) (string, error)               { return "fake agent", nil }
-func (a *fakeAgent) Prepare(context.Context, map[string]string) error    { return nil }
-func (a *fakeAgent) NewSession() string                                  { return fmt.Sprintf("s-%d", time.Now().UnixNano()) }
-func (a *fakeAgent) SessionExists(cwd, session string) bool              { return false }
+func (a *fakeAgent) Check(context.Context) (string, error)            { return "fake agent", nil }
+func (a *fakeAgent) Prepare(context.Context, map[string]string) error { return nil }
+func (a *fakeAgent) NewSession() string                               { return fmt.Sprintf("s-%d", time.Now().UnixNano()) }
+func (a *fakeAgent) SessionExists(cwd, session string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, s := range a.specs {
+		if s.Session == session {
+			return true
+		}
+	}
+	return false
+}
 func (a *fakeAgent) RulesFiles() []string                                { return []string{"AGENTS.md"} }
 func (a *fakeAgent) AttachCommand(adapter.AttachSpec) (*exec.Cmd, error) { return nil, nil }
 func (a *fakeAgent) Adopt(h adapter.TurnHandle, structured bool) adapter.Turn {
@@ -490,6 +514,122 @@ func TestDotEnv(t *testing.T) {
 	got := readDotEnv(f)
 	if got["A"] != "1" || got["B"] != "two" || got["C"] != "3" || len(got) != 3 {
 		t.Fatalf("%v", got)
+	}
+}
+
+func TestColdSessionHandsOffToAFreshOne(t *testing.T) {
+	share := 1.0
+	s, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		o := review("ok")
+		if strings.Contains(spec.Body, "wrap up") {
+			o.Status.State = core.Finished
+		}
+		o.Status.Handoff = "waiting on the owner's pick of colour; kept the old one meanwhile"
+		o.Cost, o.ToolCalls, o.ModelCalls = 0.5, 3, 2
+		return o
+	}, func(s *config.Settings) { s.HandoffShare = &share })
+	sink := &fakeSink{}
+	s.sinks = []adapter.Telemetry{sink}
+	cold := func() {
+		p.Store.Update("8", func(x *store.Record) {
+			ended := time.Now().UTC().Add(-2 * time.Hour)
+			x.LastTurn.EndedAt = &ended
+		})
+	}
+	turn := func(n int, msg string) adapter.TurnSpec {
+		t.Helper()
+		p.Message("8", msg)
+		waitFor(t, msg, func() bool { return len(agent.turns()) == n && state(p, "8") == store.Review })
+		time.Sleep(50 * time.Millisecond)
+		return agent.turns()[n-1]
+	}
+	host.issues["8"] = &core.Issue{Key: "8", Title: "Eight", Open: true}
+	p.reconcile()
+	waitFor(t, "first turn", func() bool { return state(p, "8") == store.Review })
+	time.Sleep(50 * time.Millisecond)
+	first := p.Store.Get("8").Session
+	if p.Store.Get("8").Handoff == "" {
+		t.Fatal("the handoff wasn't kept")
+	}
+
+	// A warm session resumes, outside the experiment.
+	if warm := turn(2, "any news?"); warm.Session != first || !warm.Resume || warm.Args != "8 events" || p.Store.Get("8").LastTurn.Arm != "" {
+		t.Fatalf("a warm turn didn't resume: %s %v %s", warm.Session, warm.Resume, warm.Args)
+	}
+
+	// A cold one drawn for the handoff starts afresh from the note, keeps the old session and asks for feedback.
+	cold()
+	fresh := turn(3, "blue please")
+	if fresh.Session == first || fresh.Resume || fresh.Args != "8 handoff" {
+		t.Fatalf("a cold turn didn't start a fresh session: %s %v %s", fresh.Session, fresh.Resume, fresh.Args)
+	}
+	if !strings.Contains(fresh.Body, "kept the old one meanwhile") || !strings.Contains(fresh.Body, "blue please") {
+		t.Fatalf("the fresh session lacks the handoff or the events:\n%s", fresh.Body)
+	}
+	r := p.Store.Get("8")
+	if r.Session != fresh.Session || len(r.PastSessions) != 1 || r.PastSessions[0] != first || r.LastTurn.Arm != "handoff" {
+		t.Fatalf("sessions: %s, earlier %v, arm %q", r.Session, r.PastSessions, r.LastTurn.Arm)
+	}
+	posted := host.comments_()
+	if len(posted) != 1 || posted[0] != feedbackText || len(r.Feedback) != 1 {
+		t.Fatalf("feedback asked: %v, watching %v", posted, r.Feedback)
+	}
+	waitFor(t, "the turn's arm in telemetry", func() bool {
+		for _, e := range sink.named("agent_turn") {
+			if e.Props["handoff_arm"] == "handoff" && e.Props["session"] == fresh.Session {
+				return true
+			}
+		}
+		return false
+	})
+
+	// A 👎 on the comment is one event, and the comment is no longer watched.
+	host.mu.Lock()
+	host.reactions = map[string]map[string]int{r.Feedback[0].URL: {"-1": 1}}
+	host.mu.Unlock()
+	p.readFeedback(context.Background(), p.Store.Get("8"))
+	p.readFeedback(context.Background(), p.Store.Get("8"))
+	waitFor(t, "the feedback event", func() bool { return len(sink.named("handoff_feedback")) == 1 })
+	if e := sink.named("handoff_feedback")[0]; e.Props["session"] != fresh.Session || e.Props["arm"] != "handoff" || len(p.Store.Get("8").Feedback) != 0 {
+		t.Fatalf("feedback event: %+v", e.Props)
+	}
+
+	// A cold one drawn to resume resumes, and says so.
+	share = 1e-12 // still in the experiment, but the draw all but surely resumes
+	cold()
+	if back := turn(4, "and the footer"); back.Session != fresh.Session || !back.Resume || p.Store.Get("8").LastTurn.Arm != "resume" {
+		t.Fatalf("a cold turn drawn to resume: %s %v", back.Session, back.Resume)
+	}
+	share = 1
+
+	// After the owner attaches, the next turn resumes even when cold.
+	p.Attach("8")
+	p.Detach("8")
+	cold()
+	if after := turn(5, "and the header"); after.Session != fresh.Session || !after.Resume {
+		t.Fatalf("a turn after attaching didn't resume: %s %v", after.Session, after.Resume)
+	}
+	if n := len(host.comments_()); n != 1 {
+		t.Fatalf("%d feedback comments for one handoff", n)
+	}
+
+	// Each draw is a trial, added up until the next draw or the finish, so the arms compare through to the end.
+	p.Message("8", "wrap up")
+	waitFor(t, "finished", func() bool { return len(agent.turns()) == 6 && state(p, "8") == store.Finished })
+	waitFor(t, "both trials", func() bool { return len(sink.named("handoff_trial")) == 2 })
+	if n := len(sink.named("handoff_assigned")); n != 2 {
+		t.Fatalf("%d draws recorded", n)
+	}
+	trials := sink.named("handoff_trial")
+	a, b := trials[0].Props, trials[1].Props
+	if a["arm"] != "handoff" || a["ended_by"] != "next_draw" || a["completed"] != false || a["turns"] != 1 || a["tool_calls"] != 3 {
+		t.Fatalf("the handoff trial: %v", a)
+	}
+	if b["arm"] != "resume" || b["ended_by"] != "finished" || b["completed"] != true || b["turns"] != 3 || b["cost_usd"] != 1.5 || b["follow_ups"] != 3 {
+		t.Fatalf("the resume trial: %v", b)
+	}
+	if p.Store.Get("8").Trial != nil {
+		t.Fatal("a finished issue still has a trial")
 	}
 }
 

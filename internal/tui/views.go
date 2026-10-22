@@ -338,6 +338,12 @@ func (m *model) detailLines(rw row) []string {
 		lines = append(lines, field("touches", r.Touches))
 	}
 	lines = append(lines, field("session", r.Session))
+	if len(r.PastSessions) > 0 {
+		lines = append(lines, field("earlier sessions", strings.Join(r.PastSessions, ", ")))
+	}
+	if r.Handoff != "" {
+		lines = append(lines, field("handoff", r.Handoff))
+	}
 	if tp := p.TranscriptPath(r.Key); tp != "" {
 		lines = append(lines, field("transcript", tp))
 	}
