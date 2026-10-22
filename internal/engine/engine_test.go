@@ -370,7 +370,8 @@ func TestCommentsBecomeTheNextTurnsEvents(t *testing.T) {
 		{ID: "c1", Kind: core.OnIssue, Author: "owner", Body: "please change the colour", At: now},
 		{ID: "c2", Kind: core.OnIssue, Author: "me", Body: "my own note", At: now, Agent: &core.AgentMark{From: "5"}},
 		{ID: "c3", Kind: core.OnIssue, Author: "ci", Body: "beep", At: now, Bot: true},
-		{ID: "c4", Kind: core.OnIssue, Author: "other-agent", Body: "I'm doing the header", At: now, Agent: &core.AgentMark{From: "9"}},
+		// Agents post as the bot app when there is one, so another agent's comment is a bot's too.
+		{ID: "c4", Kind: core.OnIssue, Author: "agent-app[bot]", Body: "I'm doing the header", At: now, Bot: true, Agent: &core.AgentMark{From: "9"}},
 	}
 	p.reconcile()
 	waitFor(t, "second turn", func() bool { return len(agent.turns()) == 2 && state(p, "5") == store.Review })
