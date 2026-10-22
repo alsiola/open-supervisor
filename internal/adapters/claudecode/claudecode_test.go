@@ -2,6 +2,8 @@ package claudecode
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,5 +178,40 @@ func TestSetupCommand(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(a.pluginDir, "skills", "setup")); a.pluginDir != "" && err == nil {
 		t.Fatal("the setup skill is in the playbooks' plugin")
+	}
+}
+
+func TestPerTurnTakesOffTheSessionsEarlierTotals(t *testing.T) {
+	dir := t.TempDir()
+	res := func(session string, cost float64, read int) string {
+		return fmt.Sprintf(`{"type":"result","subtype":"success","session_id":%q,"total_cost_usd":%v,"modelUsage":{"opus":{"inputTokens":10,"outputTokens":%d,"cacheReadInputTokens":%d,"cacheCreationInputTokens":3},"haiku":{"inputTokens":1}}}`, session, cost, read/10, read)
+	}
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name+".out")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	first := write("2026-10-21T10-00-00Z", res("s1", 8.5, 1000))
+	write("2026-10-21T11-00-00Z", "claude died")
+	second := write("2026-10-21T12-00-00Z", res("s1", 9, 1500))
+
+	o := perTurn(first, parse(read(first), "", nil, false))
+	if o.Cost != 8.5 || o.Tokens.CacheRead != 1000 || len(o.Models) != 2 {
+		t.Fatalf("a session's first turn keeps its totals: %+v %+v", o, o.Tokens)
+	}
+	o = perTurn(second, parse(read(second), "", nil, false))
+	if math.Abs(o.Cost-0.5) > 1e-9 || *o.Tokens != (core.Tokens{Output: 50, CacheRead: 500}) || len(o.Models) != 1 || o.Models[0] != "opus" {
+		t.Fatalf("a resumed turn is its own: %+v %+v", o, o.Tokens)
+	}
+
+	other := write("2026-10-21T13-00-00Z", res("s2", 1, 100))
+	if o := perTurn(other, parse(read(other), "", nil, false)); o.Cost != 1 {
+		t.Fatalf("another session starts from nothing: %+v", o)
+	}
+	back := write("2026-10-21T14-00-00Z", res("s1", 2, 200))
+	if o := perTurn(back, parse(read(back), "", nil, false)); o.Cost != 2 || o.Tokens.CacheRead != 200 {
+		t.Fatalf("totals that went backwards are left alone: %+v", o)
 	}
 }
