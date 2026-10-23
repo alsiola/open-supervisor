@@ -634,6 +634,21 @@ func TestColdSessionHandsOffToAFreshOne(t *testing.T) {
 	}
 }
 
+func TestDroppingAnIssueEndsItsTrial(t *testing.T) {
+	s, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") })
+	sink := &fakeSink{}
+	s.sinks = []adapter.Telemetry{sink}
+	host.issues["9"] = &core.Issue{Key: "9", Title: "Nine", Open: true}
+	p.reconcile()
+	waitFor(t, "first turn", func() bool { return state(p, "9") == store.Review })
+	p.Store.Update("9", func(x *store.Record) { x.Trial = &store.Trial{ID: "9-2", Arm: "resume", StartedAt: time.Now(), Turns: 1} })
+	p.Drop("9")
+	waitFor(t, "the trial", func() bool { return len(sink.named("handoff_trial")) == 1 })
+	if e := sink.named("handoff_trial")[0].Props; e["ended_by"] != "dropped" || e["completed"] != false || e["final_state"] != "review" || e["arm"] != "resume" {
+		t.Fatalf("the dropped trial: %v", e)
+	}
+}
+
 func TestOptInClaimingAndTheTurnsGitAndAdditions(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "")
 	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("did it") }, func(s *config.Settings) {
