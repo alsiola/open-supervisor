@@ -132,3 +132,76 @@ func TestSetupFromAnotherRemote(t *testing.T) {
 		t.Fatalf("tracks %q", out)
 	}
 }
+
+func TestCatchUp(t *testing.T) {
+	dir := t.TempDir()
+	origin := filepath.Join(dir, "origin.git")
+	root := filepath.Join(dir, "repo")
+	other := filepath.Join(dir, "other")
+	runGit(t, dir, "init", "-q", "--bare", "-b", "main", origin)
+	runGit(t, dir, "clone", "-q", origin, root)
+	runGit(t, root, "checkout", "-q", "-b", "main")
+	write := func(dir, name, body string) { _ = os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644) }
+	write(root, "a.txt", "v1")
+	write(root, "b.txt", "v1")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-qm", "one")
+	runGit(t, root, "push", "-q", "origin", "main")
+	runGit(t, dir, "clone", "-q", origin, other)
+	push := func(name, body string) {
+		write(other, name, body)
+		runGit(t, other, "commit", "-qam", "change "+name)
+		runGit(t, other, "push", "-q", "origin", "main")
+	}
+	spec := Spec{Root: root, Base: "main"}
+
+	if got := CatchUp(spec); got != (Sync{}) {
+		t.Errorf("up to date: %+v", got)
+	}
+	// An uncommitted change the update doesn't touch stays, and the checkout catches up.
+	push("a.txt", "v2")
+	push("a.txt", "v3")
+	write(root, "b.txt", "mine")
+	if got := CatchUp(spec); got != (Sync{Updated: 2}) {
+		t.Errorf("dirty elsewhere: %+v", got)
+	}
+	if data, _ := os.ReadFile(filepath.Join(root, "a.txt")); string(data) != "v3" {
+		t.Errorf("a.txt = %q", data)
+	}
+	if data, _ := os.ReadFile(filepath.Join(root, "b.txt")); string(data) != "mine" {
+		t.Errorf("the uncommitted change went: %q", data)
+	}
+	// One it touches stops it.
+	push("b.txt", "v2")
+	if got := CatchUp(spec); got.Updated != 0 || got.Behind != 1 || !strings.Contains(got.Stale, "uncommitted") {
+		t.Errorf("dirty in the way: %+v", got)
+	}
+	if data, _ := os.ReadFile(filepath.Join(root, "b.txt")); string(data) != "mine" {
+		t.Errorf("the uncommitted change went: %q", data)
+	}
+	runGit(t, root, "checkout", "-q", "--", "b.txt")
+	// Another branch is left be.
+	runGit(t, root, "checkout", "-q", "-b", "feature")
+	if got := CatchUp(spec); got.Behind != 1 || got.Stale != "on feature, not main" {
+		t.Errorf("on a branch: %+v", got)
+	}
+	if got := Behind(Spec{Root: root, Base: "main"}); got.Behind != 1 || got.Stale != "" {
+		t.Errorf("Behind: %+v", got)
+	}
+	runGit(t, root, "checkout", "-q", "main")
+	if got := CatchUp(spec); got != (Sync{Updated: 1}) {
+		t.Errorf("back on main: %+v", got)
+	}
+	// Nor is a branch with commits of its own.
+	write(root, "c.txt", "local")
+	runGit(t, root, "add", "c.txt")
+	runGit(t, root, "commit", "-qm", "local")
+	push("a.txt", "v4")
+	if got := CatchUp(spec); got.Behind != 1 || got.Stale != "main has commits origin/main doesn't" {
+		t.Errorf("diverged: %+v", got)
+	}
+	// No remote, nothing to catch up with.
+	if got := CatchUp(Spec{Root: root, Remote: "upstream"}); got != (Sync{}) {
+		t.Errorf("no remote: %+v", got)
+	}
+}

@@ -73,6 +73,9 @@ type Jobs struct {
 	p      *Project
 	cancel context.CancelFunc
 
+	// syncMu keeps two runs from catching the main checkout up at once.
+	syncMu sync.Mutex
+
 	mu      sync.Mutex
 	busy    map[string]bool
 	pending map[string]*jobReq // the run asked for while the job went
@@ -529,7 +532,7 @@ func (j *Jobs) execute(job config.Job, req *jobReq) {
 			}
 		}()
 	} else {
-		run.Dir = dir
+		j.catchUp(job, run, out)
 	}
 	j.setCurrent(job.Name, run)
 
@@ -572,6 +575,56 @@ func (j *Jobs) setCurrent(name string, run *JobRun) {
 	j.current[name] = *run
 	j.mu.Unlock()
 	j.p.hub.changed()
+}
+
+// catchUp fast-forwards the main checkout to the base branch's remote head before a run in it, and records
+// on the run how it stood. While another job runs in the checkout, it only counts how far behind it is.
+func (j *Jobs) catchUp(job config.Job, run *JobRun, out io.Writer) {
+	j.syncMu.Lock()
+	defer j.syncMu.Unlock()
+	base := j.base()
+	spec := worktree.Spec{Root: j.p.Root, Remote: j.p.git.RemoteName(), Base: base}
+	var got worktree.Sync
+	if other := j.inMain(job.Name); other != "" {
+		got = worktree.Behind(spec)
+		if got.Behind > 0 && got.Stale == "" {
+			got.Stale = other + " was running in the checkout"
+		}
+	} else {
+		got = worktree.CatchUp(spec)
+	}
+	run.Dir, run.Updated, run.Behind, run.Stale = j.p.Root, got.Updated, got.Behind, got.Stale
+	if !run.Detached {
+		// Seen as in the checkout before the next run checks.
+		j.setCurrent(job.Name, run)
+	}
+	switch {
+	case got.Updated > 0:
+		fmt.Fprintf(out, "open-supervisor: fast-forwarded the checkout %d commit(s) to %s/%s\n", got.Updated, spec.Remote, base)
+	case got.Behind > 0:
+		fmt.Fprintf(out, "open-supervisor: running %d commit(s) behind %s/%s: %s\n", got.Behind, spec.Remote, base, got.Stale)
+		j.p.logf("%s: running %d commit(s) behind %s/%s: %s", job.Name, got.Behind, spec.Remote, base, got.Stale)
+	case got.Stale != "":
+		fmt.Fprintf(out, "open-supervisor: %s\n", got.Stale)
+		j.p.logf("%s: %s", job.Name, got.Stale)
+	}
+}
+
+// inMain is another job running in the main checkout now, if any.
+func (j *Jobs) inMain(name string) string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for other, r := range j.current {
+		if other != name && r.Dir == j.p.Root {
+			return other
+		}
+	}
+	for other := range j.running {
+		if other != name {
+			return other
+		}
+	}
+	return ""
 }
 
 // base is the branch a fresh checkout starts from.
@@ -846,7 +899,11 @@ func (j *Jobs) startDetachedNow(job config.Job, trigger string, extra []string) 
 func (j *Jobs) startDetached(job config.Job, label, trigger string, extra []string) {
 	run, file := j.newRun(job, trigger)
 	run.Detached = true
-	run.Dir = j.p.Root
+	if file != nil {
+		j.catchUp(job, run, file)
+	} else {
+		j.catchUp(job, run, io.Discard)
+	}
 	cmd := exec.Command(job.Command[0], job.Command[1:]...)
 	cmd.Dir = j.p.Root
 	cmd.Env = j.env(job, run, extra)

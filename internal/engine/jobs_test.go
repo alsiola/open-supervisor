@@ -343,6 +343,51 @@ func TestJobFreshCheckout(t *testing.T) {
 	}
 }
 
+func TestJobCatchesUpTheMainCheckout(t *testing.T) {
+	_, p := setup(t, nil)
+	p.base = "main"
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	gitIn(t, p.Root, "init", "-q", "--bare", "-b", "main", origin)
+	gitIn(t, p.Root, "symbolic-ref", "HEAD", "refs/heads/main")
+	_ = os.WriteFile(filepath.Join(p.Root, "a.txt"), []byte("v1"), 0o644)
+	gitIn(t, p.Root, "add", "a.txt")
+	gitIn(t, p.Root, "commit", "-qm", "one")
+	gitIn(t, p.Root, "remote", "add", "origin", origin)
+	gitIn(t, p.Root, "push", "-q", "origin", "HEAD:main")
+	other := filepath.Join(t.TempDir(), "other")
+	gitIn(t, p.Root, "clone", "-q", origin, other)
+	_ = os.WriteFile(filepath.Join(other, "a.txt"), []byte("v2"), 0o644)
+	gitIn(t, other, "commit", "-qam", "two")
+	gitIn(t, other, "push", "-q", "origin", "main")
+	job := config.Job{Name: "check", Command: []string{"cat", "a.txt"}}
+	p.Jobs.Specs = []config.Job{job}
+
+	// While another job runs in the checkout, it is only counted.
+	p.Jobs.mu.Lock()
+	p.Jobs.current["other"] = JobRun{Dir: p.Root}
+	p.Jobs.mu.Unlock()
+	p.Jobs.execute(job, &jobReq{trigger: "by hand"})
+	run, _ := p.Jobs.lastRun(job.Name)
+	if run.Behind != 1 || run.Updated != 0 || run.Stale != "other was running in the checkout" {
+		t.Errorf("run = %+v", run)
+	}
+	if data, _ := os.ReadFile(run.Log); !strings.HasSuffix(string(data), "v1") || !strings.Contains(string(data), "1 commit(s) behind origin/main") {
+		t.Errorf("log = %q", data)
+	}
+
+	p.Jobs.mu.Lock()
+	delete(p.Jobs.current, "other")
+	p.Jobs.mu.Unlock()
+	p.Jobs.execute(job, &jobReq{trigger: "by hand"})
+	run, _ = p.Jobs.lastRun(job.Name)
+	if run.Updated != 1 || run.Behind != 0 || run.Stale != "" || run.Dir != p.Root {
+		t.Errorf("run = %+v", run)
+	}
+	if data, _ := os.ReadFile(run.Log); !strings.HasSuffix(string(data), "v2") {
+		t.Errorf("log = %q", data)
+	}
+}
+
 func TestCronJobRunsAndIsWaitedFor(t *testing.T) {
 	_, p := setup(t, nil)
 	job := config.Job{Name: "open issue", Cron: "* * * * *", TimeZone: "Europe/London", Command: []string{"sh", "-c", "echo opened"}}
