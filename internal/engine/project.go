@@ -788,13 +788,17 @@ func (p *Project) RunNow(key string) {
 // Drop forgets an issue: kills its turn, drops its record and clears its status labels. The claimed label
 // stays, so it isn't claimed again unless reopened or claimed by hand.
 func (p *Project) Drop(key string) {
-	if p.Store.Get(key) == nil {
+	r := p.Store.Get(key)
+	if r == nil {
 		return
 	}
 	if t := p.Running(key); t != nil {
 		t.Kill()
 	}
 	p.Store.Remove(key)
+	if r.Trial != nil {
+		p.endTrial(key, r.Trial, "dropped", string(r.State))
+	}
 	p.logf("%s: dropped from the list", p.ref(key))
 	go p.setStatus(key, "")
 	p.hub.changed()
@@ -1095,8 +1099,8 @@ func (p *Project) readFeedback(ctx context.Context, r *store.Record) {
 	})
 }
 
-// endTrial sends what a trial added up to: endedBy is "finished" when the issue got there, or "next_draw" when
-// another cold turn started a new trial first.
+// endTrial sends what a trial added up to: endedBy is "finished" when the issue got there, "next_draw" when
+// another cold turn started a new trial first, or "dropped" when the owner dropped the issue.
 func (p *Project) endTrial(key string, t *store.Trial, endedBy, state string) {
 	props := p.trialProps(key, t)
 	props["ended_by"] = endedBy
