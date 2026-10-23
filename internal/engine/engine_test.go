@@ -621,17 +621,31 @@ func TestColdSessionHandsOffToAFreshOne(t *testing.T) {
 	p.readFeedback(context.Background(), p.Store.Get("8"))
 	p.readFeedback(context.Background(), p.Store.Get("8"))
 	waitFor(t, "the feedback event", func() bool { return len(sink.named("handoff_feedback")) == 1 })
-	if e := sink.named("handoff_feedback")[0]; e.Props["session"] != fresh.Session || e.Props["arm"] != "handoff" || len(p.Store.Get("8").Feedback) != 0 {
+	if e := sink.named("handoff_feedback")[0]; e.Props["session"] != fresh.Session || e.Props["arm"] != "handoff" || e.Props["verdict"] != "worse" || len(p.Store.Get("8").Feedback) != 0 {
 		t.Fatalf("feedback event: %+v", e.Props)
 	}
 
-	// A cold one drawn to resume resumes, and says so.
+	// A cold one drawn to resume resumes, and says so, and gets the same question, so the answer is blind.
 	share = 1e-12 // still in the experiment, but the draw all but surely resumes
 	cold()
 	if back := turn(4, "and the footer"); back.Session != fresh.Session || !back.Resume || p.Store.Get("8").LastTurn.Arm != "resume" {
 		t.Fatalf("a cold turn drawn to resume: %s %v", back.Session, back.Resume)
 	}
 	share = 1
+	r = p.Store.Get("8")
+	if posted := host.comments_(); len(posted) != 2 || posted[1] != feedbackText || len(r.Feedback) != 1 || r.Feedback[0].Arm != "resume" {
+		t.Fatalf("feedback asked after the resume: %v, watching %v", posted, r.Feedback)
+	}
+
+	// A 👍 counts too.
+	host.mu.Lock()
+	host.reactions = map[string]map[string]int{r.Feedback[0].URL: {"+1": 1}}
+	host.mu.Unlock()
+	p.readFeedback(context.Background(), p.Store.Get("8"))
+	waitFor(t, "the second feedback event", func() bool { return len(sink.named("handoff_feedback")) == 2 })
+	if e := sink.named("handoff_feedback")[1]; e.Props["arm"] != "resume" || e.Props["verdict"] != "maintained" || len(p.Store.Get("8").Feedback) != 0 {
+		t.Fatalf("feedback event: %+v", e.Props)
+	}
 
 	// After the owner attaches, the next turn resumes even when cold.
 	p.Attach("8")
@@ -640,8 +654,8 @@ func TestColdSessionHandsOffToAFreshOne(t *testing.T) {
 	if after := turn(5, "and the header"); after.Session != fresh.Session || !after.Resume {
 		t.Fatalf("a turn after attaching didn't resume: %s %v", after.Session, after.Resume)
 	}
-	if n := len(host.comments_()); n != 1 {
-		t.Fatalf("%d feedback comments for one handoff", n)
+	if n := len(host.comments_()); n != 2 {
+		t.Fatalf("%d feedback comments for two draws", n)
 	}
 
 	// Each draw is a trial, added up until the next draw or the finish, so the arms compare through to the end.
