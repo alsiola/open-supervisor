@@ -151,6 +151,82 @@ func Fresh(s Spec) (string, error) {
 	return s.Path, nil
 }
 
+// Sync is how the main checkout stood against the base branch's remote head before a job ran in it.
+type Sync struct {
+	// Updated is how many commits it was fast-forwarded by.
+	Updated int
+	// Behind is how many commits of the remote head it still didn't have, and Stale why ("on branch x").
+	// Stale is also set when the fetch failed, Behind then counting from the last fetch.
+	Behind int
+	Stale  string
+}
+
+// CatchUp fetches the base branch into the main checkout (Root) and fast-forwards it when it's on that branch.
+// Uncommitted changes don't stop it: git leaves them be, and refuses when the update would touch one. A
+// checkout without the remote has nothing to catch up with.
+func CatchUp(s Spec) Sync {
+	got := Behind(s)
+	if got.Behind == 0 || got.Stale != "" {
+		return got
+	}
+	base, head := s.head()
+	branch, _ := git(s.Root, "symbolic-ref", "-q", "--short", "HEAD")
+	if branch != base {
+		if branch == "" {
+			branch = "a detached HEAD"
+		}
+		got.Stale = "on " + branch + ", not " + base
+		return got
+	}
+	if _, err := git(s.Root, "merge", "-q", "--ff-only", head); err != nil {
+		switch msg := err.Error(); {
+		case strings.Contains(msg, "would be overwritten"):
+			got.Stale = "uncommitted changes to files the update touches"
+		case strings.Contains(msg, "fast-forward") || strings.Contains(msg, "diverg"):
+			got.Stale = base + " has commits " + head + " doesn't"
+		default:
+			got.Stale = "couldn't fast-forward: " + firstLine(msg)
+		}
+		return got
+	}
+	got.Updated, got.Behind = got.Behind, 0
+	return got
+}
+
+// Behind fetches the base branch into the main checkout (Root) and counts the commits of its remote head that
+// the checkout doesn't have, changing nothing else.
+func Behind(s Spec) Sync {
+	if _, err := git(s.Root, "remote", "get-url", s.remote()); err != nil {
+		return Sync{}
+	}
+	var got Sync
+	base, head := s.head()
+	if _, err := git(s.Root, "fetch", "-q", s.remote(), base); err != nil {
+		got.Stale = "couldn't fetch: " + firstLine(err.Error())
+	}
+	if !refExists(s.Root, "refs/remotes/"+head) {
+		return got
+	}
+	if count, err := git(s.Root, "rev-list", "--count", "HEAD.."+head); err == nil {
+		got.Behind, _ = strconv.Atoi(count)
+	}
+	return got
+}
+
+// head is the base branch and its remote-tracking ref.
+func (s Spec) head() (string, string) {
+	base := s.Base
+	if base == "" {
+		base = "main"
+	}
+	return base, s.remote() + "/" + base
+}
+
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(s, "\n")
+	return line
+}
+
 func refExists(dir, ref string) bool {
 	_, err := git(dir, "show-ref", "--verify", "-q", ref)
 	return err == nil

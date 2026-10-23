@@ -32,7 +32,13 @@ type JobRun struct {
 	Exit  *int   `json:"exit,omitempty"`
 	Error string `json:"error,omitempty"`
 	// Dir is where it ran; a fresh checkout's is kept for a day when the run fails.
-	Dir      string `json:"dir,omitempty"`
+	Dir string `json:"dir,omitempty"`
+	// Updated is how many commits the main checkout was fast-forwarded by before the run. Behind is how many
+	// of the base branch's remote head it ran without, and Stale why it couldn't catch up, so a health check
+	// can tell a run on old code.
+	Updated  int    `json:"updated,omitempty"`
+	Behind   int    `json:"behind,omitempty"`
+	Stale    string `json:"stale,omitempty"`
 	Log      string `json:"log,omitempty"`
 	Detached bool   `json:"detached,omitempty"`
 }

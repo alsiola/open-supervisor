@@ -11,7 +11,8 @@ import (
 
 // Job is a command the supervisor runs for a project, in its main checkout or, with Checkout "fresh", in a new
 // worktree at the base branch's remote head that is removed after the run (kept for a day when the run
-// fails). It runs:
+// fails). The main checkout is fast-forwarded to the remote head first when it can be; the run records how
+// far behind it was when it can't. It runs:
 //
 //   - every EveryMinutes minutes;
 //   - at set times: At (UTC, HH:MM) or Cron (five fields, in TimeZone, UTC when left out). A slot missed by
