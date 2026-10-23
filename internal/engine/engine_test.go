@@ -390,6 +390,36 @@ func TestCommentsBecomeTheNextTurnsEvents(t *testing.T) {
 	}
 }
 
+func TestStatusLabelComesOffWhileATurnRuns(t *testing.T) {
+	release := make(chan struct{})
+	var mu sync.Mutex
+	n := 0
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		mu.Lock()
+		n++
+		first := n == 1
+		mu.Unlock()
+		if !first {
+			<-release
+		}
+		return review("ok")
+	})
+	host.issues["8"] = &core.Issue{Key: "8", Title: "Eight", Open: true}
+	p.reconcile()
+	waitFor(t, "first turn in review", func() bool { return state(p, "8") == store.Review && host.hasLabel("8", "ready-for-review") })
+	time.Sleep(50 * time.Millisecond) // let the first turn finish settling
+	host.comments["8"] = []core.Comment{{ID: "c1", Kind: core.OnIssue, Author: "owner", Body: "one more thing", At: time.Now().UTC().Add(time.Second)}}
+	p.reconcile()
+	waitFor(t, "label off while the second turn runs", func() bool {
+		return state(p, "8") == store.Running && !host.hasLabel("8", "ready-for-review")
+	})
+	if !host.hasLabel("8", "agent-in-progress") {
+		t.Fatalf("labels: %v", host.labelOps)
+	}
+	close(release)
+	waitFor(t, "back in review", func() bool { return state(p, "8") == store.Review && host.hasLabel("8", "ready-for-review") })
+}
+
 func TestInterjectionReachesTheRunningTurn(t *testing.T) {
 	release := make(chan struct{})
 	running := make(chan *fakeTurn, 1)

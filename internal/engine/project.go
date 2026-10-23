@@ -978,6 +978,10 @@ func (p *Project) runTurn(key string) {
 	p.running[key] = turn
 	p.mu.Unlock()
 	p.hub.changed()
+	// The agent is at work again, so nothing waits on the owner until the turn ends.
+	if r.State == store.Failed || p.Labels.Status(string(r.State)) != "" {
+		p.setStatus(key, "")
+	}
 	if ended != nil {
 		p.endTrial(key, ended, "next_draw", "")
 	}
