@@ -678,6 +678,12 @@ func TestOptInClaimingAndTheTurnsGitAndAdditions(t *testing.T) {
 }
 
 func TestSigningKeptWhenAskedFor(t *testing.T) {
+	// An agent session with signing turned off passes its GIT_CONFIG_* on to the test.
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "GIT_CONFIG_") {
+			t.Setenv(k, "")
+		}
+	}
 	s, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") }, func(s *config.Settings) { s.Git.Sign = true })
 	if env := strings.Join(s.sessionEnv(p, "1"), "\n"); strings.Contains(env, "gpgsign") {
 		t.Fatalf("signing turned off: %s", env)
