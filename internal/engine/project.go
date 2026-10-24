@@ -828,6 +828,9 @@ func (p *Project) runTurn(key string) {
 	if handoff && resume {
 		session, resume = p.Agent.NewSession(), false
 	}
+	// A resumed turn works in the worktree without running its setup again, so bring the copied files (.env)
+	// up to date with the main checkout first.
+	worktree.Refresh(worktree.Spec{Root: p.Root, Path: p.WorktreePath(key), Copy: p.Spec.Worktree.Copy})
 	args, body := p.turnBody(r, events, handoff)
 	body = withExtra(body, playbooks.Project(p.Root, "work-issue"))
 	ctx := context.Background()

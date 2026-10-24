@@ -69,6 +69,36 @@ func TestSetupSkippedWithoutWatchedFiles(t *testing.T) {
 	_ = Remove(spec)
 }
 
+func TestRefresh(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "repo")
+	_ = os.MkdirAll(root, 0o755)
+	runGit(t, root, "init", "-q", "-b", "main")
+	_ = os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x"), 0o644)
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-qm", "init")
+	_ = os.WriteFile(filepath.Join(root, ".env"), []byte("A=1"), 0o644)
+	spec := Spec{Root: root, Path: Dir(filepath.Join(dir, "data"), "demo", "1"), Branch: "agent/issue-1", Base: "main",
+		Copy: []string{".env"}, Setup: "echo ran >> setup.log"}
+	Refresh(spec)
+	if _, err := os.Stat(spec.Path); !os.IsNotExist(err) {
+		t.Fatal("Refresh made a directory where there was no worktree")
+	}
+	path, err := Setup(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(root, ".env"), []byte("A=1\nB=2"), 0o644)
+	Refresh(spec)
+	if data, _ := os.ReadFile(filepath.Join(path, ".env")); string(data) != "A=1\nB=2" {
+		t.Fatalf(".env is %q; want the key added to the main checkout since setup", data)
+	}
+	if data, _ := os.ReadFile(filepath.Join(path, "setup.log")); strings.Count(string(data), "ran") != 1 {
+		t.Fatalf("setup ran %q; want only from Setup", data)
+	}
+	_ = Remove(spec)
+}
+
 func TestFresh(t *testing.T) {
 	dir := t.TempDir()
 	origin, root, other := filepath.Join(dir, "origin.git"), filepath.Join(dir, "repo"), filepath.Join(dir, "other")
