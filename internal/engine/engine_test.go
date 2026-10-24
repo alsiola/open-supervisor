@@ -486,6 +486,23 @@ func TestScheduledIssueWaitsForItsTime(t *testing.T) {
 	}
 }
 
+func TestHoldInAnUnlabelledBodyIsKept(t *testing.T) {
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") })
+	at := time.Now().Add(time.Hour).UTC().Truncate(time.Minute)
+	host.issues["19"] = &core.Issue{Key: "19", Title: "Later", Open: true, Body: "do it then\n\n<!-- runAt: " + at.Format("2006-01-02T15:04Z") + " -->"}
+	p.reconcile()
+	waitFor(t, "scheduled", func() bool { return state(p, "19") == store.Scheduled })
+	if len(agent.turns()) != 0 {
+		t.Fatal("ran an issue held by a marker in its body")
+	}
+	if r := p.Store.Get("19"); r.RunAt == nil || !r.RunAt.Equal(at) {
+		t.Fatalf("run at %v, want %v", r.RunAt, at)
+	}
+	if !host.hasLabel("19", "scheduled") {
+		t.Fatalf("the held issue wasn't labelled scheduled: %v", host.labelOps)
+	}
+}
+
 func TestChecksAndMergeReachTheAgent(t *testing.T) {
 	n := 0
 	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
