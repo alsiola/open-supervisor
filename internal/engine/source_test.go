@@ -212,7 +212,8 @@ func TestHooksAreSharedByTarget(t *testing.T) {
 	webRepo := &hookedHost{fakeHost: newHost(), target: "svc:a"}
 	apiRepo := &hookedHost{fakeHost: newHost(), target: "svc:b"}
 	web := &Project{Name: "web", Repo: webRepo, Tracker: tracker, repoConn: "svc", begun: true}
-	web.Jobs = &Jobs{p: web, Specs: []config.Job{{Name: "deploy", Command: []string{"true"}, On: &config.JobTrigger{Events: []string{"push"}}}}}
+	web.Jobs = &Jobs{p: web}
+	web.Jobs.SetSpecs([]config.Job{{Name: "deploy", Command: []string{"true"}, On: &config.JobTrigger{Events: []string{"push"}}}})
 	api := &Project{Name: "api", Repo: apiRepo, Tracker: tracker, repoConn: "svc", begun: true}
 	api.Jobs = &Jobs{p: api}
 	src := &Source{Name: "issues", Spec: &config.Source{Name: "issues"}, Tracker: tracker, conn: "svc"}

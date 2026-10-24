@@ -155,7 +155,7 @@ State (issue records, turn output, logs, correction and problem notes, the triag
 
 ### Jobs
 
-A job is a command the supervisor runs for a project. A project can also keep jobs in its own checkout, in `.open-supervisor.yaml` under `jobs:`.
+A job is a command the supervisor runs for a project. A project can also keep jobs in its own checkout, in `.open-supervisor.yaml` under `jobs:`. The supervisor reads the file again each minute and after a job fast-forwards the checkout, so a job added, changed or taken out there takes effect without a restart. The file is read from the main checkout, so a change merged on the remote counts once the checkout has it.
 
 ```yaml
 jobs:

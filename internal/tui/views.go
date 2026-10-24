@@ -77,7 +77,7 @@ func (m *model) reconcileText() string {
 func (m *model) jobsText() string {
 	var parts []string
 	for _, p := range m.sup.Projects() {
-		for _, j := range p.Jobs.Specs {
+		for _, j := range p.Jobs.Specs() {
 			if !j.Timed() {
 				continue
 			}
