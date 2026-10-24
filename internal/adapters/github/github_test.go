@@ -504,3 +504,58 @@ func TestReactions(t *testing.T) {
 		t.Error("read reactions without a comment id")
 	}
 }
+
+func TestPRsForReadsBranchAndTimeline(t *testing.T) {
+	_, rp := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/octo/widgets/pulls":
+			if r.URL.Query().Get("head") != "octo:agent/issue-12" || r.URL.Query().Get("state") != "all" {
+				t.Errorf("pulls query %s", r.URL.RawQuery)
+			}
+			fmt.Fprint(w, `[{"number": 5, "state": "open", "head": {"ref": "agent/issue-12", "sha": "abc"}}]`)
+		case "/repos/octo/widgets/issues/12/timeline":
+			fmt.Fprint(w, `[
+				{"event": "labeled"},
+				{"event": "cross-referenced", "source": {"type": "issue", "issue": {"number": 5, "pull_request": {}, "repository": {"full_name": "octo/widgets"}}}},
+				{"event": "cross-referenced", "source": {"type": "issue", "issue": {"number": 9, "pull_request": {}, "repository": {"full_name": "Octo/Widgets"}}}},
+				{"event": "cross-referenced", "source": {"type": "issue", "issue": {"number": 10, "repository": {"full_name": "octo/widgets"}}}},
+				{"event": "cross-referenced", "source": {"type": "issue", "issue": {"number": 11, "pull_request": {}, "repository": {"full_name": "octo/other"}}}}
+			]`)
+		case "/repos/octo/widgets/pulls/9":
+			fmt.Fprint(w, `{"number": 9, "state": "closed", "merged_at": "2026-10-01T00:00:00Z", "head": {"ref": "fix", "sha": "def"}}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	prs, err := rp.PRsFor(context.Background(), "agent/issue-12", "Closes #12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs) != 2 || prs[0].ID != 5 || prs[1].ID != 9 {
+		t.Fatalf("PRs %+v, want 5 and 9", prs)
+	}
+}
+
+func TestPRsForReadsSharedTrackerTimeline(t *testing.T) {
+	var asked string
+	_, rp := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/octo/tracker/issues/3/timeline":
+			asked = r.URL.Path
+			fmt.Fprint(w, `[{"event": "cross-referenced", "source": {"type": "issue", "issue": {"number": 4, "pull_request": {}, "repository": {"full_name": "octo/widgets"}}}}]`)
+		case "/repos/octo/widgets/pulls/4":
+			fmt.Fprint(w, `{"number": 4, "state": "open", "head": {"ref": "x", "sha": "1"}}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	prs, err := rp.PRsFor(context.Background(), "", "Closes octo/tracker#3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asked == "" || len(prs) != 1 || prs[0].ID != 4 {
+		t.Fatalf("PRs %+v (timeline read: %q)", prs, asked)
+	}
+}
