@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/alsiola/open-supervisor/internal/core"
-	"github.com/alsiola/open-supervisor/internal/logx"
 	"github.com/alsiola/open-supervisor/internal/store"
 )
 
@@ -156,7 +155,7 @@ func (p *Project) wakeDue() {
 			// Not started yet: the owner may have moved the time, or what it waits for, since it was read.
 			m, err := p.latestHold(r.Key)
 			if err != nil {
-				p.logf("%s: couldn't read its hold: %s", p.ref(r.Key), logx.ErrText(err))
+				p.callFailed(err, "%s: couldn't read its hold", p.ref(r.Key))
 				continue
 			}
 			if m != nil && waiting(m.hold) && (m.hold.Until == nil || m.hold.Until.After(time.Now())) {
@@ -298,7 +297,7 @@ func (p *Project) poll(ctx context.Context, r *store.Record, c core.Cond) (core.
 		id, _ := strconv.Atoi(c.Ref)
 		pr, err := owner.Repo.PR(ctx, id)
 		if err != nil {
-			p.logf("%s: couldn't read PR #%d it waits on: %s", p.ref(r.Key), id, logx.ErrText(err))
+			p.callFailed(err, "%s: couldn't read PR #%d it waits on", p.ref(r.Key), id)
 			return f, false
 		}
 		f.On = string(pr.State)
