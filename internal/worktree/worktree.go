@@ -1,6 +1,7 @@
 // Package worktree gives each issue its own git worktree on its own branch, outside the project's checkout so
 // nothing has to be ignored there. Setup copies the files the project lists (.env) on every run and runs the
-// project's setup command when one of the files it watches (a lockfile) has changed. Remove stops anything
+// project's setup command when one of the files it watches (a lockfile) has changed; Refresh copies the files
+// alone, before each turn, so a resumed agent that doesn't run Setup again still sees keys added since. Remove stops anything
 // still running from the worktree, removes it and keeps the branch, so nothing committed is lost.
 package worktree
 
@@ -107,6 +108,15 @@ func Setup(s Spec) (string, error) {
 		}
 	}
 	return s.Path, nil
+}
+
+// Refresh copies the project's files into the worktree again when it exists, so a key added to the main
+// checkout's .env since Setup last ran reaches it. It fetches nothing and runs no setup.
+func Refresh(s Spec) {
+	if _, err := os.Stat(filepath.Join(s.Path, ".git")); err != nil {
+		return
+	}
+	s.copyFiles()
 }
 
 func (s Spec) copyFiles() {

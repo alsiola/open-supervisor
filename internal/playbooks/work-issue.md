@@ -131,7 +131,7 @@ Decide which kind of issue it is:
 
 ### 2. Worktree
 
-`$OPEN_SUPERVISOR agent worktree setup`. It creates or reuses the issue's worktree on the issue's branch (a new branch starts from the base branch), copies the files the project lists (such as `.env`) and runs the project's setup when its lockfile has changed. It prints the worktree path last. Work there from now on: start each command with `cd <worktree> &&`, or use `git -C <worktree>`. Every turn starts back in the main checkout, so do the same in later turns. Don't use any other worktree mechanism.
+`$OPEN_SUPERVISOR agent worktree setup`. It creates or reuses the issue's worktree on the issue's branch (a new branch starts from the base branch), copies the files the project lists (such as `.env`) and runs the project's setup when its lockfile has changed. It prints the worktree path last. Work there from now on: start each command with `cd <worktree> &&`, or use `git -C <worktree>`. Every turn starts back in the main checkout, so do the same in later turns; the supervisor copies the listed files in again before each turn, so a key added to the main checkout's `.env` reaches you. Don't use any other worktree mechanism.
 
 If `agent pr list` already shows an open PR, you're taking over from an earlier agent. Read it with `agent pr view`, then carry on from wherever it got to.
 
