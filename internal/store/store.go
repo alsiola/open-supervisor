@@ -79,7 +79,7 @@ type Record struct {
 	PastSessions []string `json:"pastSessions,omitempty"`
 	// Trial is the handoff experiment's run in progress on the issue, from its draw until the next or the finish.
 	Trial *Trial `json:"trial,omitempty"`
-	// Feedback are the comments asking for a 👎 if a session started from a handoff did worse, being watched.
+	// Feedback are the comments asking whether a session kept up its performance after a cold turn, being watched.
 	Feedback []Feedback `json:"feedback,omitempty"`
 	// Seen are comment ids already handed to the agent (bounded).
 	Seen []string `json:"seen"`
@@ -134,7 +134,8 @@ func (t *Trial) Add(o core.Outcome, followUps int) {
 	t.FollowUps += followUps
 }
 
-// Feedback is a comment asking whether a session started from a handoff did worse.
+// Feedback is a comment asking whether a session kept up its performance on a turn drawn into the handoff
+// experiment.
 type Feedback struct {
 	URL      string    `json:"url"`
 	Session  string    `json:"session"`

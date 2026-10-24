@@ -1032,22 +1032,24 @@ func (p *Project) handsOff(r *store.Record, resume bool) (handoff bool, arm stri
 	return false, "resume"
 }
 
-// feedbackText is the comment after a turn that started from a handoff.
-const feedbackText = "This session was resumed from handoff, hit 👎 on this comment if you noticed a deterioration in agent performance."
+// feedbackText is the comment after a turn drawn into the handoff experiment. It reads the same whichever arm the
+// draw picked, so whoever answers doesn't know if the session resumed or started afresh from a handoff.
+const feedbackText = "There was a long gap between messages, did you find performance was maintained from previous turns? " +
+	"Hit 👍 on this comment if it was, or 👎 if it got worse."
 
-// askFeedback asks on the issue whether the session that just started from a handoff did worse, where the
-// tracker can count the 👎, and watches the comment.
+// askFeedback asks on the issue whether the session that just took a turn drawn into the handoff experiment,
+// on either arm, kept up its performance, where the tracker can count the 👍 and 👎, and watches the comment.
 func (p *Project) askFeedback(key string) {
 	_, ok := p.Tracker.(adapter.ReactionReader)
 	r := p.Store.Get(key)
-	if !ok || r == nil || r.LastTurn == nil || !r.LastTurn.Handoff || p.hub.settings().DryRun {
+	if !ok || r == nil || r.LastTurn == nil || r.LastTurn.Arm == "" || p.hub.settings().DryRun {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	url, err := p.Tracker.Comment(ctx, key, feedbackText, core.AgentMark{From: key})
 	if err != nil {
-		p.logf("%s: couldn't ask for feedback on the handoff: %s", p.ref(key), logx.ErrText(err))
+		p.logf("%s: couldn't ask for feedback on the cold turn: %s", p.ref(key), logx.ErrText(err))
 		return
 	}
 	f := store.Feedback{URL: url, Session: r.Session, Arm: r.LastTurn.Arm, Turn: r.Turns, PostedAt: time.Now().UTC()}
@@ -1058,11 +1060,11 @@ func (p *Project) askFeedback(key string) {
 	p.hub.capture("handoff_feedback_asked", p.feedbackProps(key, f))
 }
 
-// feedbackWindow is how long a feedback comment is watched for a 👎.
+// feedbackWindow is how long a feedback comment is watched for a 👍 or 👎.
 const feedbackWindow = 7 * 24 * time.Hour
 
-// readFeedback looks for a 👎 on the issue's feedback comments, sends an event for each comment that has one,
-// and stops watching those and the ones past the window.
+// readFeedback looks for a 👍 or 👎 on the issue's feedback comments, sends an event for each comment that has
+// one, and stops watching those and the ones past the window.
 func (p *Project) readFeedback(ctx context.Context, r *store.Record) {
 	rr, ok := p.Tracker.(adapter.ReactionReader)
 	if !ok || len(r.Feedback) == 0 {
@@ -1076,18 +1078,21 @@ func (p *Project) readFeedback(ctx context.Context, r *store.Record) {
 		}
 		counts, err := rr.Reactions(ctx, f.URL)
 		if err != nil {
-			p.logf("%s: couldn't read the reactions on the handoff feedback: %s", p.ref(r.Key), logx.ErrText(err))
+			p.logf("%s: couldn't read the reactions on the cold turn's feedback: %s", p.ref(r.Key), logx.ErrText(err))
 			continue
 		}
-		if counts["-1"] > 0 {
-			props := p.feedbackProps(r.Key, f)
-			props["thumbs_down"] = counts["-1"]
-			props["thumbs_up"] = counts["+1"]
-			props["hours_after"] = time.Since(f.PostedAt).Hours()
-			p.hub.capture("handoff_feedback", props)
-			p.logf("%s: 👎 on the handoff in session %s", p.ref(r.Key), f.Session)
-			done[f.URL] = true
+		up, down := counts["+1"], counts["-1"]
+		if up == 0 && down == 0 {
+			continue
 		}
+		props := p.feedbackProps(r.Key, f)
+		props["thumbs_up"] = up
+		props["thumbs_down"] = down
+		props["verdict"] = verdict(up, down)
+		props["hours_after"] = time.Since(f.PostedAt).Hours()
+		p.hub.capture("handoff_feedback", props)
+		p.logf("%s: feedback on the cold turn in session %s: %s", p.ref(r.Key), f.Session, props["verdict"])
+		done[f.URL] = true
 	}
 	if len(done) == 0 {
 		return
@@ -1101,6 +1106,18 @@ func (p *Project) readFeedback(ctx context.Context, r *store.Record) {
 		}
 		x.Feedback = keep
 	})
+}
+
+// verdict is what a feedback comment's reactions say: "maintained" on a 👍, "worse" on a 👎, "mixed" on both.
+func verdict(up, down int) string {
+	switch {
+	case up > 0 && down > 0:
+		return "mixed"
+	case down > 0:
+		return "worse"
+	default:
+		return "maintained"
+	}
 }
 
 // endTrial sends what a trial added up to: endedBy is "finished" when the issue got there, "next_draw" when
