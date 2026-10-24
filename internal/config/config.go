@@ -74,7 +74,36 @@ type Settings struct {
 	// HandoffShare is the share of those turns, picked at random, that start from the handoff; the rest resume,
 	// so the two can be compared. 0 always resumes, 1 always hands off.
 	HandoffShare *float64 `yaml:"handoffShare,omitempty"`
-	DryRun       bool     `yaml:"dryRun,omitempty"`
+	// Host watches the machine the supervisor runs on; off unless host.minutes is set.
+	Host   Host `yaml:"host,omitempty"`
+	DryRun bool `yaml:"dryRun,omitempty"`
+}
+
+// Host is the optional watch on the machine the supervisor runs on. Every few minutes it sends telemetry a
+// reading of the CPU load, memory and disk space, and when one crosses its threshold it logs a warning and sends
+// an event, and again when it recovers.
+type Host struct {
+	// Minutes is how often to take a reading; 0 turns the watch off.
+	Minutes int `yaml:"minutes,omitempty"`
+	// Load is the 1-minute load average per CPU above which the host is overloaded: 1 is every core busy.
+	Load float64 `yaml:"load,omitempty"`
+	// Memory and Disk are the percentages in use above which they are running out.
+	Memory float64 `yaml:"memory,omitempty"`
+	Disk   float64 `yaml:"disk,omitempty"`
+	// Disks are more paths whose filesystems are watched, besides the worktrees', the state folder's and the
+	// projects' checkouts.
+	Disks []string `yaml:"disks,omitempty"`
+}
+
+// Thresholds are the load, memory and disk thresholds, with the defaults for any left out.
+func (h Host) Thresholds() (load, memory, disk float64) {
+	pick := func(v, d float64) float64 {
+		if v > 0 {
+			return v
+		}
+		return d
+	}
+	return pick(h.Load, 1.5), pick(h.Memory, 90), pick(h.Disk, 90)
 }
 
 // Labels are the labels the supervisor uses.
@@ -435,6 +464,9 @@ func (c *Config) Validate() error {
 		if err := spec.Validate(conn.Values); err != nil {
 			errs = append(errs, fmt.Sprintf("connection %s: %v", name, err))
 		}
+	}
+	if h := c.Settings.Host; h.Minutes < 0 || h.Load < 0 || h.Memory < 0 || h.Memory > 100 || h.Disk < 0 || h.Disk > 100 {
+		errs = append(errs, "settings.host: minutes and load can't be negative, and memory and disk are percentages (0–100)")
 	}
 	role := func(where, name string, r adapter.Role) {
 		if name == "" {

@@ -39,6 +39,9 @@ func (m *model) header() []string {
 	} else if n > 1 {
 		parts = append(parts, yellowS.Render(fmt.Sprintf("%d problems", n)))
 	}
+	for _, a := range sup.HostAlerts() {
+		parts = append(parts, redS.Render(a))
+	}
 	if j := m.jobsText(); j != "" {
 		parts = append(parts, j)
 	}

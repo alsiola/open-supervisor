@@ -102,6 +102,12 @@ settings:
   triageAt: "08:51"          # daily triage of the problems agents report; empty turns it off
   handoffMinutes: 55         # a turn this long after the last is in the handoff experiment; 0: every turn is
   handoffShare: 0.5          # share of those that start a fresh session from the handoff; 0 always resumes
+  host:                      # optional watch on this machine's CPU, memory and disks; off without minutes
+    minutes: 1               # how often to take a reading
+    load: 1.5                # 1-minute load per CPU over which the host is overloaded (1: every core busy)
+    memory: 90               # % of memory in use over which it's running out
+    disk: 90                 # % of a disk in use over which it's running out
+    disks: [/Volumes/data]   # more paths to watch, besides the worktrees', the state folder's and checkouts'
   labels:
     claimed: agent-in-progress
     scheduled: scheduled
@@ -240,7 +246,8 @@ The job learns about the delivery from `OPEN_SUPERVISOR_EVENT`, `OPEN_SUPERVISOR
 - **Retries** a failed turn after 5, then 10, then 15 minutes, then waits for `r`.
 - **Sweeps** once a day: an agent turn folds the corrections agents logged into the project's rule files. It pushes to the main branch, or opens a PR with `sweep.land: pr` (for a protected branch).
 - **Triages** once a day: agents log what they had to work around with `agent problem` (an unset variable, a stale skill, a failing `agent` command). An agent turn groups the notes by cause, fixes what is plainly wrong in the project's own files with one commit to the main branch (or a PR, with `triage.land: pr`), and writes the rest to `triage.md` in the project's state folder. With `triage.openIssues` it opens or updates one issue per cause in the project's tracker instead. Causes in open-supervisor itself are filed on its tracker when the supervisor watches open-supervisor as one of its projects, and otherwise come back as a link that opens an issue here, filled in. The header counts the notes waiting.
-- **Usage and metrics.** It shows the Claude subscription's 5-hour and 7-day windows in the header. It sends the telemetry connections an `agent_turn` event per turn (tokens, cost, duration, state), an `agent_usage` event, an `agent_problem` event for each problem an agent logs, and an `agent_wait_ended` event each time a wait ends (what ended it, the condition's kind, how long it lasted).
+- **Usage and metrics.** It shows the Claude subscription's 5-hour and 7-day windows in the header. It sends the telemetry connections an `agent_turn` event per turn (tokens, cost, duration, state), an `agent_usage` event, an `agent_problem` event for each problem an agent logs, an `agent_wait_ended` event each time a wait ends (what ended it, the condition's kind, how long it lasted), and the host watch's `host_metrics` and `host_alert` (below).
+- **Watches the host**, with `settings.host.minutes` set. Agents, their dev servers and their worktrees share one machine, so running out of CPU, memory or disk stalls every project at once. Each reading goes to telemetry as `host_metrics`: the load averages and `load_per_cpu`, `memory_used_pct` and bytes, and each disk the worktrees, the state folder, the checkouts and `host.disks` are on, with the fullest under `disk_used_pct`. A reading going over its threshold logs a warning, shows in red in the TUI's header and sends `host_alert` (`metric`, `value`, `threshold`, `over: true`, and `path` for a disk). It sends `over: false` once the reading drops back under 95% of the threshold. Load and memory are read on Linux and macOS; disks on Windows too.
 
 ### What agents get
 
