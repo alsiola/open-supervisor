@@ -494,9 +494,25 @@ func (r *Repo) DefaultBranch(ctx context.Context) (string, error) {
 	return out.DefaultBranch, nil
 }
 
-var numberRe = regexp.MustCompile(`#(\d+)`)
+// issueRefRe reads the issue a reference names: "Closes #12" or, from a shared tracker, "Closes owner/repo#12".
+var issueRefRe = regexp.MustCompile(`(?:([\w.-]+/[\w.-]+))?#(\d+)`)
 
-// PRsFor finds the PRs from the branch and those whose body mentions the issue, open or not.
+// rawTimelineEvent is the part of an issue's timeline event that says another issue or PR mentioned it.
+type rawTimelineEvent struct {
+	Event  string `json:"event"`
+	Source struct {
+		Issue struct {
+			Number      int       `json:"number"`
+			PullRequest *struct{} `json:"pull_request"`
+			Repository  struct {
+				FullName string `json:"full_name"`
+			} `json:"repository"`
+		} `json:"issue"`
+	} `json:"source"`
+}
+
+// PRsFor finds the PRs from the branch and those in this repository that mention the issue, open or not.
+// The mentions come from the issue's timeline rather than the search API, whose rate limit is far tighter.
 func (r *Repo) PRsFor(ctx context.Context, branch, ref string) ([]core.PR, error) {
 	found := map[int]core.PR{}
 	if branch != "" {
@@ -508,25 +524,28 @@ func (r *Repo) PRsFor(ctx context.Context, branch, ref string) ([]core.PR, error
 			found[p.Number] = p.pr()
 		}
 	}
-	if m := numberRe.FindStringSubmatch(ref); m != nil {
-		q := fmt.Sprintf(`repo:%s is:pr "#%s" in:body`, r.repo, m[1])
-		var res struct {
-			Items []struct {
-				Number int `json:"number"`
-			} `json:"items"`
+	if m := issueRefRe.FindStringSubmatch(ref); m != nil {
+		tracker := r.repo
+		if m[1] != "" {
+			tracker = m[1]
 		}
-		if _, err := r.c.call(ctx, false, r.repo, http.MethodGet, "/search/issues?per_page=50&q="+url.QueryEscape(q), nil, &res); err != nil {
+		events, err := paginate[rawTimelineEvent](ctx, r.c, tracker, "/repos/"+tracker+"/issues/"+m[2]+"/timeline")
+		if err != nil {
 			return nil, err
 		}
-		for _, it := range res.Items {
-			if _, ok := found[it.Number]; ok {
+		for _, e := range events {
+			src := e.Source.Issue
+			if e.Event != "cross-referenced" || src.PullRequest == nil || !strings.EqualFold(src.Repository.FullName, r.repo) {
 				continue
 			}
-			pr, err := r.PR(ctx, it.Number)
+			if _, ok := found[src.Number]; ok {
+				continue
+			}
+			pr, err := r.PR(ctx, src.Number)
 			if err != nil {
 				return nil, err
 			}
-			found[it.Number] = pr
+			found[src.Number] = pr
 		}
 	}
 	out := make([]core.PR, 0, len(found))
