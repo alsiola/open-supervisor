@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/alsiola/open-supervisor/compare/v1.1.0...v1.2.0) (2026-10-24)
+
+### Features
+
+* **engine:** watch the host's cpu load, memory and disk space ([#51](https://github.com/alsiola/open-supervisor/issues/51)) ([e1a09f8](https://github.com/alsiola/open-supervisor/commit/e1a09f8f873675f68244188bd82962c26f15f6aa))
+* **github:** send conditional requests and pause on rate limits ([#53](https://github.com/alsiola/open-supervisor/issues/53)) ([85bf37e](https://github.com/alsiola/open-supervisor/commit/85bf37edf1e29025d1315c22ed22577ad142fbcb))
+
 ## [1.1.0](https://github.com/alsiola/open-supervisor/compare/v1.0.1...v1.1.0) (2026-10-24)
 
 ### Features
