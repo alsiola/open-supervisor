@@ -288,24 +288,6 @@ func Remove(s Spec) error {
 	return nil
 }
 
-// killWithin stops processes started from the worktree (a dev server keeps writing into it after the delete).
-func killWithin(path string) {
-	out, err := exec.Command("pgrep", "-f", path+string(filepath.Separator)).Output()
-	if err != nil {
-		return
-	}
-	self := os.Getpid()
-	for _, f := range strings.Fields(string(out)) {
-		pid, err := strconv.Atoi(f)
-		if err != nil || pid == self {
-			continue
-		}
-		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Kill()
-		}
-	}
-}
-
 func same(a, b string) bool {
 	x, err1 := os.ReadFile(a)
 	y, err2 := os.ReadFile(b)
