@@ -118,6 +118,55 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestParseUsageLimit(t *testing.T) {
+	out := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792831200,"rateLimitType":"five_hour"}}
+{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You've hit your session limit · resets 9:40am (Europe/London)"}]},"error":"rate_limit","api_error":"usage_limit_reached","api_error_params":{"rate_limit_info":{"status":"rejected","resetsAt":1792831200,"rateLimitType":"five_hour"}}}
+{"type":"result","subtype":"success","is_error":true,"api_error":"usage_limit_reached","num_turns":1,"total_cost_usd":0,"result":"You've hit your session limit · resets 9:40am (Europe/London)"}`
+	code := 1
+	o := parse(out, "", &code, true)
+	if o.OK || !o.Limited || o.ResetsAt == nil || o.ResetsAt.Unix() != 1792831200 {
+		t.Fatalf("%+v", o)
+	}
+	if o.Error != "You've hit your session limit · resets 9:40am (Europe/London)" {
+		t.Fatalf("error %q", o.Error)
+	}
+	// Without the API error, the wording alone says so, and when.
+	o = parse(`{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 9:40am (Europe/London)"}`, "", &code, true)
+	if !o.Limited || o.ResetsAt == nil || strings.HasPrefix(o.Error, "success") {
+		t.Fatalf("%+v", o)
+	}
+	o = parse(`{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom"}`, "", &code, true)
+	if o.Limited || o.Error != "error_during_execution: boom" {
+		t.Fatalf("%+v", o)
+	}
+}
+
+func TestResetFromText(t *testing.T) {
+	london, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Skip("no zone data")
+	}
+	now := time.Date(2026, 10, 24, 8, 11, 0, 0, london)
+	cases := []struct {
+		text string
+		want time.Time
+	}{
+		{"You've hit your session limit · resets 9:40am (Europe/London)", time.Date(2026, 10, 24, 9, 40, 0, 0, london)},
+		{"You've hit your session limit · resets 3am (Europe/London)", time.Date(2026, 10, 25, 3, 0, 0, 0, london)},
+		{"You've hit your session limit · resets 12:30pm (Europe/London)", time.Date(2026, 10, 24, 12, 30, 0, 0, london)},
+		{"You've hit your weekly limit · resets Oct 27, 3pm (Europe/London)", time.Date(2026, 10, 27, 15, 0, 0, 0, london)},
+	}
+	for _, c := range cases {
+		got := resetFromText(c.text, now)
+		if got == nil || !got.Equal(c.want) {
+			t.Errorf("%q: got %v, want %v", c.text, got, c.want)
+		}
+	}
+	if resetFromText("You've hit your session limit", now) != nil {
+		t.Error("a time from a message without one")
+	}
+}
+
 func TestTranscript(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", home)

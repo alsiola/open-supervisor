@@ -462,6 +462,28 @@ func TestFailedTurnRetriesLater(t *testing.T) {
 	waitFor(t, "rerun", func() bool { return len(agent.turns()) == 2 })
 }
 
+func TestUsageLimitHoldsTurnsUntilItLifts(t *testing.T) {
+	resets := time.Now().Add(time.Hour).UTC()
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		return core.Outcome{Error: "You've hit your session limit", Limited: true, ResetsAt: &resets}
+	})
+	host.issues["8"] = &core.Issue{Key: "8", Title: "Eight", Open: true}
+	p.reconcile()
+	waitFor(t, "failed", func() bool { return state(p, "8") == store.Failed })
+	r := p.Store.Get("8")
+	if r.Attempts != 0 || r.RetryAfter == nil || !r.RetryAfter.Equal(resets.Add(limitGrace)) {
+		t.Fatalf("retry: attempts %d after %v, want none after %v", r.Attempts, r.RetryAfter, resets.Add(limitGrace))
+	}
+	host.issues["9"] = &core.Issue{Key: "9", Title: "Nine", Open: true}
+	p.reconcile()
+	time.Sleep(100 * time.Millisecond)
+	if n := len(agent.turns()); n != 1 {
+		t.Fatalf("a turn started while the agent was at its limit (%d turns)", n)
+	}
+	p.RunNow("8")
+	waitFor(t, "rerun once the owner asks", func() bool { return len(agent.turns()) >= 2 })
+}
+
 func TestScheduledIssueWaitsForItsTime(t *testing.T) {
 	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") })
 	at := time.Now().Add(time.Hour).UTC().Truncate(time.Minute)

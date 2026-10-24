@@ -61,6 +61,9 @@ type Outcome struct {
 	ToolCalls  int           `json:"toolCalls,omitempty"`
 	Error      string        `json:"error,omitempty"`
 	Duration   time.Duration `json:"duration"`
+	// Limited says the turn stopped on the subscription's usage limit; ResetsAt is when that lifts, if known.
+	Limited  bool       `json:"limited,omitempty"`
+	ResetsAt *time.Time `json:"resetsAt,omitempty"`
 }
 
 // ParseTime reads an ISO instant loosely: with or without seconds, Z or an offset; a bare date is midnight UTC.
@@ -75,4 +78,13 @@ func ParseTime(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, err
+}
+
+// Clock is a time to come as the owner reads it: the local time of day, with the day when it isn't today's.
+func Clock(t time.Time) string {
+	t = t.Local()
+	if y, m, d := time.Now().Date(); t.Year() == y && t.Month() == m && t.Day() == d {
+		return t.Format("15:04")
+	}
+	return t.Format("Mon 2 Jan 15:04")
 }

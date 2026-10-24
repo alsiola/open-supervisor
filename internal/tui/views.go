@@ -184,6 +184,8 @@ func (m *model) info(rw row) string {
 		switch {
 		case r.Attempts >= st.MaxAttempts:
 			e += " (press r to retry)"
+		case r.RetryAfter != nil && time.Until(*r.RetryAfter) > time.Hour:
+			e += " (retry at " + core.Clock(*r.RetryAfter) + ")"
 		case r.RetryAfter != nil:
 			e += fmt.Sprintf(" (retry in %d min)", max(0, int(math.Ceil(time.Until(*r.RetryAfter).Minutes()))))
 		}
