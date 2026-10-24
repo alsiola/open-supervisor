@@ -495,9 +495,11 @@ func (p *Project) maybeClaim(issue core.Issue, reopened bool) {
 	if issue.HasLabel(p.Labels.Claimed) && !reopened {
 		return
 	}
-	// A scheduled issue with a hold marker waits for it; one without is a timer issue to run now.
+	// A scheduled issue with a hold marker waits for it; one without is a timer issue to run now. An issue
+	// whose body carries a marker waits for it too, labelled or not: it may have been written by hand.
 	var marker *holdMarker
-	if issue.HasLabel(p.Labels.Scheduled) {
+	labelled := issue.HasLabel(p.Labels.Scheduled)
+	if _, inBody := core.HoldIn(issue.Body); labelled || inBody {
 		m, err := p.latestHold(issue.Key)
 		if err != nil {
 			p.logf("%s: couldn't read its hold: %s", p.ref(issue.Key), logx.ErrText(err))
@@ -513,6 +515,9 @@ func (p *Project) maybeClaim(issue core.Issue, reopened bool) {
 		})
 		p.logf("%s: held for %s", p.ref(issue.Key), marker.hold.Describe())
 		p.warnUnknown(marker.hold)
+		if !labelled {
+			p.editLabels(issue.Key, []string{p.Labels.Scheduled}, nil)
+		}
 		p.hub.changed()
 		if len(marker.hold.Conds) > 0 {
 			go p.checkWaits(issue.Key)
@@ -528,7 +533,7 @@ func (p *Project) maybeClaim(issue core.Issue, reopened bool) {
 		note = fmt.Sprintf("This issue was scheduled to start at %s, and that time has come.", marker.hold.Until.Format(time.RFC3339))
 	}
 	p.claimLocked(issue, note)
-	if marker != nil {
+	if labelled {
 		p.editLabels(issue.Key, nil, []string{p.Labels.Scheduled})
 	}
 }
