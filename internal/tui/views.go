@@ -159,8 +159,19 @@ func (m *model) info(rw row) string {
 			}
 		}
 		return s
-	case r.State == store.Scheduled && r.RunAt != nil:
-		s := stateStyle(store.Scheduled).Render("until " + r.RunAt.Local().Format("2 Jan 2006 15:04"))
+	case r.State == store.Scheduled && (r.RunAt != nil || len(r.Waits) > 0):
+		var on []string
+		for _, c := range r.Waits {
+			on = append(on, c.Short())
+		}
+		var parts []string
+		if len(on) > 0 {
+			parts = append(parts, "on "+strings.Join(on, " or "))
+		}
+		if r.RunAt != nil {
+			parts = append(parts, "until "+r.RunAt.Local().Format("2 Jan 2006 15:04"))
+		}
+		s := stateStyle(store.Scheduled).Render(strings.Join(parts, " · "))
 		if summary != "" {
 			s += " · " + summary
 		}
@@ -327,6 +338,9 @@ func (m *model) detailLines(rw row) []string {
 			h += " (waiting for checks)"
 		}
 		lines = append(lines, field("head", h))
+	}
+	for _, c := range r.Waits {
+		lines = append(lines, field("waits for", c.Describe()))
 	}
 	if r.RunAt != nil {
 		lines = append(lines, field("runs at", r.RunAt.Local().Format("2006-01-02 15:04:05")))

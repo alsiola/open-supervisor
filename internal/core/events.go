@@ -16,6 +16,7 @@ const (
 	EvIssue   EventType = "issue"   // the issue closed or reopened
 	EvNote    EventType = "note"    // a note from the supervisor itself
 	EvMessage EventType = "message" // a message the owner typed into the TUI
+	EvWoke    EventType = "woke"    // what the issue was waiting on happened, or its time came
 )
 
 // Event is one item in an issue's queue. Which fields are set depends on Type.
@@ -41,7 +42,7 @@ func (e Event) Same(o Event) bool {
 	switch e.Type {
 	case EvComment:
 		return e.Comment != nil && o.Comment != nil && e.Comment.ID == o.Comment.ID && e.Comment.Kind == o.Comment.Kind
-	case EvMessage, EvNote:
+	case EvMessage, EvNote, EvWoke:
 		return e.Text == o.Text && e.At.Equal(o.At)
 	default:
 		return e.PR == o.PR && e.SHA == o.SHA && e.Action == o.Action
@@ -83,6 +84,8 @@ func (e Event) Describe() string {
 		return "issue " + e.Action
 	case EvNote:
 		return "note"
+	case EvWoke:
+		return "woke: " + e.Text
 	case EvMessage:
 		return "message from the owner"
 	}
@@ -144,6 +147,8 @@ func Render(events []Event) string {
 			parts = append(parts, "### The issue was "+e.Action)
 		case EvNote:
 			parts = append(parts, "### Note from the supervisor\n"+e.Text)
+		case EvWoke:
+			parts = append(parts, "### What you were waiting for\n"+e.Text)
 		case EvMessage:
 			parts = append(parts, fmt.Sprintf("### Message from the owner, typed into the supervisor (%s; answer in your session, no reply on the issue needed)\n\n%s", e.At.UTC().Format(time.RFC3339), strings.TrimSpace(e.Text)))
 		}

@@ -436,9 +436,13 @@ func (t *Tracker) Reactions(ctx context.Context, commentURL string) (map[string]
 	return counts, nil
 }
 
-func (t *Tracker) OpenIssue(ctx context.Context, title, body string) (core.Issue, error) {
+func (t *Tracker) OpenIssue(ctx context.Context, title, body string, labels []string) (core.Issue, error) {
 	var i rawIssue
-	if _, err := t.c.call(ctx, true, t.repo, http.MethodPost, t.path("/issues"), map[string]string{"title": title, "body": body}, &i); err != nil {
+	req := map[string]any{"title": title, "body": body}
+	if len(labels) > 0 {
+		req["labels"] = labels
+	}
+	if _, err := t.c.call(ctx, true, t.repo, http.MethodPost, t.path("/issues"), req, &i); err != nil {
 		return core.Issue{}, err
 	}
 	return i.issue(t.repo), nil
@@ -472,8 +476,8 @@ func (t *Tracker) RefFor(key string) string {
 	return "Closes #" + strings.TrimPrefix(key, "#")
 }
 
-func (t *Tracker) RunAtMarker(at time.Time) string {
-	return "<!-- runAt: " + at.UTC().Format("2006-01-02T15:04Z") + " -->"
+func (t *Tracker) HoldMarker(h core.Hold) string {
+	return "<!-- " + h.Spec() + " -->"
 }
 
 // ---- repo -----------------------------------------------------------------------------------------------

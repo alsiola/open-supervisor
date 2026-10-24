@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,10 @@ type hub interface {
 	changed()
 	sessionEnv(p *Project, key string) []string
 	dataDir() string
+	// fact tells every project something happened that an issue may be waiting on.
+	fact(f core.Fact)
+	// peer is another project under the same supervisor, nil if there is none by the name.
+	peer(name string) *Project
 }
 
 // Project is one project under the supervisor: it claims the issues its source routes to it, gives each a
@@ -259,7 +264,7 @@ func (p *Project) onSignal(s core.Signal) {
 		if r == nil {
 			return
 		}
-		go p.noteRunAt(r.Key, s.Comment.ID, s.Comment.Body)
+		go p.noteHold(r.Key, s.Comment.ID, s.Comment.Body)
 		p.ingest(r, *s.Comment)
 	case core.SigPRComment:
 		if s.Comment == nil || s.PR == nil {
@@ -295,6 +300,7 @@ func (p *Project) onSignal(s core.Signal) {
 		if s.PR == nil {
 			return
 		}
+		go p.hub.fact(core.Fact{Kind: core.CondPR, Project: p.Name, Ref: strconv.Itoa(s.PR.ID), On: string(s.PR.State)})
 		if r := p.recordForPR(*s.PR); r != nil {
 			p.reportPRClosed(r.Key, s.PR.ID, s.PR.State == core.PRMerged)
 		}
@@ -489,26 +495,28 @@ func (p *Project) maybeClaim(issue core.Issue, reopened bool) {
 	if issue.HasLabel(p.Labels.Claimed) && !reopened {
 		return
 	}
-	// A scheduled issue with a runAt marker waits for it; one without is a timer issue to run now.
-	var marker *runAtMarker
+	// A scheduled issue with a hold marker waits for it; one without is a timer issue to run now.
+	var marker *holdMarker
 	if issue.HasLabel(p.Labels.Scheduled) {
-		m, err := p.latestRunAt(issue.Key)
+		m, err := p.latestHold(issue.Key)
 		if err != nil {
-			p.logf("%s: couldn't read its runAt: %s", p.ref(issue.Key), logx.ErrText(err))
+			p.logf("%s: couldn't read its hold: %s", p.ref(issue.Key), logx.ErrText(err))
 			return
 		}
 		marker = m
 	}
-	if marker != nil && marker.at.After(time.Now()) {
+	if marker != nil && waiting(marker.hold) {
 		p.Store.Create(issue.Key, issue.Title, issue.URL, p.Agent.NewSession())
 		p.Store.Update(issue.Key, func(x *store.Record) {
-			at := marker.at
 			x.State = store.Scheduled
-			x.RunAt = &at
-			x.ScheduledBy = marker.commentID
+			setHold(x, marker.hold, marker.commentID)
 		})
-		p.logf("%s: scheduled for %s", p.ref(issue.Key), marker.at.Format(time.RFC3339))
+		p.logf("%s: held for %s", p.ref(issue.Key), marker.hold.Describe())
+		p.warnUnknown(marker.hold)
 		p.hub.changed()
+		if len(marker.hold.Conds) > 0 {
+			go p.checkWaits(issue.Key)
+		}
 		return
 	}
 	if len(p.Store.Active()) >= p.hub.settings().MaxOpen {
@@ -516,8 +524,8 @@ func (p *Project) maybeClaim(issue core.Issue, reopened bool) {
 		return
 	}
 	note := ""
-	if marker != nil {
-		note = fmt.Sprintf("This issue was scheduled to start at %s, and that time has come.", marker.at.Format(time.RFC3339))
+	if marker != nil && marker.hold.Until != nil {
+		note = fmt.Sprintf("This issue was scheduled to start at %s, and that time has come.", marker.hold.Until.Format(time.RFC3339))
 	}
 	p.claimLocked(issue, note)
 	if marker != nil {
@@ -624,136 +632,6 @@ func nonEmpty(xs []string) []string {
 	return out
 }
 
-// ---- scheduling -----------------------------------------------------------------------------------------
-
-type runAtMarker struct {
-	at        time.Time
-	commentID string // "" for the issue body
-}
-
-// latestRunAt is the latest runAt marker on an issue: its body, then its comments in order.
-func (p *Project) latestRunAt(key string) (*runAtMarker, error) {
-	ctx, cancel := ctxTimeout(time.Minute)
-	defer cancel()
-	issue, err := p.Tracker.Issue(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	var m *runAtMarker
-	if at, ok := core.RunAtIn(issue.Body); ok {
-		m = &runAtMarker{at: at}
-	}
-	comments, err := p.Tracker.Comments(ctx, key, time.Time{})
-	if err != nil {
-		return nil, err
-	}
-	for _, c := range comments {
-		if at, ok := core.RunAtIn(c.Body); ok {
-			m = &runAtMarker{at: at, commentID: c.ID}
-		}
-	}
-	return m, nil
-}
-
-// noteRunAt: a runAt marker in a new issue comment (the agent's or anyone's) holds the issue's next turn until
-// then.
-func (p *Project) noteRunAt(key, commentID, body string) {
-	at, ok := core.RunAtIn(body)
-	r := p.Store.Get(key)
-	if !ok || r == nil || commentID == r.ScheduledBy {
-		return
-	}
-	ahead := at.After(time.Now())
-	// A time already past on a waiting issue wakes it at the next check.
-	p.Store.Update(key, func(x *store.Record) {
-		if ahead || x.State == store.Scheduled {
-			t := at
-			x.RunAt = &t
-		}
-		x.ScheduledBy = commentID
-	})
-	if !ahead {
-		return
-	}
-	p.logf("%s: rescheduled for %s", p.ref(key), at.Format(time.RFC3339))
-	p.editLabels(key, []string{p.Labels.Scheduled}, nil)
-	// A running turn is moved to scheduled when it settles.
-	if r.State != store.Running && r.State != store.Manual {
-		p.holdUntilRunAt(key)
-	}
-}
-
-// holdUntilRunAt parks a tracked issue whose runAt is still ahead; status labels come off until it wakes.
-func (p *Project) holdUntilRunAt(key string) bool {
-	r := p.Store.Get(key)
-	if r == nil || r.RunAt == nil || !r.RunAt.After(time.Now()) {
-		return false
-	}
-	p.Store.Update(key, func(x *store.Record) { x.State = store.Scheduled })
-	p.setStatus(key, "")
-	p.hub.changed()
-	return true
-}
-
-// wakeDue wakes every scheduled issue whose time has come.
-func (p *Project) wakeDue() {
-	for _, r := range p.Store.All() {
-		if r.State != store.Scheduled || r.RunAt == nil || r.RunAt.After(time.Now()) {
-			continue
-		}
-		if r.Turns == 0 {
-			// Not started yet: the owner may have moved the time since it was read.
-			m, err := p.latestRunAt(r.Key)
-			if err != nil {
-				p.logf("%s: couldn't read its runAt: %s", p.ref(r.Key), logx.ErrText(err))
-				continue
-			}
-			if m != nil && m.at.After(time.Now()) {
-				p.Store.Update(r.Key, func(x *store.Record) {
-					at := m.at
-					x.RunAt = &at
-					x.ScheduledBy = m.commentID
-				})
-				continue
-			}
-		}
-		p.wake(r.Key)
-	}
-	p.hub.schedule()
-}
-
-// wake starts a scheduled issue's next turn now: its first, or the one it was rescheduled for.
-func (p *Project) wake(key string) {
-	r := p.Store.Get(key)
-	if r == nil || r.State != store.Scheduled {
-		return
-	}
-	at := time.Now().UTC()
-	if r.RunAt != nil {
-		at = *r.RunAt
-	}
-	first := r.Turns == 0
-	p.Store.Update(key, func(x *store.Record) {
-		x.State = store.Queued
-		x.RunAt = nil
-		if first {
-			x.ClaimedAt = time.Now().UTC()
-		}
-		text := fmt.Sprintf("It is now past %s, the time this issue was rescheduled for. Pick it up where you left off.", at.Format(time.RFC3339))
-		if first {
-			text = fmt.Sprintf("This issue was scheduled to start at %s, and that time has come.", at.Format(time.RFC3339))
-		}
-		x.Queue = append(x.Queue, core.Event{Type: core.EvNote, Text: text, At: time.Now().UTC()})
-	})
-	p.logf("%s: due (%s)", p.ref(key), at.Format(time.RFC3339))
-	if first {
-		p.editLabels(key, []string{p.Labels.Claimed}, []string{p.Labels.Scheduled})
-		p.transition(key, "claimed")
-	} else {
-		p.editLabels(key, nil, []string{p.Labels.Scheduled})
-	}
-}
-
 // RunNow runs a turn on a tracked issue now, with a note if nothing is queued. It also retries a failed one and
 // wakes a scheduled one.
 func (p *Project) RunNow(key string) {
@@ -763,7 +641,7 @@ func (p *Project) RunNow(key string) {
 	}
 	if r.State == store.Scheduled {
 		go func() {
-			p.wake(key)
+			p.endHold(key, "The owner asked for a turn now, before what the issue was waiting for. Check where it has got to and carry on, or wait again.", "owner", "")
 			p.hub.schedule()
 		}()
 		return
@@ -1185,6 +1063,10 @@ func (p *Project) settle(key string, events []core.Event, turn adapter.Turn) {
 	now := time.Now().UTC()
 	p.Store.Update(key, func(x *store.Record) {
 		x.State = store.State(s.State)
+		if s.State == core.Finished {
+			// Nothing is left to wait for.
+			x.RunAt, x.Waits, x.WaitSince = nil, nil, nil
+		}
 		x.Turns++
 		x.Attempts = 0
 		x.RetryAfter = nil
@@ -1230,13 +1112,14 @@ func (p *Project) settle(key string, events []core.Event, turn adapter.Turn) {
 			p.endTrial(key, done, "finished", string(s.State))
 		}
 	}
-	if s.State != core.Finished && p.holdUntilRunAt(key) {
-		if r := p.Store.Get(key); r != nil && r.RunAt != nil {
-			p.logf("%s: waiting until %s", p.ref(key), r.RunAt.Format(time.RFC3339))
+	if s.State != core.Finished && p.hold(key) {
+		if r := p.Store.Get(key); r != nil {
+			p.logf("%s: waiting for %s", p.ref(key), holdText(r))
 		}
 	} else {
 		p.applyState(key, s.State)
 	}
+	go p.hub.fact(core.Fact{Kind: core.CondIssue, Project: p.Name, Ref: key, On: string(s.State)})
 	p.hub.schedule()
 }
 
@@ -1546,6 +1429,7 @@ func (p *Project) maintain(ctx context.Context, openKeys map[string]bool, routed
 		}
 		p.readComments(ctx, fresh)
 		p.readFeedback(ctx, fresh)
+		p.checkWaits(r.Key)
 		if fresh.State != store.Finished && !fresh.IssueClosedReported && !openKeys[r.Key] && p.closed(ctx, r.Key) {
 			p.Store.Update(r.Key, func(x *store.Record) { x.IssueClosedReported = true })
 			p.enqueue(r.Key, core.Event{Type: core.EvIssue, Action: "closed", At: time.Now().UTC()})
@@ -1597,7 +1481,7 @@ func (p *Project) readComments(ctx context.Context, r *store.Record) {
 			continue
 		}
 		if c.Kind == core.OnIssue {
-			p.noteRunAt(r.Key, c.ID, c.Body)
+			p.noteHold(r.Key, c.ID, c.Body)
 		}
 		p.ingestOpt(r, c, false)
 	}

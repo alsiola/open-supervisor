@@ -229,6 +229,14 @@ func (s *Supervisor) settings() config.Settings { return s.Config().Settings }
 
 func (s *Supervisor) dataDir() string { return s.data }
 
+func (s *Supervisor) fact(f core.Fact) {
+	for _, p := range s.Projects() {
+		p.meet(f)
+	}
+}
+
+func (s *Supervisor) peer(name string) *Project { return s.Project(name) }
+
 func (s *Supervisor) changed() {
 	select {
 	case s.changes <- struct{}{}:

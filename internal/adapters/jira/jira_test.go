@@ -65,8 +65,14 @@ func TestRefs(t *testing.T) {
 	if tr.RefFor("PROJ-9") != "PROJ-9" {
 		t.Error("RefFor")
 	}
-	if m := tr.RunAtMarker(time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)); m != "[runAt: 2026-10-25T09:00Z]" {
+	at := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
+	if m := tr.HoldMarker(core.Hold{Until: &at}); m != "[runAt: 2026-10-25T09:00Z]" {
 		t.Errorf("marker %q", m)
+	}
+	// A wait survives the trip through Jira's wiki markup.
+	wait := core.Hold{Conds: []core.Cond{{Kind: core.CondPR, Ref: "12", On: "merged"}, {Kind: core.CondIssue, Project: "club", Ref: "PROJ-3", On: "review"}}, Until: &at}
+	if got, ok := core.HoldIn(ToMarkdown(ToWiki("Waiting.\n\n" + tr.HoldMarker(wait)))); !ok || got.Spec() != wait.Spec() {
+		t.Errorf("wait lost in the round trip: %+v %v", got, ok)
 	}
 	if _, err := (&Conn{}).Tracker(adapter.Values{"project": "not a key"}, adapter.ProjectInfo{}); err == nil {
 		t.Error("bad key accepted")

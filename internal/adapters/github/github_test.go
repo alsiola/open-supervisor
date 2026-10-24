@@ -145,8 +145,12 @@ func TestMarkers(t *testing.T) {
 	}
 	tr := &Tracker{binding: &binding{c: &conn{web: "https://github.com"}, repo: "octo/widgets"}}
 	at := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
-	if got, ok := core.RunAtIn(tr.RunAtMarker(at)); !ok || !got.Equal(at) {
+	if got, ok := core.RunAtIn(tr.HoldMarker(core.Hold{Until: &at})); !ok || !got.Equal(at) {
 		t.Errorf("runAt marker round trip: %v %v", got, ok)
+	}
+	wait := core.Hold{Conds: []core.Cond{{Kind: core.CondPR, Ref: "12", On: "merged"}}, Until: &at}
+	if got, ok := core.HoldIn("reason\n\n" + tr.HoldMarker(wait)); !ok || got.Spec() != wait.Spec() {
+		t.Errorf("waitFor marker round trip: %+v %v", got, ok)
 	}
 	if got := tr.RefsIn("Closes #12, fixes #3 and refs #12; see #99"); strings.Join(got, ",") != "12,3" {
 		t.Errorf("RefsIn = %v", got)
@@ -462,7 +466,7 @@ func TestAppTokens(t *testing.T) {
 }
 
 func TestOpenIssue(t *testing.T) {
-	var got map[string]string
+	var got map[string]any
 	tr, _ := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/repos/octo/widgets/issues" {
 			t.Errorf("%s %s", r.Method, r.URL.Path)
@@ -470,11 +474,11 @@ func TestOpenIssue(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&got)
 		fmt.Fprint(w, `{"number": 31, "title": "Skills call reply.sh", "html_url": "https://github.com/octo/widgets/issues/31", "state": "open"}`)
 	}))
-	issue, err := tr.OpenIssue(context.Background(), "Skills call reply.sh", "21 sessions")
+	issue, err := tr.OpenIssue(context.Background(), "Skills call reply.sh", "21 sessions", []string{"scheduled"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["title"] != "Skills call reply.sh" || got["body"] != "21 sessions" {
+	if got["title"] != "Skills call reply.sh" || got["body"] != "21 sessions" || fmt.Sprint(got["labels"]) != "[scheduled]" {
 		t.Errorf("sent %v", got)
 	}
 	if issue.Key != "31" || issue.URL != "https://github.com/octo/widgets/issues/31" || !issue.Open {

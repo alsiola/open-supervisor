@@ -104,8 +104,9 @@ type Tracker interface {
 	RefsIn(text string) []string
 	// RefFor is how a PR body should refer to the issue so the tracker links (and maybe closes) it.
 	RefFor(key string) string
-	// RunAtMarker is a runAt marker for the time, in the form this tracker's comments can carry.
-	RunAtMarker(t time.Time) string
+	// HoldMarker is a marker for the hold (see core.HoldIn), in the form this tracker's comments and bodies
+	// can carry: hidden where they can hide things.
+	HoldMarker(h core.Hold) string
 }
 
 // Label is one label the supervisor sets.
@@ -154,9 +155,10 @@ type ReactionReader interface {
 	Reactions(ctx context.Context, commentURL string) (map[string]int, error)
 }
 
-// IssueOpener is a tracker that can open issues, for the daily triage to file the causes it finds.
+// IssueOpener is a tracker that can open issues, for the daily triage to file the causes it finds and for agents
+// to open follow-up work. labels go on as the issue is opened, so it is never seen without them.
 type IssueOpener interface {
-	OpenIssue(ctx context.Context, title, body string) (core.Issue, error)
+	OpenIssue(ctx context.Context, title, body string, labels []string) (core.Issue, error)
 }
 
 // Transitioner is a tracker with workflow statuses of its own (Jira), moved as the agent's state changes.

@@ -68,16 +68,9 @@ func open(f *flags, needIssue bool) (*session, error) {
 	} else if spec = projectFromCwd(cfg); spec == nil {
 		return nil, errors.New("couldn't tell which project this is: run from its checkout or pass --project")
 	}
-	env := adapter.Env{
-		Log:     func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
-		Secret:  config.ResolveSecret,
-		DryRun:  cfg.Settings.DryRun,
-		DataDir: config.DataDir(),
-		HTTP:    &http.Client{Timeout: 60 * time.Second},
-	}
-	b, err := engine.Bind(cfg, spec, engine.OpenConnections(cfg, env), config.StateDir())
+	b, err := bind(cfg, spec)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", spec.Name, err)
+		return nil, err
 	}
 	s := &session{cfg: cfg, b: b, own: os.Getenv("OPEN_SUPERVISOR_ISSUE"), dryRun: cfg.Settings.DryRun}
 	if s.own == "" {
@@ -92,6 +85,22 @@ func open(f *flags, needIssue bool) (*session, error) {
 		return nil, errors.New("couldn't tell which issue this is: run in its session or on its branch, or pass --issue")
 	}
 	return s, nil
+}
+
+// bind opens a project's connections and binds them to it.
+func bind(cfg *config.Config, spec *config.Project) (*engine.Bound, error) {
+	env := adapter.Env{
+		Log:     func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
+		Secret:  config.ResolveSecret,
+		DryRun:  cfg.Settings.DryRun,
+		DataDir: config.DataDir(),
+		HTTP:    &http.Client{Timeout: 60 * time.Second},
+	}
+	b, err := engine.Bind(cfg, spec, engine.OpenConnections(cfg, env), config.StateDir())
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", spec.Name, err)
+	}
+	return b, nil
 }
 
 // projectFromCwd finds the project whose checkout (or one of whose issue worktrees) holds the current directory.
@@ -164,7 +173,7 @@ func Command() *cobra.Command {
 	f := &flags{}
 	root := &cobra.Command{
 		Use:   "agent",
-		Short: "Commands for agents working an issue (comments, PRs, worktrees, scheduling)",
+		Short: "Commands for agents working an issue (comments, PRs, worktrees, waiting)",
 		Long: "Commands an agent runs inside its session to act on the issue it works, whatever tracker and code host the project uses.\n" +
 			"In a session the supervisor started they need no flags; by hand, run them from the project's checkout or an issue worktree.",
 		SilenceUsage: true,
@@ -172,7 +181,7 @@ func Command() *cobra.Command {
 	root.PersistentFlags().StringVar(&f.config, "config", "", "config file (default $OPEN_SUPERVISOR_CONFIG or ~/.config/open-supervisor/config.yaml)")
 	root.PersistentFlags().StringVar(&f.project, "project", "", "project name (default $OPEN_SUPERVISOR_PROJECT or the current checkout's)")
 	root.PersistentFlags().StringVar(&f.issue, "issue", "", "issue key (default $OPEN_SUPERVISOR_ISSUE or the current branch's)")
-	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), worktreeCmd(f), scheduleCmd(f), correctionCmd(f), problemCmd(f), inflightCmd(f))
+	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), worktreeCmd(f), waitCmd(f), scheduleCmd(f), correctionCmd(f), problemCmd(f), inflightCmd(f))
 	return root
 }
 
@@ -315,12 +324,15 @@ func issueCmd(f *flags) *cobra.Command {
 			return nil
 		},
 	}
-	var title string
+	var title, until string
 	var upstream bool
+	var waits []string
 	create := &cobra.Command{
-		Use:   "create --title <title> <file|->",
-		Short: "Open an issue in the project's tracker (with --upstream, print a link that opens one on open-supervisor)",
-		Args:  cobra.ExactArgs(1),
+		Use:   "create --title <title> [--wait <condition>]... [--until <time>] <file|->",
+		Short: "Open an issue in the project's tracker; --wait and --until hold it until then (with --upstream, print a link that opens one on open-supervisor)",
+		Long: "Open an issue in the project's tracker. With --wait or --until it is held, not worked, until any one of the conditions is met or the time comes; " +
+			"see `agent wait --help` for the conditions.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if strings.TrimSpace(title) == "" {
 				return errors.New("--title is required")
@@ -341,21 +353,36 @@ func issueCmd(f *flags) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("%s can't open issues from here: report the cause instead", s.b.Tracker.Describe())
 			}
+			ctx, cancel := timeout()
+			defer cancel()
+			var labels []string
+			held := len(waits) > 0 || until != ""
+			var h core.Hold
+			if held {
+				if h, err = s.holdFor(ctx, waits, until); err != nil {
+					return err
+				}
+				body += "\n\n" + s.b.Tracker.HoldMarker(h)
+				labels = []string{s.cfg.LabelsFor(s.b.Spec).Scheduled}
+			}
 			if s.dryRun {
 				fmt.Fprintln(cmd.OutOrStdout(), "dry run: would open", title)
 				return nil
 			}
-			ctx, cancel := timeout()
-			defer cancel()
-			issue, err := opener.OpenIssue(ctx, title, body)
+			issue, err := opener.OpenIssue(ctx, title, body, labels)
 			if err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", issue.Key, issue.URL)
+			if held {
+				fmt.Fprintf(cmd.OutOrStdout(), "held: it starts once %s\n", h.Describe())
+			}
 			return nil
 		},
 	}
 	create.Flags().StringVar(&title, "title", "", "the issue's title")
+	create.Flags().StringArrayVar(&waits, "wait", nil, "hold the issue until this happens (repeat for any of several)")
+	create.Flags().StringVar(&until, "until", "", "hold the issue until this time (an ISO instant), or at most until then with --wait")
 	create.Flags().BoolVar(&upstream, "upstream", false, "the cause is in open-supervisor itself: print a link that opens the issue there")
 	cmd.AddCommand(view, comment, list, create)
 	return cmd
@@ -697,45 +724,6 @@ func worktreeCmd(f *flags) *cobra.Command {
 	remove.Flags().BoolVar(&force, "force", false, "remove it even while a PR is open")
 	cmd.AddCommand(setup, remove)
 	return cmd
-}
-
-func scheduleCmd(f *flags) *cobra.Command {
-	return &cobra.Command{
-		Use:   "schedule <time> <file|->",
-		Short: "Park the issue until a time: posts the reason with a runAt marker",
-		Long:  "Park the issue until a time (an ISO instant with Z or an offset, e.g. 2026-10-25T09:00Z). The comment says when you'll pick it up and why; the supervisor resumes your session then.",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			s, err := open(f, true)
-			if err != nil {
-				return err
-			}
-			at, err := core.ParseTime(args[0])
-			if err != nil {
-				return fmt.Errorf("%q isn't a time: use an ISO instant like 2026-10-25T09:00Z", args[0])
-			}
-			if !at.After(time.Now()) {
-				return fmt.Errorf("%s is already past", at.Format(time.RFC3339))
-			}
-			reason, err := readBody(args[1])
-			if err != nil {
-				return err
-			}
-			body := reason + "\n\n" + s.b.Tracker.RunAtMarker(at)
-			if s.dryRun {
-				fmt.Fprintln(cmd.OutOrStdout(), "dry run: would schedule for", at.Format(time.RFC3339))
-				return nil
-			}
-			ctx, cancel := timeout()
-			defer cancel()
-			url, err := s.b.Tracker.Comment(ctx, s.key, body, s.mark())
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "scheduled for %s: %s\n", at.Format(time.RFC3339), url)
-			return nil
-		},
-	}
 }
 
 func correctionCmd(f *flags) *cobra.Command {

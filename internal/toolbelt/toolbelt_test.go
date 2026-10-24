@@ -1,9 +1,13 @@
 package toolbelt
 
 import (
+	"context"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/alsiola/open-supervisor/internal/config"
+	"github.com/alsiola/open-supervisor/internal/engine"
 )
 
 func TestUpstreamIssueURL(t *testing.T) {
@@ -32,5 +36,30 @@ func TestProblemNeedsAKind(t *testing.T) {
 	cmd.SetErr(new(strings.Builder))
 	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--kind must be one of") {
 		t.Fatalf("err: %v", err)
+	}
+}
+
+func TestHoldForChecksBeforeAnyCall(t *testing.T) {
+	s := &session{b: &engine.Bound{Spec: &config.Project{Name: "web"}}, cfg: config.New("")}
+	ctx := context.Background()
+	for _, c := range []struct {
+		conds []string
+		until string
+		want  string
+	}{
+		{nil, "", "say what to wait for"},
+		{nil, "2020-01-01T00:00Z", "already past"},
+		{nil, "soon", "isn't a time"},
+		{[]string{"pr:abc"}, "", "isn't a PR number"},
+		{[]string{"job:backup:ok"}, "", "next run to end"},
+		{[]string{"pr:club/12"}, "", "no project here is called club"},
+	} {
+		if _, err := s.holdFor(ctx, c.conds, c.until); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%v %q: got %v, want %q", c.conds, c.until, err, c.want)
+		}
+	}
+	h, err := s.holdFor(ctx, nil, "2099-01-01T09:00Z")
+	if err != nil || h.Until == nil || len(h.Conds) != 0 {
+		t.Errorf("a time alone: %+v %v", h, err)
 	}
 }
