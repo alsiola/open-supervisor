@@ -53,7 +53,7 @@ func readOut(file string) string {
 func TestJobRunsOnEvent(t *testing.T) {
 	_, p := setup(t, nil)
 	out := filepath.Join(t.TempDir(), "out")
-	p.Jobs.Specs = []config.Job{envJob("deploy", out, config.JobTrigger{Events: []string{"push"}, Branches: []string{"main"}})}
+	p.Jobs.SetSpecs([]config.Job{envJob("deploy", out, config.JobTrigger{Events: []string{"push"}, Branches: []string{"main"}})})
 	if got := p.Jobs.Events(); len(got) != 1 || got[0] != "push" {
 		t.Errorf("Events = %v", got)
 	}
@@ -70,7 +70,7 @@ func TestJobDeliveryWhileRunningRunsAgain(t *testing.T) {
 	dir := t.TempDir()
 	out, gate := filepath.Join(dir, "out"), filepath.Join(dir, "gate")
 	job := config.Job{Name: "slow", Command: []string{"sh", "-c", `while [ ! -f ` + gate + ` ]; do sleep 0.02; done; cat "$OPEN_SUPERVISOR_EVENT_FILE" >> ` + out}, On: &config.JobTrigger{Webhook: true}}
-	p.Jobs.Specs = []config.Job{job}
+	p.Jobs.SetSpecs([]config.Job{job})
 	p.Jobs.Trigger(job, core.HookEvent{Name: "webhook", Body: []byte("1")})
 	waitFor(t, "the first run", func() bool { p.Jobs.mu.Lock(); defer p.Jobs.mu.Unlock(); return p.Jobs.busy["slow"] })
 	p.Jobs.Trigger(job, core.HookEvent{Name: "webhook", Body: []byte("2")})
@@ -85,7 +85,7 @@ func TestJobWebhookURL(t *testing.T) {
 	s, p := setup(t, nil)
 	s.secret = "s3cret"
 	out := filepath.Join(t.TempDir(), "out")
-	p.Jobs.Specs = []config.Job{envJob("hook", out, config.JobTrigger{Webhook: true}), {Name: "plain", Command: []string{"true"}}}
+	p.Jobs.SetSpecs([]config.Job{envJob("hook", out, config.JobTrigger{Webhook: true}), {Name: "plain", Command: []string{"true"}}})
 	srv := httptest.NewServer(s.handler())
 	defer srv.Close()
 	s.mu.Lock()
@@ -191,7 +191,7 @@ func TestPathsMatch(t *testing.T) {
 func TestJobPathsFilterPushes(t *testing.T) {
 	_, p := setup(t, nil)
 	out := filepath.Join(t.TempDir(), "out")
-	p.Jobs.Specs = []config.Job{envJob("post", out, config.JobTrigger{Events: []string{"push"}, Branches: []string{"main"}, Paths: []string{"data/reels/*.json", "!data/reels/posted.json"}})}
+	p.Jobs.SetSpecs([]config.Job{envJob("post", out, config.JobTrigger{Events: []string{"push"}, Branches: []string{"main"}, Paths: []string{"data/reels/*.json", "!data/reels/posted.json"}})})
 	p.Jobs.OnEvent(core.HookEvent{Name: "push", Ref: "refs/heads/main", After: "bbb", Files: []string{"data/reels/posted.json"}, Body: []byte(`1`)})
 	p.Jobs.OnEvent(core.HookEvent{Name: "push", Ref: "refs/heads/main", After: "ccc", Files: []string{"data/reels/new.json"}, Body: []byte(`2`)})
 	waitFor(t, "the job", func() bool { return strings.Contains(readOut(out), "\n") })
@@ -215,7 +215,7 @@ func TestJobTimerRunWaitsForTheOneGoing(t *testing.T) {
 	out, gate := filepath.Join(dir, "out"), filepath.Join(dir, "gate")
 	job := gated("post", gate, out)
 	job.On = &config.JobTrigger{Webhook: true}
-	p.Jobs.Specs = []config.Job{job}
+	p.Jobs.SetSpecs([]config.Job{job})
 	p.Jobs.request(job, &jobReq{trigger: "cron 1"})
 	waitFor(t, "the first run", func() bool { _, ok := p.Jobs.Current("post"); return ok })
 	p.Jobs.request(job, &jobReq{trigger: "cron 2"})
@@ -243,7 +243,7 @@ func TestJobTimerRunWaitsForTheOneGoing(t *testing.T) {
 func TestJobRunsAreKept(t *testing.T) {
 	_, p := setup(t, nil)
 	job := config.Job{Name: "check", Command: []string{"sh", "-c", `echo "run $N"; exit $N`}, KeepRuns: 2}
-	p.Jobs.Specs = []config.Job{job}
+	p.Jobs.SetSpecs([]config.Job{job})
 	for _, n := range []string{"0", "3", "0"} {
 		p.Jobs.execute(job, &jobReq{trigger: "by hand", extra: []string{"N=" + n}})
 	}
@@ -274,7 +274,7 @@ func TestJobTimesOut(t *testing.T) {
 	defer func(m time.Duration) { jobMinute = m }(jobMinute)
 	jobMinute = 200 * time.Millisecond
 	job := config.Job{Name: "slow", Command: []string{"sh", "-c", "echo started; sleep 30 & wait"}, TimeoutMinutes: 1}
-	p.Jobs.Specs = []config.Job{job}
+	p.Jobs.SetSpecs([]config.Job{job})
 	began := time.Now()
 	p.Jobs.execute(job, &jobReq{trigger: "by hand"})
 	if took := time.Since(began); took > 5*time.Second {
@@ -307,7 +307,7 @@ func TestJobFreshCheckout(t *testing.T) {
 	p.Spec.Worktree = config.Worktree{Copy: []string{".env"}, Setup: "echo set up > setup.txt"}
 	out := filepath.Join(t.TempDir(), "out")
 	job := config.Job{Name: "post reels", Checkout: "fresh", Command: []string{"sh", "-c", `pwd >> ` + out + `; cat .env setup.txt >> ` + out + `; echo "$OPEN_SUPERVISOR_BASE_BRANCH" >> ` + out + `; exit $CODE`}}
-	p.Jobs.Specs = []config.Job{job}
+	p.Jobs.SetSpecs([]config.Job{job})
 
 	p.Jobs.execute(job, &jobReq{trigger: "by hand", extra: []string{"CODE=0"}})
 	run, _ := p.Jobs.lastRun(job.Name)
@@ -360,7 +360,7 @@ func TestJobCatchesUpTheMainCheckout(t *testing.T) {
 	gitIn(t, other, "commit", "-qam", "two")
 	gitIn(t, other, "push", "-q", "origin", "main")
 	job := config.Job{Name: "check", Command: []string{"cat", "a.txt"}}
-	p.Jobs.Specs = []config.Job{job}
+	p.Jobs.SetSpecs([]config.Job{job})
 
 	// While another job runs in the checkout, it is only counted.
 	p.Jobs.mu.Lock()
@@ -391,7 +391,7 @@ func TestJobCatchesUpTheMainCheckout(t *testing.T) {
 func TestCronJobRunsAndIsWaitedFor(t *testing.T) {
 	_, p := setup(t, nil)
 	job := config.Job{Name: "open issue", Cron: "* * * * *", TimeZone: "Europe/London", Command: []string{"sh", "-c", "echo opened"}}
-	p.Jobs.Specs = []config.Job{job}
+	p.Jobs.SetSpecs([]config.Job{job})
 	p.Jobs.runIfDue(job) // the first time it sees the job, it waits for the next slot
 	if _, ok := p.Jobs.lastRun(job.Name); ok {
 		t.Fatal("ran a slot on first sight")
@@ -418,7 +418,7 @@ func TestDetachedJobIsRecorded(t *testing.T) {
 	status := filepath.Join(t.TempDir(), "status")
 	_ = os.MkdirAll(status, 0o755)
 	job := config.Job{Name: "refresh", At: []string{"05:17"}, Status: status, Command: []string{"sh", "-c", `echo refreshing; printf '{"slot":"x","outcome":"done","finishedAt":"2026-10-21T05:30:00Z"}' > ` + filepath.Join(status, "last.json")}}
-	p.Jobs.Specs = []config.Job{job}
+	p.Jobs.SetSpecs([]config.Job{job})
 	p.Jobs.RunNow(job)
 	waitFor(t, "the run to end", func() bool {
 		p.Jobs.followDetached(job)
@@ -444,5 +444,50 @@ func TestJobEnvResolvesSecrets(t *testing.T) {
 	r, _ := p.Jobs.lastRun("env")
 	if data, _ := os.ReadFile(r.Log); string(data) != "t0ken https://example.com env\n" {
 		t.Errorf("log = %q", data)
+	}
+}
+
+func TestJobsReloadFromRepoFile(t *testing.T) {
+	was := jobsCheck
+	jobsCheck = 20 * time.Millisecond
+	t.Cleanup(func() { jobsCheck = was })
+	_, p := setup(t, nil, func(s *config.Settings) { s.Jobs = true })
+	if len(p.Jobs.Specs()) != 0 {
+		t.Fatalf("Specs = %v", p.Jobs.Specs())
+	}
+	out := filepath.Join(t.TempDir(), "out")
+	write := func(yaml string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(p.Root, RepoFile), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	timers := func() int {
+		p.Jobs.timerMu.Lock()
+		defer p.Jobs.timerMu.Unlock()
+		return len(p.Jobs.timers)
+	}
+	// Added after the start: the check picks it up and it runs without a restart.
+	write("jobs:\n  - name: tick\n    everyMinutes: 60\n    command: [sh, -c, 'echo tick >> " + out + "']\n")
+	waitFor(t, "tick to load", func() bool { _, ok := p.Jobs.Find("tick"); return ok })
+	waitFor(t, "tick to run", func() bool { return strings.Count(readOut(out), "tick") == 1 })
+	if timers() != 1 {
+		t.Errorf("timers = %d", timers())
+	}
+	// A job added beside it leaves its timer be: tick doesn't run again.
+	write("jobs:\n  - name: tick\n    everyMinutes: 60\n    command: [sh, -c, 'echo tick >> " + out + "']\n  - name: hooked\n    command: [\"true\"]\n    on:\n      events: [push]\n")
+	p.Jobs.refresh()
+	if got := p.Jobs.Events(); len(got) != 1 || got[0] != "push" {
+		t.Errorf("Events = %v", got)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := strings.Count(readOut(out), "tick"); n != 1 {
+		t.Errorf("tick ran %d times", n)
+	}
+	// Taken out: its timer stops.
+	write("jobs: []\n")
+	p.Jobs.refresh()
+	if len(p.Jobs.Specs()) != 0 || timers() != 0 {
+		t.Errorf("Specs = %v, timers = %d", p.Jobs.Specs(), timers())
 	}
 }

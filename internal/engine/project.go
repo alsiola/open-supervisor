@@ -43,6 +43,9 @@ type hub interface {
 	// limit holds every turn on an agent until a time, after one hit the subscription's usage limit; a zero time
 	// lifts the hold.
 	limit(agent string, until time.Time)
+	// jobsChanged rebuilds the hooks after the events or webhooks a project's jobs take changed, and points the
+	// project's again.
+	jobsChanged(p *Project)
 }
 
 // Project is one project under the supervisor: it claims the issues its source routes to it, gives each a

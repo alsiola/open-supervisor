@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,12 +11,14 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -36,6 +39,10 @@ const catchUp = 6 * time.Hour
 
 // jobMinute is a minute of a job's timeout; tests shorten it.
 var jobMinute = time.Minute
+
+// jobsCheck is how often the checkout's RepoFile is read again for jobs added, changed or taken out; tests
+// shorten it.
+var jobsCheck = time.Minute
 
 // keepFailed is how long a failed run's fresh checkout is kept to look at.
 const keepFailed = 24 * time.Hour
@@ -68,10 +75,18 @@ type jobReq struct {
 // Jobs are a project's own jobs (see config.Job): runs the supervisor waits for, one at a time per job with at
 // most one more waiting, and long timed runs it starts detached and follows through their status files.
 type Jobs struct {
-	Specs []config.Job
+	specs atomic.Pointer[[]config.Job]
 
-	p      *Project
-	cancel context.CancelFunc
+	p *Project
+
+	// timerMu guards ctx, cancel and timers: start, stop and refresh.
+	timerMu sync.Mutex
+	ctx     context.Context
+	cancel  context.CancelFunc
+	// timers are the jobs whose timers run, each as it was started and with what stops it.
+	timers map[string]jobTimer
+	// repoData is the checkout's RepoFile as last read, so a check reads it again only when it changed.
+	repoData []byte
 
 	// syncMu keeps two runs from catching the main checkout up at once.
 	syncMu sync.Mutex
@@ -87,24 +102,61 @@ type Jobs struct {
 	detached map[string]*JobRun
 }
 
+// jobTimer is a job's timer: the job as it was started, and what stops it.
+type jobTimer struct {
+	job  config.Job
+	stop context.CancelFunc
+}
+
 // loadJobs is the project's jobs: those in the config, then those in its checkout's .open-supervisor.yaml. A
 // job from the checkout that isn't right is logged and left out.
 func loadJobs(p *Project) *Jobs {
-	specs := jobSpecs(p.Spec, p.Root, p.logf)
-	j := &Jobs{Specs: specs, p: p, busy: map[string]bool{}, pending: map[string]*jobReq{}, current: map[string]JobRun{},
+	data := readRepoFile(p.Root)
+	specs := parseSpecs(p.Spec, data, p.logf)
+	j := &Jobs{p: p, repoData: data, timers: map[string]jobTimer{}, busy: map[string]bool{}, pending: map[string]*jobReq{}, current: map[string]JobRun{},
 		done: map[string]JobRun{}, running: map[string]JobRunning{}, last: map[string]JobResult{}, detached: map[string]*JobRun{}}
+	j.SetSpecs(specs)
 	for _, job := range specs {
-		if r, ok := j.lastRun(job.Name); ok && r.EndedAt != nil {
-			j.done[job.Name] = r
-		}
+		j.loadDone(job)
 	}
 	return j
 }
 
+// Specs are the project's jobs as last read.
+func (j *Jobs) Specs() []config.Job {
+	if s := j.specs.Load(); s != nil {
+		return *s
+	}
+	return nil
+}
+
+// SetSpecs replaces the jobs, without starting or stopping their timers (see refresh).
+func (j *Jobs) SetSpecs(specs []config.Job) { j.specs.Store(&specs) }
+
+// loadDone takes the job's last ended run from its records.
+func (j *Jobs) loadDone(job config.Job) {
+	if r, ok := j.lastRun(job.Name); ok && r.EndedAt != nil {
+		j.mu.Lock()
+		j.done[job.Name] = r
+		j.mu.Unlock()
+	}
+}
+
 // jobSpecs are a project's jobs, from the config and its checkout's RepoFile; logf hears what is left out.
 func jobSpecs(spec *config.Project, root string, logf func(string, ...any)) []config.Job {
+	return parseSpecs(spec, readRepoFile(root), logf)
+}
+
+// readRepoFile is the checkout's RepoFile, nil when it has none.
+func readRepoFile(root string) []byte {
+	data, _ := os.ReadFile(filepath.Join(root, RepoFile))
+	return data
+}
+
+// parseSpecs are the jobs in the config, then those in data, the checkout's RepoFile.
+func parseSpecs(spec *config.Project, data []byte, logf func(string, ...any)) []config.Job {
 	specs := append([]config.Job(nil), spec.Jobs...)
-	if data, err := os.ReadFile(filepath.Join(root, RepoFile)); err == nil {
+	if data != nil {
 		var own struct {
 			Jobs []config.Job `yaml:"jobs"`
 		}
@@ -157,11 +209,43 @@ func (j *Jobs) Current(name string) (JobRun, bool) {
 
 func (j *Jobs) start() {
 	s := j.p.hub.settings()
-	if !s.Jobs || s.DryRun || len(j.Specs) == 0 {
+	if !s.Jobs || s.DryRun {
 		return
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	j.cancel = cancel
+	j.timerMu.Lock()
+	j.ctx, j.cancel = context.WithCancel(context.Background())
+	if j.timers == nil {
+		j.timers = map[string]jobTimer{}
+	}
+	for _, job := range j.Specs() {
+		j.startTimer(job)
+	}
+	ctx, check := j.ctx, jobsCheck
+	j.timerMu.Unlock()
+	// A job added to the checkout's RepoFile (a merge pulled in, a fast-forward before a run) starts without a
+	// restart.
+	go func() {
+		t := time.NewTicker(check)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				j.refresh()
+			}
+		}
+	}()
+}
+
+// startTimer starts what runs the job on its own: its every-n-minutes ticker, or the minute check of a timed
+// job. A job that runs only on events or by hand has none. Called with timerMu held.
+func (j *Jobs) startTimer(job config.Job) {
+	if job.EveryMinutes <= 0 && !job.Timed() {
+		return
+	}
+	ctx, cancel := context.WithCancel(j.ctx)
+	j.timers[job.Name] = jobTimer{job: job, stop: cancel}
 	every := func(d time.Duration, f func()) {
 		go func() {
 			f()
@@ -177,35 +261,127 @@ func (j *Jobs) start() {
 			}
 		}()
 	}
-	for _, job := range j.Specs {
-		job := job
-		switch {
-		case job.EveryMinutes > 0:
-			trigger := fmt.Sprintf("every %dm", job.EveryMinutes)
-			every(time.Duration(job.EveryMinutes)*time.Minute, func() { j.request(job, &jobReq{trigger: trigger}) })
-		case job.Timed():
-			if job.Detached() {
-				if r, ok := j.readRunning(job); ok {
-					j.mu.Lock()
-					j.running[job.Name] = r
-					j.mu.Unlock()
-					j.p.logf("%s: the %s run is going (pid %d)", job.Name, r.Slot, r.PID)
-				}
-				if last, ok := j.readLast(job); ok {
-					j.mu.Lock()
-					j.last[job.Name] = last
-					j.mu.Unlock()
-				}
+	switch {
+	case job.EveryMinutes > 0:
+		trigger := fmt.Sprintf("every %dm", job.EveryMinutes)
+		every(time.Duration(job.EveryMinutes)*time.Minute, func() { j.request(job, &jobReq{trigger: trigger}) })
+	case job.Timed():
+		if job.Detached() {
+			if r, ok := j.readRunning(job); ok {
+				j.mu.Lock()
+				j.running[job.Name] = r
+				j.mu.Unlock()
+				j.p.logf("%s: the %s run is going (pid %d)", job.Name, r.Slot, r.PID)
 			}
-			every(time.Minute, func() { j.runIfDue(job) })
+			if last, ok := j.readLast(job); ok {
+				j.mu.Lock()
+				j.last[job.Name] = last
+				j.mu.Unlock()
+			}
 		}
+		every(time.Minute, func() { j.runIfDue(job) })
 	}
 }
 
 func (j *Jobs) stop() {
+	j.timerMu.Lock()
+	defer j.timerMu.Unlock()
 	if j.cancel != nil {
 		j.cancel()
 	}
+}
+
+// refresh reads the jobs again when the checkout's RepoFile changed, and starts the timers of jobs
+// added or changed and stops those of jobs changed or taken out; the rest run on undisturbed. A run going
+// carries on. When the events or webhooks the jobs take change, the project's hooks are pointed again.
+func (j *Jobs) refresh() {
+	j.timerMu.Lock()
+	if j.ctx == nil || j.ctx.Err() != nil {
+		j.timerMu.Unlock()
+		return
+	}
+	data := readRepoFile(j.p.Root)
+	if bytes.Equal(data, j.repoData) {
+		j.timerMu.Unlock()
+		return
+	}
+	j.repoData = data
+	old := j.Specs()
+	specs := parseSpecs(j.p.Spec, data, j.p.logf)
+	if reflect.DeepEqual(old, specs) {
+		j.timerMu.Unlock()
+		return
+	}
+	was := map[string]config.Job{}
+	for _, job := range old {
+		was[job.Name] = job
+	}
+	now := map[string]config.Job{}
+	var added, changed, removed []string
+	for _, job := range specs {
+		now[job.Name] = job
+		if prev, ok := was[job.Name]; !ok {
+			added = append(added, job.Name)
+		} else if !reflect.DeepEqual(prev, job) {
+			changed = append(changed, job.Name)
+		}
+	}
+	for _, job := range old {
+		if _, ok := now[job.Name]; !ok {
+			removed = append(removed, job.Name)
+		}
+	}
+	hooksBefore := hookShape(j)
+	j.SetSpecs(specs)
+	for name, t := range j.timers {
+		if job, ok := now[name]; !ok || !reflect.DeepEqual(job, t.job) {
+			t.stop()
+			delete(j.timers, name)
+		}
+	}
+	for _, name := range removed {
+		// A detached run of a job taken out is no longer followed, so it mustn't hold the checkout.
+		j.mu.Lock()
+		delete(j.running, name)
+		j.mu.Unlock()
+	}
+	for _, job := range specs {
+		if _, ok := was[job.Name]; !ok {
+			j.loadDone(job)
+		}
+		if _, ok := j.timers[job.Name]; !ok {
+			j.startTimer(job)
+		}
+	}
+	rehook := hookShape(j) != hooksBefore
+	j.timerMu.Unlock()
+	var parts []string
+	for _, p := range []struct {
+		what  string
+		names []string
+	}{{"added", added}, {"changed", changed}, {"taken out", removed}} {
+		if len(p.names) > 0 {
+			parts = append(parts, p.what+" "+strings.Join(p.names, ", "))
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "reordered")
+	}
+	j.p.logf("jobs reloaded from %s: %s", RepoFile, strings.Join(parts, "; "))
+	if rehook {
+		j.p.hub.jobsChanged(j.p)
+	}
+	j.p.hub.changed()
+}
+
+// hookShape is what the project's hooks are built from: the events its jobs run on and the jobs that take
+// webhooks.
+func hookShape(j *Jobs) string {
+	var hooked []string
+	for _, job := range j.Webhooked() {
+		hooked = append(hooked, job.Name)
+	}
+	return strings.Join(j.Events(), ",") + "|" + strings.Join(hooked, ",")
 }
 
 // RunNow runs a job now, whatever the time.
@@ -229,7 +405,7 @@ func (j *Jobs) env(job config.Job, run *JobRun, extra []string) []string {
 // Events are the event names the jobs run on, without their actions: what the project's hooks subscribe to.
 func (j *Jobs) Events() []string {
 	var out []string
-	for _, job := range j.Specs {
+	for _, job := range j.Specs() {
 		if job.On == nil {
 			continue
 		}
@@ -246,7 +422,7 @@ func (j *Jobs) Events() []string {
 // Webhooked are the jobs that take deliveries at their own URL.
 func (j *Jobs) Webhooked() []config.Job {
 	var out []config.Job
-	for _, job := range j.Specs {
+	for _, job := range j.Specs() {
 		if job.On != nil && job.On.Webhook {
 			out = append(out, job)
 		}
@@ -256,7 +432,7 @@ func (j *Jobs) Webhooked() []config.Job {
 
 // Find is the job with the name.
 func (j *Jobs) Find(name string) (config.Job, bool) {
-	for _, job := range j.Specs {
+	for _, job := range j.Specs() {
 		if job.Name == name {
 			return job, true
 		}
@@ -301,7 +477,7 @@ func matches(job config.Job, ev core.HookEvent) bool {
 func (j *Jobs) OnEvent(ev core.HookEvent) {
 	var files []string
 	known, looked := false, false
-	for _, job := range j.Specs {
+	for _, job := range j.Specs() {
 		if !matches(job, ev) {
 			continue
 		}
@@ -616,6 +792,8 @@ func (j *Jobs) catchUp(job config.Job, run *JobRun, out io.Writer) {
 	switch {
 	case got.Updated > 0:
 		fmt.Fprintf(out, "open-supervisor: fast-forwarded the checkout %d commit(s) to %s/%s\n", got.Updated, spec.Remote, base)
+		// The fast-forward may have brought jobs in.
+		go j.refresh()
 	case got.Behind > 0:
 		fmt.Fprintf(out, "open-supervisor: running %d commit(s) behind %s/%s: %s\n", got.Behind, spec.Remote, base, got.Stale)
 		j.p.logf("%s: running %d commit(s) behind %s/%s: %s", job.Name, got.Behind, spec.Remote, base, got.Stale)

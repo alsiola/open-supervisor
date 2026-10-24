@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -235,6 +236,20 @@ func (s *Supervisor) fact(f core.Fact) {
 	for _, p := range s.Projects() {
 		p.meet(f)
 	}
+}
+
+func (s *Supervisor) jobsChanged(p *Project) {
+	s.mu.Lock()
+	hooks := buildHooks(s.sources, s.projects)
+	carryHooks(s.hooks, hooks)
+	s.hooks = hooks
+	base := s.hookURL
+	s.mu.Unlock()
+	if base == "" {
+		return
+	}
+	s.pointHooks(base, func(g *hookGroup) bool { return slices.Contains(g.jobProjects(), p) })
+	s.announceJobHooks(p)
 }
 
 func (s *Supervisor) peer(name string) *Project { return s.Project(name) }

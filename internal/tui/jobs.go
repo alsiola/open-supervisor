@@ -25,7 +25,7 @@ const runOutputLines = 5000
 func (m *model) jobsPicker() *picker {
 	var items []pickItem
 	for _, p := range m.sup.Projects() {
-		for _, j := range p.Jobs.Specs {
+		for _, j := range p.Jobs.Specs() {
 			items = append(items, pickItem{label: p.Name + " " + j.Name, value: p.Jobs.Describe(j), ref: jobRun{p: p, job: j.Name}})
 		}
 	}
@@ -51,7 +51,7 @@ func (m *model) jobsPicker() *picker {
 func (m *model) runPicker() *picker {
 	var items []pickItem
 	for _, p := range m.sup.Projects() {
-		for _, j := range p.Jobs.Specs {
+		for _, j := range p.Jobs.Specs() {
 			items = append(items, pickItem{label: p.Name + " " + j.Name, value: p.Jobs.Describe(j), ref: jobRun{p: p, job: j.Name}})
 		}
 	}
