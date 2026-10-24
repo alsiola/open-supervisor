@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.1.0](https://github.com/alsiola/open-supervisor/compare/v1.0.1...v1.1.0) (2026-10-24)
+
+### Features
+
+* **engine:** ask the same blind feedback question after both arms of the handoff experiment ([#26](https://github.com/alsiola/open-supervisor/issues/26)) ([8abdffa](https://github.com/alsiola/open-supervisor/commit/8abdffaa843fb04e2aedc2e1de867701b1837578))
+* **engine:** retry a turn the usage limit stopped once the limit lifts ([#33](https://github.com/alsiola/open-supervisor/issues/33)) ([8923d2f](https://github.com/alsiola/open-supervisor/commit/8923d2f97e6562d080ce0d46fa918d358191c797))
+* **engine:** wake agents on events with agent wait ([#28](https://github.com/alsiola/open-supervisor/issues/28)) ([f527dcb](https://github.com/alsiola/open-supervisor/commit/f527dcbca325b75cecf6c7cd2922f30dcd5fa4d5))
+* **playbooks:** keep agents from commenting on each other's issues without cause ([#45](https://github.com/alsiola/open-supervisor/issues/45)) ([811806d](https://github.com/alsiola/open-supervisor/commit/811806d41e9b6cbb36a0ce0b33344e8e3066aaff))
+* **toolbelt:** add agent attachment to upload and download comment files ([#47](https://github.com/alsiola/open-supervisor/issues/47)) ([c90662a](https://github.com/alsiola/open-supervisor/commit/c90662a9d916bfa6fe3b701f65037cb94e662a7c)), closes [#39](https://github.com/alsiola/open-supervisor/issues/39)
+* **triage:** file open-supervisor causes on its tracker when it is watched ([#36](https://github.com/alsiola/open-supervisor/issues/36)) ([f34e750](https://github.com/alsiola/open-supervisor/commit/f34e750044a0d737b9bc8ce20ef95d99eba71691))
+
+### Bug Fixes
+
+* **engine:** hold an issue on a runAt marker in its body without the scheduled label ([#31](https://github.com/alsiola/open-supervisor/issues/31)) ([8bf7c69](https://github.com/alsiola/open-supervisor/commit/8bf7c69a7e0c38601c120e3385d95581e35a5d71))
+* **engine:** pass on other agents' comments and end dropped issues' trials ([#20](https://github.com/alsiola/open-supervisor/issues/20)) ([b1b8021](https://github.com/alsiola/open-supervisor/commit/b1b80210199a1b670b4d65422b496cdc25f1ad0b))
+* **engine:** re-copy a worktree's listed files before every turn ([#49](https://github.com/alsiola/open-supervisor/issues/49)) ([c5ec9f2](https://github.com/alsiola/open-supervisor/commit/c5ec9f29165cf1ca58b4cbe07e16ca01265c362a))
+* **engine:** take the status label off while a turn runs ([#24](https://github.com/alsiola/open-supervisor/issues/24)) ([f532b44](https://github.com/alsiola/open-supervisor/commit/f532b4422e0f32cbc0de1e998625319ed57c10c9))
+* **github:** find an issue's PRs from its timeline, not the search API ([#46](https://github.com/alsiola/open-supervisor/issues/46)) ([6b706ec](https://github.com/alsiola/open-supervisor/commit/6b706ec209a604d0da2a172b3178397e8ddcec9f))
+* **jobs:** fast-forward the main checkout before a job runs in it ([#22](https://github.com/alsiola/open-supervisor/issues/22)) ([5584bf8](https://github.com/alsiola/open-supervisor/commit/5584bf8f79f728fc1bfbf0c7b0bd572b674b60d2)), closes [#21](https://github.com/alsiola/open-supervisor/issues/21)
+* **jobs:** load jobs added to a project's .open-supervisor.yaml without a restart ([#48](https://github.com/alsiola/open-supervisor/issues/48)) ([b695804](https://github.com/alsiola/open-supervisor/commit/b6958046415ed2f0407112818e190085856b5231)), closes [#37](https://github.com/alsiola/open-supervisor/issues/37)
+* **worktree:** stop processes whose working directory is in a removed worktree ([#43](https://github.com/alsiola/open-supervisor/issues/43)) ([a1b5617](https://github.com/alsiola/open-supervisor/commit/a1b5617f7558ad776d43d07ff2b55d71f089a740))
+
 ## [1.0.1](https://github.com/alsiola/open-supervisor/compare/v1.0.0...v1.0.1) (2026-10-22)
 
 ### Bug Fixes
