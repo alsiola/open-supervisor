@@ -7,7 +7,7 @@ description: Work an issue in turns under open-supervisor. The first turn reads 
 
 You run in turns. The supervisor starts your session on `work-issue <key>` and resumes it with `work-issue <key> events` whenever there is news: comments, a PR's checks finishing, a preview going up, a merge, a close. Between turns nothing runs, so never wait or poll for anything (checks, a preview, a reply): do what you can, then end the turn with your status, and the supervisor wakes you when the rest arrives.
 
-Arguments: `<key>` is the issue (`12` on GitHub, `PROJ-12` on Jira). `<key> events` is a later turn: the events since your last one follow in the message. Anything else is a note from the supervisor (usually to reconcile with another issue in flight; see Other agents); follow it before step 3.
+Arguments: `<key>` is the issue (`12` on GitHub, `PROJ-12` on Jira). `<key> events` is a later turn: the events since your last one follow in the message. Anything else is a note from the supervisor (usually about another issue in flight; see Other agents); follow it before step 3.
 
 ## Your tools
 
@@ -72,7 +72,16 @@ The supervisor sets the issue's status labels (and, on some trackers, its workfl
 
 ## Other agents
 
-The first turn's message lists the issues in flight, with what each touches (`agent inflight` prints it again). When the note says another issue overlaps yours, or you notice overlap yourself (the same page, component, dataset or pipeline step), read that issue and its PR before you build, then agree who does what: comment on its issue with `agent issue comment --issue <other> <file>`, which reaches the agent working it. Reply to another agent on its issue, not yours, since each agent hears only about its own issue and PRs. Build on its branch or wait for its PR to merge (`agent wait pr:<n>:merged`) rather than making the same change twice, and say on your own issue what you agreed. Comments from other agents arrive as events like the owner's; answer them the same way.
+The first turn's message lists the issues in flight, with what each touches (`agent inflight` prints it again). When the note says another issue overlaps yours, or you notice overlap yourself (the same page, component, dataset or pipeline step), read that issue and its PR before you build. Build on its branch or wait for its PR to merge (`agent wait pr:<n>:merged`) rather than making the same change twice.
+
+Comment on another agent's issue rarely, unless you are supervising its work. Do it when:
+
+- your work turns up something that helps its work in progress, or
+- your work needs it to take an unusual step it wouldn't otherwise see.
+
+Don't comment just because you work in the same file, because one of you will need to rebase, or about anything that only depends on who merges first. When you do comment, use `agent issue comment --issue <other> <file>`, which reaches the agent working it; each agent hears only about its own issue and PRs, so reply to another agent on its issue, not yours.
+
+Comments from other agents arrive as events like the owner's, but you don't need to answer them. Act on what they tell you, and reply only in exceptional cases, such as when you disagree outright on the way forward.
 
 ## Log corrections
 
@@ -161,6 +170,7 @@ The message lists what happened since your last turn, each under its own heading
   - A change request: make it, commit, push.
   - A question: answer it. A request you think is wrong, or one you can't act on: say why, briefly, and ask.
   - If the comment corrects something you did, log it (see Log corrections).
+  - From another agent: act on it if it bears on your work, but don't reply unless you disagree outright (see Other agents).
   - Reply where the comment was made, with the command its heading names. Say what changed, with the short commit SHA, and add a preview link when it helps. One comment can answer several points from the same person in the same place.
 - **Checks failed**: `$OPEN_SUPERVISOR agent checks` links each failing check. Read its log, reproduce it locally, fix it, push, and end with `building`.
 - **Checks passed**, with the preview: if the report (step 5) isn't posted yet, post it now. Otherwise, if you pushed changes for feedback, reply to that feedback with the preview and end with `review`.
