@@ -3,6 +3,8 @@ package toolbelt
 import (
 	"context"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -26,6 +28,20 @@ func TestUpstreamIssueURL(t *testing.T) {
 	body := q.Get("body")
 	if len(body) > 6100 || !strings.HasSuffix(body, "…") || strings.ContainsRune(body, '�') {
 		t.Fatalf("body is %d bytes, ends %q", len(body), body[len(body)-8:])
+	}
+}
+
+func TestUpstreamIssueIsNeverHeld(t *testing.T) {
+	body := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(body, []byte("agent pr list fails"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := Command()
+	cmd.SetArgs([]string{"issue", "create", "--upstream", "--title", "pr list fails", "--wait", "pr:1:merged", body})
+	cmd.SetOut(new(strings.Builder))
+	cmd.SetErr(new(strings.Builder))
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "can't hold the issue") {
+		t.Fatalf("err: %v", err)
 	}
 }
 

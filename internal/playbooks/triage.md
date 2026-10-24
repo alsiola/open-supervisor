@@ -9,7 +9,7 @@ Issue agents log each problem they work around as a file in the project's proble
 
 The message also names a report file and says what to do with the causes you can't fix:
 
-- **open or update an issue for each**: file them in the project's tracker (step 5). The report holds only the open-supervisor causes.
+- **open or update an issue for each**: file them in the project's tracker (step 5). The open-supervisor causes go on open-supervisor's tracker when an `Upstream` line says it is one of the projects here; otherwise they go in the report.
 - **write them to the report**: write every one to the report, and file nothing.
 
 1. List the files. If there are none, say "No problems to triage" and stop. Note the exact list: agents may write new files while you work, and those wait for the next triage.
@@ -27,7 +27,10 @@ The message also names a report file and says what to do with the causes you can
      - **push to the main branch**: commit on the main branch and push. If the push is rejected, `git pull --rebase` and push again. If it still fails, treat these causes as "not plainly".
      - **open a PR**: `git switch -c open-supervisor/triage-<YYYY-MM-DD>` first, commit there, `git push -u <remote> <branch>`, then `$OPEN_SUPERVISOR agent pr create --head <branch> --title <title> --body-file <file>`, with the same list in the body. Then `git switch <main branch>`, so the checkout is back where it was. Count these causes as fixed, and give the PR's link in your report.
 5. For each remaining cause:
-   - **Opening issues**: `$OPEN_SUPERVISOR agent issue list` first. If an open issue already covers the cause, comment on it with today's count, the issues and an exact error (`$OPEN_SUPERVISOR agent issue comment --issue <key> <file>`). Otherwise open one with `$OPEN_SUPERVISOR agent issue create --title <title> <file>`. For an open-supervisor cause, `agent issue create --upstream --title <title> <file>` prints a link that opens the issue on open-supervisor's tracker with your text filled in; put the cause and its link in the report rather than following it. When the message's code line shows this project is open-supervisor itself, open its issues here without `--upstream`.
+   - **Opening issues**: `$OPEN_SUPERVISOR agent issue list` first. If an open issue already covers the cause, comment on it with today's count, the issues and an exact error (`$OPEN_SUPERVISOR agent issue comment --issue <key> <file>`). Otherwise open one with `$OPEN_SUPERVISOR agent issue create --title <title> <file>`. For an open-supervisor cause:
+     - When the message has an `Upstream` line, open-supervisor is one of the projects here: do the same on its tracker, adding `--upstream` to each command (`agent issue list --upstream`, `agent issue comment --upstream --issue <key> <file>`, `agent issue create --upstream --title <title> <file>`). Say in the body which project the notes came from. Nothing goes in the report for these.
+     - Otherwise `agent issue create --upstream --title <title> <file>` prints a link that opens the issue on open-supervisor's tracker with your text filled in; put the cause and its link in the report rather than following it.
+     - When the message's code line shows this project is open-supervisor itself, open its issues here without `--upstream`.
    - **Writing the report**: one section per cause.
    - Write the report file fresh each triage (replace whatever is there), headed with today's date. When nothing goes in it, delete it.
    - Either way, each cause says: what the agents were trying to do, how many notes and which issues, the exact error, the workaround they used, where the fix belongs and what you think the fix is. Title an issue for the cause, not the symptom ("Skills still call `$SUPERVISOR_SCRIPTS/reply.sh`", not "reply.sh not found").
@@ -38,5 +41,5 @@ The message also names a report file and says what to do with the causes you can
 
 - Don't commit anything in a triage except the fixes in step 4.
 - Don't fix anything that needs a judgement call: report or file it.
-- Don't change open-supervisor's own files from a project's triage, or open issues on its tracker yourself.
+- Don't change open-supervisor's own files from a project's triage, or open issues on its tracker unless the message's `Upstream` line says it is one of the projects here.
 - Don't touch another project's files: a triage works on the checkout it starts in.

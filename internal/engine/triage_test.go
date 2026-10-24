@@ -45,14 +45,37 @@ func TestTriageRunsOnTheProblems(t *testing.T) {
 	p.Spec.Triage.OpenIssues = true
 	p.Spec.Triage.Land = config.LandPR
 	s.RunTriage(nil)
-	if specs := agent.turns(); len(specs) != 2 || !strings.Contains(specs[1].Body, "Causes: open or update an issue for each") || !strings.Contains(specs[1].Body, "Land: open a PR") {
+	if specs := agent.turns(); len(specs) != 2 || !strings.Contains(specs[1].Body, "Causes: open or update an issue for each") || !strings.Contains(specs[1].Body, "Land: open a PR") || strings.Contains(specs[1].Body, "Upstream:") {
+		t.Fatalf("turn specs: %+v", specs)
+	}
+
+	// With open-supervisor among the projects, its causes are filed there.
+	s.mu.Lock()
+	s.projects = append(s.projects, &Project{Name: "supervisor", Repo: upstreamRepo{host}})
+	s.mu.Unlock()
+	s.RunTriage([]*Project{p})
+	s.mu.Lock()
+	s.projects = s.projects[:1]
+	s.mu.Unlock()
+	if specs := agent.turns(); len(specs) != 3 || !strings.Contains(specs[2].Body, "Upstream: open-supervisor is the project supervisor here") {
 		t.Fatalf("turn specs: %+v", specs)
 	}
 
 	p.Spec.Triage.Disabled = true
 	s.RunTriage(nil)
-	if len(agent.turns()) != 2 {
+	if len(agent.turns()) != 3 {
 		t.Fatal("triaged a project with the triage off")
+	}
+}
+
+// upstreamRepo is open-supervisor's own repo.
+type upstreamRepo struct{ *fakeHost }
+
+func (upstreamRepo) WebURL() string { return UpstreamRepo + "/" }
+
+func TestIsUpstream(t *testing.T) {
+	if !IsUpstream(upstreamRepo{newHost()}) || IsUpstream(newHost()) || IsUpstream(nil) {
+		t.Fatal("IsUpstream")
 	}
 }
 

@@ -103,6 +103,33 @@ func bind(cfg *config.Config, spec *config.Project) (*engine.Bound, error) {
 	return b, nil
 }
 
+// upstream is the project in the config that is open-supervisor itself, nil when the supervisor doesn't watch it.
+func (s *session) upstream() *engine.Bound {
+	if engine.IsUpstream(s.b.Repo) {
+		return s.b
+	}
+	for _, p := range s.cfg.Projects {
+		if p == s.b.Spec || p.Disabled {
+			continue
+		}
+		if b, err := bind(s.cfg, p); err == nil && engine.IsUpstream(b.Repo) {
+			return b
+		}
+	}
+	return nil
+}
+
+// tracker is the tracker an issue command acts on: the project's own, or with --upstream open-supervisor's.
+func (s *session) tracker(upstream bool) (adapter.Tracker, error) {
+	if !upstream {
+		return s.b.Tracker, nil
+	}
+	if up := s.upstream(); up != nil {
+		return up.Tracker, nil
+	}
+	return nil, errors.New("open-supervisor isn't one of the projects here, so its issues can't be read or commented on from here")
+}
+
 // projectFromCwd finds the project whose checkout (or one of whose issue worktrees) holds the current directory.
 func projectFromCwd(cfg *config.Config) *config.Project {
 	cwd, _ := os.Getwd()
@@ -276,12 +303,17 @@ func issueCmd(f *flags) *cobra.Command {
 			return nil
 		},
 	}
+	var upstream bool
 	comment := &cobra.Command{
 		Use:   "comment <file|->",
-		Short: "Post a comment on the issue (or, with --issue, on another agent's issue)",
+		Short: "Post a comment on the issue (or, with --issue, on another agent's issue; with --upstream, on open-supervisor's)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := open(f, true)
+			if err != nil {
+				return err
+			}
+			tracker, err := s.tracker(upstream)
 			if err != nil {
 				return err
 			}
@@ -295,7 +327,7 @@ func issueCmd(f *flags) *cobra.Command {
 			}
 			ctx, cancel := timeout()
 			defer cancel()
-			url, err := s.b.Tracker.Comment(ctx, s.key, body, s.mark())
+			url, err := tracker.Comment(ctx, s.key, body, s.mark())
 			if err != nil {
 				return err
 			}
@@ -305,16 +337,20 @@ func issueCmd(f *flags) *cobra.Command {
 	}
 	list := &cobra.Command{
 		Use:   "list",
-		Short: "List the tracker's open issues, to check for one before opening another",
+		Short: "List the tracker's open issues (with --upstream, open-supervisor's), to check for one before opening another",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := open(f, false)
 			if err != nil {
 				return err
 			}
+			tracker, err := s.tracker(upstream)
+			if err != nil {
+				return err
+			}
 			ctx, cancel := timeout()
 			defer cancel()
-			issues, err := s.b.Tracker.Candidates(ctx)
+			issues, err := tracker.Candidates(ctx)
 			if err != nil {
 				return err
 			}
@@ -325,11 +361,10 @@ func issueCmd(f *flags) *cobra.Command {
 		},
 	}
 	var title, until string
-	var upstream bool
 	var waits []string
 	create := &cobra.Command{
 		Use:   "create --title <title> [--wait <condition>]... [--until <time>] <file|->",
-		Short: "Open an issue in the project's tracker; --wait and --until hold it until then (with --upstream, print a link that opens one on open-supervisor)",
+		Short: "Open an issue in the project's tracker; --wait and --until hold it until then (with --upstream, open it on open-supervisor's, or print a link that does)",
 		Long: "Open an issue in the project's tracker. With --wait or --until it is held, not worked, until any one of the conditions is met or the time comes; " +
 			"see `agent wait --help` for the conditions.",
 		Args: cobra.ExactArgs(1),
@@ -341,17 +376,25 @@ func issueCmd(f *flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if upstream {
-				fmt.Fprintln(cmd.OutOrStdout(), upstreamIssueURL(title, body))
-				return nil
+			if upstream && (len(waits) > 0 || until != "") {
+				return errors.New("--upstream can't hold the issue: leave out --wait and --until")
 			}
 			s, err := open(f, false)
 			if err != nil {
 				return err
 			}
-			opener, ok := s.b.Tracker.(adapter.IssueOpener)
+			tracker := s.b.Tracker
+			if upstream {
+				up := s.upstream()
+				if up == nil {
+					fmt.Fprintln(cmd.OutOrStdout(), upstreamIssueURL(title, body))
+					return nil
+				}
+				tracker = up.Tracker
+			}
+			opener, ok := tracker.(adapter.IssueOpener)
 			if !ok {
-				return fmt.Errorf("%s can't open issues from here: report the cause instead", s.b.Tracker.Describe())
+				return fmt.Errorf("%s can't open issues from here: report the cause instead", tracker.Describe())
 			}
 			ctx, cancel := timeout()
 			defer cancel()
@@ -383,13 +426,14 @@ func issueCmd(f *flags) *cobra.Command {
 	create.Flags().StringVar(&title, "title", "", "the issue's title")
 	create.Flags().StringArrayVar(&waits, "wait", nil, "hold the issue until this happens (repeat for any of several)")
 	create.Flags().StringVar(&until, "until", "", "hold the issue until this time (an ISO instant), or at most until then with --wait")
-	create.Flags().BoolVar(&upstream, "upstream", false, "the cause is in open-supervisor itself: print a link that opens the issue there")
+	cmd.PersistentFlags().BoolVar(&upstream, "upstream", false, "act on open-supervisor's own tracker; create prints a link that opens the issue when no project here is open-supervisor")
 	cmd.AddCommand(view, comment, list, create)
 	return cmd
 }
 
 // upstreamIssueURL opens a new open-supervisor issue with the title and body filled in. It is a link for the
-// owner to follow rather than an issue opened for them, since open-supervisor's tracker is public.
+// owner to follow rather than an issue opened for them, since open-supervisor's tracker is public and the owner
+// may not maintain it. When they do (they watch it as one of their projects), --upstream opens the issue there.
 func upstreamIssueURL(title, body string) string {
 	const limit = 6000 // keep the link under what browsers and GitHub accept
 	if len(body) > limit {

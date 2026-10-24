@@ -38,6 +38,8 @@ type hub interface {
 	fact(f core.Fact)
 	// peer is another project under the same supervisor, nil if there is none by the name.
 	peer(name string) *Project
+	// upstream is the project that is open-supervisor itself, nil if the supervisor doesn't watch it.
+	upstream() *Project
 	// limit holds every turn on an agent until a time, after one hit the subscription's usage limit; a zero time
 	// lifts the hold.
 	limit(agent string, until time.Time)
@@ -1578,6 +1580,9 @@ func (p *Project) runTriage() {
 	body := fmt.Sprintf("Problems folder: %s\nTracker: %s\nCode: %s %s", p.ProblemsDir(), p.Tracker.Describe(), p.Repo.Describe(), p.Repo.WebURL())
 	if p.Spec.Triage.OpenIssues {
 		body += "\nCauses: open or update an issue for each"
+		if up := p.hub.upstream(); up != nil && up != p {
+			body += fmt.Sprintf("\nUpstream: open-supervisor is the project %s here, so open or update its issues with --upstream", up.Name)
+		}
 	} else {
 		body += "\nCauses: write them to the report"
 	}

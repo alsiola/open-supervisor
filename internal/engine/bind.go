@@ -172,3 +172,11 @@ func merge(base, over adapter.Values) adapter.Values {
 	}
 	return out
 }
+
+// UpstreamRepo is open-supervisor's own repository, where the causes that lie in open-supervisor are filed.
+const UpstreamRepo = "https://github.com/alsiola/open-supervisor"
+
+// IsUpstream reports whether a project's repo is open-supervisor's own.
+func IsUpstream(r adapter.Repo) bool {
+	return r != nil && strings.EqualFold(strings.TrimSuffix(strings.TrimSuffix(r.WebURL(), "/"), ".git"), UpstreamRepo)
+}

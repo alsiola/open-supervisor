@@ -239,6 +239,15 @@ func (s *Supervisor) fact(f core.Fact) {
 
 func (s *Supervisor) peer(name string) *Project { return s.Project(name) }
 
+func (s *Supervisor) upstream() *Project {
+	for _, p := range s.Projects() {
+		if IsUpstream(p.Repo) {
+			return p
+		}
+	}
+	return nil
+}
+
 func (s *Supervisor) changed() {
 	select {
 	case s.changes <- struct{}{}:
