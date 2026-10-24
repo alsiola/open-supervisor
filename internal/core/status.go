@@ -1,7 +1,6 @@
 package core
 
 import (
-	"regexp"
 	"strings"
 	"time"
 )
@@ -62,26 +61,6 @@ type Outcome struct {
 	ToolCalls  int           `json:"toolCalls,omitempty"`
 	Error      string        `json:"error,omitempty"`
 	Duration   time.Duration `json:"duration"`
-}
-
-// runAtRe finds a runAt marker: `<!-- runAt: 2026-10-25T09:00Z -->` (hidden in Markdown hosts) or a line of its
-// own reading `[runAt: 2026-10-25T09:00Z]` (for trackers whose comments can't hide anything).
-var runAtRe = regexp.MustCompile(`(?:<!--\s*runAt[:(\s]\s*([^\s)]+)\s*\)?\s*-->|\[runAt:\s*([^\]\s]+)\s*\])`)
-
-// RunAtIn returns the last valid runAt marker in a body.
-func RunAtIn(body string) (time.Time, bool) {
-	var found time.Time
-	ok := false
-	for _, m := range runAtRe.FindAllStringSubmatch(body, -1) {
-		v := m[1]
-		if v == "" {
-			v = m[2]
-		}
-		if t, err := ParseTime(v); err == nil {
-			found, ok = t, true
-		}
-	}
-	return found, ok
 }
 
 // ParseTime reads an ISO instant loosely: with or without seconds, Z or an offset; a bare date is midnight UTC.

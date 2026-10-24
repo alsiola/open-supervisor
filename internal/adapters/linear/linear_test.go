@@ -162,7 +162,7 @@ func TestBindingAndRefs(t *testing.T) {
 		t.Error("RefFor")
 	}
 	at := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
-	if got, ok := core.RunAtIn(tr.RunAtMarker(at)); !ok || !got.Equal(at) {
+	if got, ok := core.RunAtIn(tr.HoldMarker(core.Hold{Until: &at})); !ok || !got.Equal(at) {
 		t.Errorf("marker doesn't read back: %v", got)
 	}
 }

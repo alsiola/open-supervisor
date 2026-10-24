@@ -236,8 +236,8 @@ func (t *Tracker) RefsIn(text string) []string {
 // RefFor uses one of Linear's magic words, so the PR is linked and closes the issue when it merges.
 func (t *Tracker) RefFor(key string) string { return "Closes " + key }
 
-func (t *Tracker) RunAtMarker(at time.Time) string {
-	return "[runAt: " + at.UTC().Format("2006-01-02T15:04Z") + "]"
+func (t *Tracker) HoldMarker(h core.Hold) string {
+	return "[" + h.Spec() + "]"
 }
 
 // ---- issues ---------------------------------------------------------------------------------------------
@@ -575,7 +575,7 @@ func (t *Tracker) Comment(ctx context.Context, key, body string, mark core.Agent
 }
 
 // OpenIssue opens an issue in the tracker's first team.
-func (t *Tracker) OpenIssue(ctx context.Context, title, body string) (core.Issue, error) {
+func (t *Tracker) OpenIssue(ctx context.Context, title, body string, labels []string) (core.Issue, error) {
 	if t.c.dryRun {
 		return core.Issue{}, nil
 	}
@@ -599,6 +599,29 @@ func (t *Tracker) OpenIssue(ctx context.Context, title, body string) (core.Issue
 	}
 	q := `mutation($input: IssueCreateInput!) { issueCreate(input: $input) { issue { ` + issueFields + ` } } }`
 	input := map[string]any{"teamId": teams.Teams.Nodes[0].ID, "title": title, "description": body}
+	if len(labels) > 0 {
+		ids, err := t.labelIDs(ctx, false)
+		if err != nil {
+			return core.Issue{}, err
+		}
+		for _, l := range labels {
+			if _, ok := ids[strings.ToLower(l)]; !ok {
+				if ids, err = t.labelIDs(ctx, true); err != nil {
+					return core.Issue{}, err
+				}
+				break
+			}
+		}
+		var want []string
+		for _, l := range labels {
+			id, ok := ids[strings.ToLower(l)]
+			if !ok {
+				return core.Issue{}, fmt.Errorf("linear: no label %s", l)
+			}
+			want = append(want, id)
+		}
+		input["labelIds"] = want
+	}
 	if err := t.c.query(ctx, q, map[string]any{"input": input}, &r); err != nil {
 		return core.Issue{}, err
 	}

@@ -348,6 +348,9 @@ func (s *Source) onSignal(sig core.Signal) {
 		go s.dispatch(*issue, sig.Type == core.SigIssueReopened)
 	case core.SigIssueClosed:
 		s.forget(sig.Key)
+		for _, p := range s.Projects() {
+			go s.hub.fact(core.Fact{Kind: core.CondIssue, Project: p.Name, Ref: sig.Key, On: "closed"})
+		}
 		if p := s.Holder(sig.Key); p != nil {
 			p.onSignal(sig)
 		}

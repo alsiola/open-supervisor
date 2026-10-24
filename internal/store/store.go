@@ -29,7 +29,7 @@ const (
 	Help      State = "help"      // the agent asked the owner something it can't go on without
 	Done      State = "done"      // everything asked is handled; only a merge or close is left
 	Finished  State = "finished"  // the PR merged or closed (or the issue closed) and the agent cleaned up
-	Scheduled State = "scheduled" // held until RunAt: not started yet, or rescheduled
+	Scheduled State = "scheduled" // held until RunAt or one of its Waits: not started yet, or rescheduled
 	Manual    State = "manual"    // the owner is attached to the session; events wait
 	Failed    State = "failed"    // the last turn ended in an error
 )
@@ -98,8 +98,12 @@ type Record struct {
 	// the issue body).
 	RunAt       *time.Time `json:"runAt,omitempty"`
 	ScheduledBy string     `json:"scheduledBy,omitempty"`
-	ClaimedAt   time.Time  `json:"claimedAt"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
+	// Waits, while scheduled: the conditions any one of which wakes the issue, RunAt or not. WaitSince is when
+	// the wait began, so a job run or a turn that ended before it doesn't meet it.
+	Waits     []core.Cond `json:"waits,omitempty"`
+	WaitSince *time.Time  `json:"waitSince,omitempty"`
+	ClaimedAt time.Time   `json:"claimedAt"`
+	UpdatedAt time.Time   `json:"updatedAt"`
 }
 
 // Trial is the run of turns that follows one draw in the handoff experiment, added up so the two arms can be

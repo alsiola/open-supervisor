@@ -18,6 +18,7 @@ The project may use GitHub, Bitbucket, Jira or something else; you don't need to
 | `$OPEN_SUPERVISOR agent context` | the project, issue, branch, worktree, base branch, remote and where the rules are |
 | `$OPEN_SUPERVISOR agent issue view` | the issue and every comment on it |
 | `$OPEN_SUPERVISOR agent issue comment <file>` | comment on the issue (`--issue <key>` for another agent's issue) |
+| `$OPEN_SUPERVISOR agent issue create --title <t> [--wait <condition>] [--until <time>] <file>` | open a new issue; with `--wait` or `--until`, it isn't worked until then (see Waiting) |
 | `$OPEN_SUPERVISOR agent worktree setup` | create or reuse the issue's worktree on its branch; prints the path last |
 | `$OPEN_SUPERVISOR agent worktree remove` | stop anything running from it and remove it (the branch stays) |
 | `$OPEN_SUPERVISOR agent pr list` | the issue's PRs, open or not |
@@ -26,7 +27,7 @@ The project may use GitHub, Bitbucket, Jira or something else; you don't need to
 | `$OPEN_SUPERVISOR agent pr comment <pr> <file>` | comment on a PR's conversation |
 | `$OPEN_SUPERVISOR agent pr reply <pr> <comment-id> <file>` | reply in an inline review thread |
 | `$OPEN_SUPERVISOR agent checks [pr]` | every check on the PR's head, with links |
-| `$OPEN_SUPERVISOR agent schedule <time> <file>` | park the issue until a time (see Rescheduling) |
+| `$OPEN_SUPERVISOR agent wait <condition>... [--until <time>] <file>` | park the issue until something happens or a time comes (see Waiting) |
 | `$OPEN_SUPERVISOR agent correction --area <area> <file>` | log a correction (see Log corrections) |
 | `$OPEN_SUPERVISOR agent problem --kind <kind> <file>` | log a problem you worked around (see Report problems) |
 | `$OPEN_SUPERVISOR agent inflight` | the other issues in flight and what each touches |
@@ -35,9 +36,21 @@ A `<file>` can be `-` to read from stdin, e.g. `printf '…' | $OPEN_SUPERVISOR 
 
 Every turn starts in the project's main checkout. The project's own rules (`CLAUDE.md`, `AGENTS.md` or wherever `agent context` says) hold what is particular to it: what must pass before a PR, how to run its dev server and database, the checks its PRs get, whether and how to show a change in screenshots. Where they differ from this playbook, they win. A project can also keep additions to this playbook in `.open-supervisor/playbooks/work-issue.md`. The supervisor hands them to you with each turn, under "This project's additions to the playbook". Follow them as well as this playbook, never in place of it.
 
-## Rescheduling
+## Waiting
 
-When the work can't go on until a known time (a backfill finishing, a match being played, a date the issue names), park it: `$OPEN_SUPERVISOR agent schedule 2026-10-25T09:00Z <file>`, where the file says when you'll pick it up and why. Use an ISO time with `Z` or an offset. The supervisor parks the issue until then and resumes your session with a note; comments and check results still reach you in the meantime. End the turn with the state the work is in (`review` if the owner has something to look at, else `done`). When the time comes and it still isn't ready, schedule again. Don't use this to wait for checks, a preview or a reply: the supervisor already resumes you for those.
+When the work can't go on until something happens, park the issue and let the supervisor wake you when it does. Don't park it until a time just to come back and check.
+
+- `$OPEN_SUPERVISOR agent wait pr:1257:merged <file>`: until another PR merges (`:closed` for closed without merging). A PR that ends the other way wakes you too.
+- `agent wait issue:1267:closed <file>`: until another issue closes.
+- `agent wait issue:1267:review <file>`: until the agent on another issue ends a turn in that state (`building`, `review`, `help`, `done`, `finished`), e.g. once it has reported.
+- `agent wait job:backup <file>`: until the next run of one of the project's jobs ends.
+- `agent wait --until 2026-10-25T09:00Z <file>`: until a time (a match being played, a date the issue names). Use an ISO time with `Z` or an offset.
+
+Write `<project>/` before the number, key or name for another project under the same supervisor (`pr:club/88:merged`). Give several conditions and any one of them wakes you. Add `--until` to any wait as the latest it should last; use it whenever what you're waiting for might never happen. The file says what you're waiting for and why. If it has already happened, the command says so: carry on instead.
+
+The supervisor wakes you with what happened (or that the time came first). Comments and check results still reach you in the meantime, and the wait carries on after those turns. A new `wait` replaces the last one, and `agent wait --cancel <file>` drops it. End the turn with the state the work is in (`review` if the owner has something to look at, else `done`). Don't use this to wait for your own PR's checks, its preview, its merge or a reply: the supervisor already resumes you for those.
+
+When follow-up work shouldn't start yet (wave 2 once wave 1 merges, a check once a job has run), open it now with the same conditions: `agent issue create --title <t> --wait pr:1257:merged <file>`. The supervisor holds it and starts it when the condition is met, so nobody has to remember to open it later.
 
 ## Ending a turn
 
@@ -59,7 +72,7 @@ The supervisor sets the issue's status labels (and, on some trackers, its workfl
 
 ## Other agents
 
-The first turn's message lists the issues in flight, with what each touches (`agent inflight` prints it again). When the note says another issue overlaps yours, or you notice overlap yourself (the same page, component, dataset or pipeline step), read that issue and its PR before you build, then agree who does what: comment on its issue with `agent issue comment --issue <other> <file>`, which reaches the agent working it. Reply to another agent on its issue, not yours, since each agent hears only about its own issue and PRs. Build on its branch or wait for its PR to merge rather than making the same change twice, and say on your own issue what you agreed. Comments from other agents arrive as events like the owner's; answer them the same way.
+The first turn's message lists the issues in flight, with what each touches (`agent inflight` prints it again). When the note says another issue overlaps yours, or you notice overlap yourself (the same page, component, dataset or pipeline step), read that issue and its PR before you build, then agree who does what: comment on its issue with `agent issue comment --issue <other> <file>`, which reaches the agent working it. Reply to another agent on its issue, not yours, since each agent hears only about its own issue and PRs. Build on its branch or wait for its PR to merge (`agent wait pr:<n>:merged`) rather than making the same change twice, and say on your own issue what you agreed. Comments from other agents arrive as events like the owner's; answer them the same way.
 
 ## Log corrections
 
@@ -97,7 +110,7 @@ Log each distinct problem once per session. A problem you fixed properly in your
 
 `$OPEN_SUPERVISOR agent issue view`. Read every comment; later ones often change the ask. If the message carries an "Already waiting" section, those events arrived before your first turn: fold them in.
 
-If the supervisor's note says the issue was scheduled to start now, it was held until a time its author set: carry on as below.
+If the message says the issue was scheduled to start now, or that what it was held for has happened, it was held by whoever opened it: carry on as below.
 
 Decide which kind of issue it is:
 
@@ -154,6 +167,7 @@ The message lists what happened since your last turn, each under its own heading
 - **No checks ran**: the repo has no CI. Treat the PR as checked once what the rules say must pass has passed locally, and report as in step 5.
 - **PR merged or closed**, or **the issue closed** with no PR: clean up (see Cleaning up) and end with `finished`.
 - **A note from the supervisor**: do what it says.
+- **What you were waiting for**: the wait is over (see Waiting). Pick the work up, or wait again if what's left still isn't ready.
 - **A message from the owner**, typed into the supervisor: treat it like a comment, but answer in your session (your summary or final reply), not on the issue, unless it asks for a comment.
 
 ### Mid-turn: `## Arrived during this turn`

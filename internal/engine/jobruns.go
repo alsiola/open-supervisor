@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alsiola/open-supervisor/internal/config"
+	"github.com/alsiola/open-supervisor/internal/core"
 )
 
 // keepRuns is how many runs of a job are kept when the job doesn't say.
@@ -94,6 +95,9 @@ func (j *Jobs) endRun(job config.Job, run *JobRun) {
 	now := time.Now().UTC()
 	run.EndedAt = &now
 	j.saveRun(*run)
+	if j.p != nil && j.p.hub != nil {
+		go j.p.hub.fact(core.Fact{Kind: core.CondJob, Project: j.p.Name, Ref: job.Name, On: run.Outcome})
+	}
 	keep := job.KeepRuns
 	if keep <= 0 {
 		keep = keepRuns

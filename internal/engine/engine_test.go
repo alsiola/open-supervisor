@@ -134,8 +134,8 @@ func (h *fakeHost) RefsIn(text string) []string {
 	return out
 }
 func (h *fakeHost) RefFor(key string) string { return "Closes #" + key }
-func (h *fakeHost) RunAtMarker(t time.Time) string {
-	return "<!-- runAt: " + t.Format(time.RFC3339) + " -->"
+func (h *fakeHost) HoldMarker(hold core.Hold) string {
+	return "<!-- " + hold.Spec() + " -->"
 }
 func (h *fakeHost) WebURL() string                                { return "https://fake" }
 func (h *fakeHost) DefaultBranch(context.Context) (string, error) { return "main", nil }
@@ -685,7 +685,9 @@ func TestDroppingAnIssueEndsItsTrial(t *testing.T) {
 	host.issues["9"] = &core.Issue{Key: "9", Title: "Nine", Open: true}
 	p.reconcile()
 	waitFor(t, "first turn", func() bool { return state(p, "9") == store.Review })
-	p.Store.Update("9", func(x *store.Record) { x.Trial = &store.Trial{ID: "9-2", Arm: "resume", StartedAt: time.Now(), Turns: 1} })
+	p.Store.Update("9", func(x *store.Record) {
+		x.Trial = &store.Trial{ID: "9-2", Arm: "resume", StartedAt: time.Now(), Turns: 1}
+	})
 	p.Drop("9")
 	waitFor(t, "the trial", func() bool { return len(sink.named("handoff_trial")) == 1 })
 	if e := sink.named("handoff_trial")[0].Props; e["ended_by"] != "dropped" || e["completed"] != false || e["final_state"] != "review" || e["arm"] != "resume" {

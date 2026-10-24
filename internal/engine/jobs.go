@@ -90,22 +90,7 @@ type Jobs struct {
 // loadJobs is the project's jobs: those in the config, then those in its checkout's .open-supervisor.yaml. A
 // job from the checkout that isn't right is logged and left out.
 func loadJobs(p *Project) *Jobs {
-	specs := append([]config.Job(nil), p.Spec.Jobs...)
-	if data, err := os.ReadFile(filepath.Join(p.Root, RepoFile)); err == nil {
-		var own struct {
-			Jobs []config.Job `yaml:"jobs"`
-		}
-		if err := yaml.Unmarshal(data, &own); err != nil {
-			p.logf("%s: %v", RepoFile, err)
-		}
-		for _, job := range own.Jobs {
-			if errs := job.Validate(); len(errs) > 0 {
-				p.logf("%s: left out: %s", RepoFile, strings.Join(errs, "; "))
-				continue
-			}
-			specs = append(specs, job)
-		}
-	}
+	specs := jobSpecs(p.Spec, p.Root, p.logf)
 	j := &Jobs{Specs: specs, p: p, busy: map[string]bool{}, pending: map[string]*jobReq{}, current: map[string]JobRun{},
 		done: map[string]JobRun{}, running: map[string]JobRunning{}, last: map[string]JobResult{}, detached: map[string]*JobRun{}}
 	for _, job := range specs {
@@ -114,6 +99,36 @@ func loadJobs(p *Project) *Jobs {
 		}
 	}
 	return j
+}
+
+// jobSpecs are a project's jobs, from the config and its checkout's RepoFile; logf hears what is left out.
+func jobSpecs(spec *config.Project, root string, logf func(string, ...any)) []config.Job {
+	specs := append([]config.Job(nil), spec.Jobs...)
+	if data, err := os.ReadFile(filepath.Join(root, RepoFile)); err == nil {
+		var own struct {
+			Jobs []config.Job `yaml:"jobs"`
+		}
+		if err := yaml.Unmarshal(data, &own); err != nil {
+			logf("%s: %v", RepoFile, err)
+		}
+		for _, job := range own.Jobs {
+			if errs := job.Validate(); len(errs) > 0 {
+				logf("%s: left out: %s", RepoFile, strings.Join(errs, "; "))
+				continue
+			}
+			specs = append(specs, job)
+		}
+	}
+	return specs
+}
+
+// JobNames are the names of a project's jobs, for the agent commands that wait on one.
+func JobNames(spec *config.Project) []string {
+	var names []string
+	for _, j := range jobSpecs(spec, config.ExpandHome(spec.Root), func(string, ...any) {}) {
+		names = append(names, j.Name)
+	}
+	return names
 }
 
 // Running is the job's detached run going now, if any.
