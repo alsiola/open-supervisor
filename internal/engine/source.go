@@ -56,6 +56,14 @@ func (s *Source) logf(format string, args ...any) {
 	logx.Default.Write(s.Name, filepath.Join(s.stateDir, "log"), format, args...)
 }
 
+// callFailed is Project.callFailed for the source's own calls.
+func (s *Source) callFailed(err error, format string, args ...any) {
+	if adapter.IsPaused(err) {
+		return
+	}
+	s.logf(format+": %s", append(args, logx.ErrText(err))...)
+}
+
 // Projects are the open projects the source feeds, in the order of its routes.
 func (s *Source) Projects() []*Project {
 	s.mu.Lock()
@@ -166,7 +174,7 @@ func (s *Source) start() {
 		ctx, cancel := ctxTimeout(2 * time.Minute)
 		defer cancel()
 		if err := tracker.EnsureLabels(ctx, specs); err != nil {
-			s.logf("couldn't create the labels: %s", logx.ErrText(err))
+			s.callFailed(err, "couldn't create the labels")
 		}
 	}()
 }
@@ -237,7 +245,7 @@ func (s *Source) noRoute(issue core.Issue) {
 	ctx, cancel := ctxTimeout(time.Minute)
 	defer cancel()
 	if err := s.Tracker.EditLabels(ctx, issue.Key, []string{label}, nil); err != nil {
-		s.logf("%s: couldn't label it %s: %s", refOf(issue.Key), label, logx.ErrText(err))
+		s.callFailed(err, "%s: couldn't label it %s", refOf(issue.Key), label)
 	}
 }
 
@@ -336,7 +344,7 @@ func (s *Source) onSignal(sig core.Signal) {
 			i, err := s.Tracker.Issue(ctx, key)
 			cancel()
 			if err != nil {
-				s.logf("%s: couldn't read it: %s", refOf(key), logx.ErrText(err))
+				s.callFailed(err, "%s: couldn't read it", refOf(key))
 				return
 			}
 			issue = &i
@@ -399,7 +407,7 @@ func (s *Source) reconcile() {
 	defer cancel()
 	open, err := s.Tracker.Candidates(ctx)
 	if err != nil {
-		s.logf("reconcile failed: %s", logx.ErrText(err))
+		s.callFailed(err, "reconcile failed")
 		return
 	}
 	openKeys := map[string]bool{}

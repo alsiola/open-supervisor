@@ -98,6 +98,15 @@ func (p *Project) logf(format string, args ...any) {
 	logx.Default.Write(p.Name, filepath.Join(p.StateDir, "log"), format, args...)
 }
 
+// callFailed logs a failed call on the tracker or code host, followed by the error, unless the adapter refused
+// the call during a rate-limit pause, which it has logged once already.
+func (p *Project) callFailed(err error, format string, args ...any) {
+	if adapter.IsPaused(err) {
+		return
+	}
+	p.logf(format+": %s", append(args, logx.ErrText(err))...)
+}
+
 // BranchFor is the issue's branch.
 func (p *Project) BranchFor(key string) string {
 	return strings.ReplaceAll(p.branchTmpl, "{key}", key)
@@ -415,7 +424,7 @@ func (p *Project) ingestOpt(r *store.Record, c core.Comment, schedule bool) bool
 			ctx, cancel := ctxTimeout(30 * time.Second)
 			defer cancel()
 			if err := reactor.React(ctx, c); err != nil {
-				p.logf("%s: couldn't acknowledge %s: %s", p.ref(r.Key), c.URL, logx.ErrText(err))
+				p.callFailed(err, "%s: couldn't acknowledge %s", p.ref(r.Key), c.URL)
 			}
 		}()
 	}
@@ -510,7 +519,7 @@ func (p *Project) maybeClaim(issue core.Issue, reopened bool) {
 	if _, inBody := core.HoldIn(issue.Body); labelled || inBody {
 		m, err := p.latestHold(issue.Key)
 		if err != nil {
-			p.logf("%s: couldn't read its hold: %s", p.ref(issue.Key), logx.ErrText(err))
+			p.callFailed(err, "%s: couldn't read its hold", p.ref(issue.Key))
 			return
 		}
 		marker = m
@@ -605,7 +614,7 @@ func (p *Project) editLabels(key string, add, remove []string) {
 	ctx, cancel := ctxTimeout(time.Minute)
 	defer cancel()
 	if err := p.Tracker.EditLabels(ctx, key, add, remove); err != nil {
-		p.logf("%s: couldn't change the labels: %s", p.ref(key), logx.ErrText(err))
+		p.callFailed(err, "%s: couldn't change the labels", p.ref(key))
 	}
 }
 
@@ -617,7 +626,7 @@ func (p *Project) transition(key, state string) {
 	ctx, cancel := ctxTimeout(time.Minute)
 	defer cancel()
 	if err := t.Transition(ctx, key, state); err != nil {
-		p.logf("%s: couldn't move it to its %s status: %s", p.ref(key), state, logx.ErrText(err))
+		p.callFailed(err, "%s: couldn't move it to its %s status", p.ref(key), state)
 	}
 }
 
@@ -945,7 +954,7 @@ func (p *Project) askFeedback(key string) {
 	defer cancel()
 	url, err := p.Tracker.Comment(ctx, key, feedbackText, core.AgentMark{From: key})
 	if err != nil {
-		p.logf("%s: couldn't ask for feedback on the cold turn: %s", p.ref(key), logx.ErrText(err))
+		p.callFailed(err, "%s: couldn't ask for feedback on the cold turn", p.ref(key))
 		return
 	}
 	f := store.Feedback{URL: url, Session: r.Session, Arm: r.LastTurn.Arm, Turn: r.Turns, PostedAt: time.Now().UTC()}
@@ -974,7 +983,7 @@ func (p *Project) readFeedback(ctx context.Context, r *store.Record) {
 		}
 		counts, err := rr.Reactions(ctx, f.URL)
 		if err != nil {
-			p.logf("%s: couldn't read the reactions on the cold turn's feedback: %s", p.ref(r.Key), logx.ErrText(err))
+			p.callFailed(err, "%s: couldn't read the reactions on the cold turn's feedback", p.ref(r.Key))
 			continue
 		}
 		up, down := counts["+1"], counts["-1"]
@@ -1315,7 +1324,7 @@ func (p *Project) evaluateChecks(sha string) {
 	defer cancel()
 	result, err := p.Repo.Checks(ctx, sha)
 	if err != nil {
-		p.logf("%s: couldn't read the checks on %s: %s", p.ref(r.Key), sha[:min(7, len(sha))], logx.ErrText(err))
+		p.callFailed(err, "%s: couldn't read the checks on %s", p.ref(r.Key), sha[:min(7, len(sha))])
 		return
 	}
 	headAt := time.Now()
@@ -1356,7 +1365,7 @@ func (p *Project) refreshPRs(key string) {
 	defer cancel()
 	found, err := p.Repo.PRsFor(ctx, p.BranchFor(key), p.Tracker.RefFor(key))
 	if err != nil {
-		p.logf("%s: couldn't read its PRs: %s", p.ref(key), logx.ErrText(err))
+		p.callFailed(err, "%s: couldn't read its PRs", p.ref(key))
 		return
 	}
 	views := map[int]core.PR{}
@@ -1371,7 +1380,7 @@ func (p *Project) refreshPRs(key string) {
 		}
 		pr, err := p.Repo.PR(ctx, id)
 		if err != nil {
-			p.logf("%s: couldn't read PR #%d: %s", p.ref(key), id, logx.ErrText(err))
+			p.callFailed(err, "%s: couldn't read PR #%d", p.ref(key), id)
 			continue
 		}
 		views[id] = pr
@@ -1496,7 +1505,7 @@ func (p *Project) maintain(ctx context.Context, openKeys map[string]bool, routed
 func (p *Project) closed(ctx context.Context, key string) bool {
 	issue, err := p.Tracker.Issue(ctx, key)
 	if err != nil {
-		p.logf("%s: couldn't read it: %s", p.ref(key), logx.ErrText(err))
+		p.callFailed(err, "%s: couldn't read it", p.ref(key))
 		return false
 	}
 	return !issue.Open
@@ -1506,13 +1515,13 @@ func (p *Project) closed(ctx context.Context, key string) bool {
 func (p *Project) readComments(ctx context.Context, r *store.Record) {
 	comments, err := p.Tracker.Comments(ctx, r.Key, r.Since)
 	if err != nil {
-		p.logf("%s: couldn't read its comments: %s", p.ref(r.Key), logx.ErrText(err))
+		p.callFailed(err, "%s: couldn't read its comments", p.ref(r.Key))
 		return
 	}
 	for _, id := range r.PRs {
 		more, err := p.Repo.PRComments(ctx, id, r.Since)
 		if err != nil {
-			p.logf("%s: couldn't read the comments on PR #%d: %s", p.ref(r.Key), id, logx.ErrText(err))
+			p.callFailed(err, "%s: couldn't read the comments on PR #%d", p.ref(r.Key), id)
 			continue
 		}
 		comments = append(comments, more...)

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // APIError is a service answering a request with an error status.
@@ -21,8 +22,16 @@ type APIError struct {
 	Body        string
 }
 
+// Error is one line: the body's JSON message when it has one (GitHub's errors do),
+// else the body with its whitespace folded.
 func (e *APIError) Error() string {
-	body := strings.TrimSpace(e.Body)
+	body := strings.Join(strings.Fields(e.Body), " ")
+	var msg struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(e.Body), &msg) == nil && strings.TrimSpace(msg.Message) != "" {
+		body = strings.Join(strings.Fields(msg.Message), " ")
+	}
 	if len(body) > 300 {
 		body = body[:300] + "…"
 	}
@@ -33,6 +42,23 @@ func (e *APIError) Error() string {
 func IsStatus(err error, status int) bool {
 	var e *APIError
 	return errors.As(err, &e) && e.Status == status
+}
+
+// PausedError is a call an adapter refused without making it, because the service asked it to wait (a rate
+// limit). The adapter logs the pause once; callers can skip the work quietly.
+type PausedError struct {
+	Service string
+	Until   time.Time
+}
+
+func (e *PausedError) Error() string {
+	return fmt.Sprintf("%s rate limit reached; paused until %s", e.Service, e.Until.Local().Format("15:04"))
+}
+
+// IsPaused reports whether err is a call refused during a PausedError's pause.
+func IsPaused(err error) bool {
+	var e *PausedError
+	return errors.As(err, &e)
 }
 
 // JSONClient makes JSON API calls with one way of authenticating.

@@ -51,6 +51,7 @@ type conn struct {
 	api, web, host string
 	env            adapter.Env
 	http           *http.Client
+	tr             *transport
 	read, write    tokenSource
 	preview        *regexp.Regexp
 	authMode       string
@@ -62,10 +63,13 @@ func newConn(v adapter.Values, env adapter.Env) (*conn, error) {
 	if err != nil || u.Host == "" {
 		return nil, fmt.Errorf("apiUrl %q isn't a URL", api)
 	}
-	c := &conn{api: api, env: env, http: env.HTTP, authMode: v.Get("auth", "gh")}
-	if c.http == nil {
-		c.http = http.DefaultClient
+	c := &conn{api: api, env: env, authMode: v.Get("auth", "gh")}
+	base := env.HTTP
+	if base == nil {
+		base = http.DefaultClient
 	}
+	c.tr = newTransport(base.Transport, u.Host, env.Log)
+	c.http = &http.Client{Transport: c.tr, CheckRedirect: base.CheckRedirect, Jar: base.Jar, Timeout: base.Timeout}
 	if u.Host == "api.github.com" {
 		c.web, c.host = "https://github.com", "github.com"
 	} else {
