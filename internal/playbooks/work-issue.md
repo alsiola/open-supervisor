@@ -27,6 +27,8 @@ The project may use GitHub, Bitbucket, Jira or something else; you don't need to
 | `$OPEN_SUPERVISOR agent pr comment <pr> <file>` | comment on a PR's conversation |
 | `$OPEN_SUPERVISOR agent pr reply <pr> <comment-id> <file>` | reply in an inline review thread |
 | `$OPEN_SUPERVISOR agent checks [pr]` | every check on the PR's head, with links |
+| `$OPEN_SUPERVISOR agent attachment upload <file>` | upload a file (an image, a zip, a document) and print a link to put in a comment |
+| `$OPEN_SUPERVISOR agent attachment get <url> <file>` | download a file a comment links to, signed in (a private repo's attachments need it) |
 | `$OPEN_SUPERVISOR agent wait <condition>... [--until <time>] <file>` | park the issue until something happens or a time comes (see Waiting) |
 | `$OPEN_SUPERVISOR agent correction --area <area> <file>` | log a correction (see Log corrections) |
 | `$OPEN_SUPERVISOR agent problem --kind <kind> <file>` | log a problem you worked around (see Report problems) |
@@ -157,7 +159,7 @@ Keep it brief; the PR has the detail.
 
 The message lists what happened since your last turn, each under its own heading. Re-read the issue (`agent issue view`) and the PR (`agent pr view <pr>`) before acting, so each comment is read in context, then take the events in order:
 
-- **A comment** (on the issue, the PR, an inline review thread, or a review). A comment that is only an image is often pointing at something: fetch it (`curl -sL -o .local/<name>.png <url>`) and look. Then:
+- **A comment** (on the issue, the PR, an inline review thread, or a review). A comment that is only an image is often pointing at something: fetch it (`$OPEN_SUPERVISOR agent attachment get <url> .local/<name>.png`, or `curl` for a link elsewhere) and look. Then:
   - A change request: make it, commit, push.
   - A question: answer it. A request you think is wrong, or one you can't act on: say why, briefly, and ask.
   - If the comment corrects something you did, log it (see Log corrections).

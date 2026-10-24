@@ -11,6 +11,7 @@ package adapter
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"os/exec"
 	"time"
@@ -159,6 +160,15 @@ type ReactionReader interface {
 // to open follow-up work. labels go on as the issue is opened, so it is never seen without them.
 type IssueOpener interface {
 	OpenIssue(ctx context.Context, title, body string, labels []string) (core.Issue, error)
+}
+
+// Attacher is a tracker or repo that can hold files for comments: one an agent uploads to link from a comment,
+// and the attachments people put in comments, which a private repository serves only to someone signed in.
+type Attacher interface {
+	// Attach stores a file for the issue and returns a link a comment can carry (as an image, for an image).
+	Attach(ctx context.Context, key, name string, data []byte) (string, error)
+	// Fetch downloads a file a comment links to, signed in. ok is false when the link isn't this service's.
+	Fetch(ctx context.Context, url string) (body io.ReadCloser, ok bool, err error)
 }
 
 // Transitioner is a tracker with workflow statuses of its own (Jira), moved as the agent's state changes.

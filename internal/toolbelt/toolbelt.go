@@ -208,7 +208,7 @@ func Command() *cobra.Command {
 	root.PersistentFlags().StringVar(&f.config, "config", "", "config file (default $OPEN_SUPERVISOR_CONFIG or ~/.config/open-supervisor/config.yaml)")
 	root.PersistentFlags().StringVar(&f.project, "project", "", "project name (default $OPEN_SUPERVISOR_PROJECT or the current checkout's)")
 	root.PersistentFlags().StringVar(&f.issue, "issue", "", "issue key (default $OPEN_SUPERVISOR_ISSUE or the current branch's)")
-	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), worktreeCmd(f), waitCmd(f), scheduleCmd(f), correctionCmd(f), problemCmd(f), inflightCmd(f))
+	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), attachmentCmd(f), worktreeCmd(f), waitCmd(f), scheduleCmd(f), correctionCmd(f), problemCmd(f), inflightCmd(f))
 	return root
 }
 
@@ -707,6 +707,111 @@ func checksCmd(f *flags) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// attachers are the project's services that hold files for comments: the tracker first, as comments go there.
+func (s *session) attachers() []adapter.Attacher {
+	var out []adapter.Attacher
+	for _, x := range []any{s.b.Tracker, s.b.Repo} {
+		if a, ok := x.(adapter.Attacher); ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func attachmentCmd(f *flags) *cobra.Command {
+	cmd := &cobra.Command{Use: "attachment", Short: "Upload a file to link from a comment, or download one a comment links to"}
+	upload := &cobra.Command{
+		Use:   "upload <file>",
+		Short: "Upload a file (an image, a zip, a document) for the issue and print a link to put in a comment",
+		Long: "Upload a file for the issue and print a link to it. Put it in a comment as ![what it shows](<link>) for an image, " +
+			"or [name](<link>) for anything else.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := open(f, true)
+			if err != nil {
+				return err
+			}
+			data, err := os.ReadFile(args[0])
+			if err != nil {
+				return err
+			}
+			as := s.attachers()
+			if len(as) == 0 {
+				return errors.New("neither the tracker nor the code host here can hold attachments: link the file from somewhere else")
+			}
+			if s.dryRun {
+				fmt.Fprintln(cmd.OutOrStdout(), "dry run: would upload", args[0])
+				return nil
+			}
+			ctx, cancel := timeout()
+			defer cancel()
+			link, err := as[0].Attach(ctx, s.key, filepath.Base(args[0]), data)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), link)
+			return nil
+		},
+	}
+	get := &cobra.Command{
+		Use:   "get <url> <file>",
+		Short: "Download a file a comment links to (an image, an attachment) into <file>, signed in as the project's tracker or code host",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := open(f, false)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := timeout()
+			defer cancel()
+			for _, a := range s.attachers() {
+				body, ok, err := a.Fetch(ctx, args[0])
+				if !ok {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				defer body.Close()
+				if err := writeFile(args[1], body); err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), args[1])
+				return nil
+			}
+			where := s.b.Tracker.Describe()
+			if repo := s.b.Repo.Describe(); repo != where {
+				where += " or " + repo
+			}
+			return fmt.Errorf("%s isn't a link to %s: fetch it with curl", args[0], where)
+		},
+	}
+	cmd.AddCommand(upload, get)
+	return cmd
+}
+
+// writeFile writes r to path, making its folder, and leaves nothing behind when the copy fails.
+func writeFile(path string, r io.Reader) error {
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(out, r); err == nil {
+		err = out.Close()
+	} else {
+		out.Close()
+	}
+	if err != nil {
+		os.Remove(path)
+	}
+	return err
 }
 
 func (s *session) worktreeSpec(log io.Writer) worktree.Spec {
