@@ -764,7 +764,7 @@ func (p *Project) turnBody(r *store.Record, events []core.Event, handoff bool) (
 	if r.Turns == 0 {
 		var b strings.Builder
 		if in := p.inflight(r.Key); in != "" {
-			b.WriteString("In flight (other agents' issues; before you build, reconcile with any that overlaps yours):\n" + in)
+			b.WriteString("In flight (other agents' issues; before you build, check whether any overlaps yours):\n" + in)
 		}
 		if len(events) > 0 {
 			if b.Len() > 0 {
