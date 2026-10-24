@@ -60,6 +60,8 @@ type Supervisor struct {
 	hookURL  string
 	usage    map[string]*core.Usage
 	usageErr map[string]string
+	// limits hold the turns on an agent until a time, after one hit the usage limit; by agent name.
+	limits   map[string]time.Time
 	sweeping bool
 	triaging bool
 	stopping bool
@@ -356,7 +358,9 @@ func (s *Supervisor) schedule() {
 	projects := s.Projects()
 	queues := make([][]*store.Record, len(projects))
 	for i, p := range projects {
-		queues[i] = p.candidates()
+		if s.limitedUntil(p.AgentName).IsZero() {
+			queues[i] = p.candidates()
+		}
 	}
 	for started := true; started; {
 		started = false
@@ -380,6 +384,39 @@ func (s *Supervisor) schedule() {
 		}
 	}
 	s.changed()
+}
+
+// limit holds every turn on an agent until a time: the limit that stopped one turn stops the others too. A zero
+// time lifts the hold.
+func (s *Supervisor) limit(agent string, until time.Time) {
+	s.mu.Lock()
+	if until.IsZero() {
+		delete(s.limits, agent)
+		s.mu.Unlock()
+		return
+	}
+	if s.limits == nil {
+		s.limits = map[string]time.Time{}
+	}
+	fresh := until.After(s.limits[agent])
+	if fresh {
+		s.limits[agent] = until
+	}
+	s.mu.Unlock()
+	if fresh {
+		logx.Default.Printf("agent %s hit its usage limit; no turns on it until %s", agent, core.Clock(until))
+	}
+}
+
+// limitedUntil is when the hold on an agent's turns ends, zero if it isn't held.
+func (s *Supervisor) limitedUntil(agent string) time.Time {
+	s.mu.RLock()
+	until := s.limits[agent]
+	s.mu.RUnlock()
+	if time.Now().Before(until) {
+		return until
+	}
+	return time.Time{}
 }
 
 // ---- lifecycle ------------------------------------------------------------------------------------------

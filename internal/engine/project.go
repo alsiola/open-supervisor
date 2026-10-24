@@ -38,6 +38,9 @@ type hub interface {
 	fact(f core.Fact)
 	// peer is another project under the same supervisor, nil if there is none by the name.
 	peer(name string) *Project
+	// limit holds every turn on an agent until a time, after one hit the subscription's usage limit; a zero time
+	// lifts the hold.
+	limit(agent string, until time.Time)
 }
 
 // Project is one project under the supervisor: it claims the issues its source routes to it, gives each a
@@ -651,6 +654,8 @@ func (p *Project) RunNow(key string) {
 		}()
 		return
 	}
+	// The owner asking for a turn lifts a usage-limit hold too: they may know the limit has gone.
+	p.hub.limit(p.AgentName, time.Time{})
 	p.Store.Update(key, func(x *store.Record) {
 		x.Attempts = 0
 		x.RetryAfter = nil
@@ -1128,16 +1133,35 @@ func (p *Project) settle(key string, events []core.Event, turn adapter.Turn) {
 	p.hub.schedule()
 }
 
+const (
+	// limitGrace is how long after the usage limit lifts a turn it stopped runs again.
+	limitGrace = 2 * time.Minute
+	// limitWait is how long to wait when claude didn't say when the limit lifts.
+	limitWait = 30 * time.Minute
+)
+
 func (p *Project) failed(key string, events []core.Event, outcome core.Outcome) {
 	now := time.Now().UTC()
 	errText := outcome.Error
 	if errText == "" {
 		errText = "the turn ended without a status"
 	}
+	// A turn the usage limit stopped isn't the issue's fault: it doesn't count as an attempt, and it runs again
+	// shortly after the limit lifts.
+	var limitRetry time.Time
+	if outcome.Limited {
+		limitRetry = now.Add(limitWait)
+		if outcome.ResetsAt != nil {
+			limitRetry = outcome.ResetsAt.Add(limitGrace)
+		}
+	}
 	r := p.Store.Update(key, func(x *store.Record) {
 		x.State = store.Failed
-		x.Attempts++
-		retry := now.Add(time.Duration(x.Attempts*5) * time.Minute)
+		retry := limitRetry
+		if !outcome.Limited {
+			x.Attempts++
+			retry = now.Add(time.Duration(x.Attempts*5) * time.Minute)
+		}
 		x.RetryAfter = &retry
 		x.Cost += outcome.Cost
 		x.Tokens = x.Tokens.Add(outcome.Tokens)
@@ -1155,13 +1179,18 @@ func (p *Project) failed(key string, events []core.Event, outcome core.Outcome) 
 			x.LastTurn.Models = outcome.Models
 			x.LastTurn.Handle = nil
 		}
-		if x.Trial != nil {
+		// A limit hit says nothing about the arm, so it isn't counted against it.
+		if x.Trial != nil && !outcome.Limited {
 			x.Trial.Add(outcome, 0)
 		}
 	})
 	p.report(key, outcome)
 	retry := " (press r to retry)"
-	if r != nil && r.Attempts < p.hub.settings().MaxAttempts {
+	switch {
+	case outcome.Limited:
+		retry = " (retry at " + core.Clock(limitRetry) + ")"
+		p.hub.limit(p.AgentName, limitRetry)
+	case r != nil && r.Attempts < p.hub.settings().MaxAttempts:
 		retry = fmt.Sprintf(" (retry in %d min)", r.Attempts*5)
 	}
 	p.logf("%s: turn failed after %.1f min: %s%s", p.ref(key), outcome.Duration.Minutes(), errText, retry)

@@ -308,6 +308,7 @@ type result struct {
 	Type             string                    `json:"type"`
 	Subtype          string                    `json:"subtype"`
 	IsError          bool                      `json:"is_error"`
+	APIError         string                    `json:"api_error"`
 	Result           any                       `json:"result"`
 	SessionID        string                    `json:"session_id"`
 	TotalCostUSD     *float64                  `json:"total_cost_usd"`
@@ -465,17 +466,24 @@ func parse(stdout, stderr string, code *int, structured bool) core.Outcome {
 	o.ModelCalls, o.ToolCalls = r.NumTurns, toolCalls(stdout)
 	o.Tokens, o.Models = usage(r.ModelUsage, nil)
 	if r.IsError || (code != nil && *code != 0) {
-		sub := r.Subtype
-		if sub == "" {
-			sub = "error"
+		o.Limited, o.ResetsAt = limitHit(r, stdout, time.Now())
+		text := o.Text
+		if len(text) > 300 {
+			text = text[:300]
 		}
-		o.Error = sub
-		if o.Text != "" {
-			text := o.Text
-			if len(text) > 300 {
-				text = text[:300]
-			}
-			o.Error += ": " + text
+		// claude marks some failed turns "success", a limit hit among them: the text alone says what went wrong.
+		sub := r.Subtype
+		switch {
+		case text != "" && (sub == "success" || o.Limited):
+			o.Error = text
+		case text != "":
+			o.Error = sub + ": " + text
+		case o.Limited:
+			o.Error = "hit the usage limit"
+		case sub == "" || sub == "success":
+			o.Error = "error"
+		default:
+			o.Error = sub
 		}
 		return o
 	}
