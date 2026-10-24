@@ -30,6 +30,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/adapter"
 	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/core"
+	hostinfo "github.com/alsiola/open-supervisor/internal/host"
 	"github.com/alsiola/open-supervisor/internal/logx"
 	"github.com/alsiola/open-supervisor/internal/playbooks"
 	"github.com/alsiola/open-supervisor/internal/problems"
@@ -69,6 +70,9 @@ type Supervisor struct {
 	// seenProblems are the problem notes already sent to telemetry, by project and file; nil until the first
 	// look, which only takes note of what is there.
 	seenProblems map[string]bool
+	// host is the watch on the machine's load, memory and disks, and hostSample its last reading.
+	host       hostWatch
+	hostSample *hostinfo.Sample
 
 	shellMu sync.Mutex
 	shells  []*Shell
@@ -516,6 +520,7 @@ func (s *Supervisor) loop(ctx context.Context) {
 	lastReconcile := time.Now()
 	lastUsage := time.Now()
 	lastPrune := time.Now()
+	var lastHost time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -529,6 +534,10 @@ func (s *Supervisor) loop(ctx context.Context) {
 			if time.Since(lastUsage) >= time.Duration(st.UsageMinutes)*time.Minute {
 				lastUsage = time.Now()
 				go s.readUsage()
+			}
+			if st.Host.Minutes > 0 && time.Since(lastHost) >= time.Duration(st.Host.Minutes)*time.Minute {
+				lastHost = time.Now()
+				go s.readHost()
 			}
 			if time.Since(lastPrune) >= 6*time.Hour {
 				lastPrune = time.Now()

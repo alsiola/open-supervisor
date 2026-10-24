@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/alsiola/open-supervisor/internal/adapter"
 )
 
@@ -130,5 +132,23 @@ func TestValidateLand(t *testing.T) {
 	c.Projects = []*Project{{Name: "p", Root: "/x", Repo: &Binding{Connection: "a"}, Sweep: Sweep{Land: "merge"}}}
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), `sweep.land is push or pr, not "merge"`) {
 		t.Fatalf("err: %v", err)
+	}
+}
+
+func TestHost(t *testing.T) {
+	c, err := Parse("x.yaml", []byte("settings:\n  host: { minutes: 2, disk: 80 }\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if load, memory, disk := c.Settings.Host.Thresholds(); c.Settings.Host.Minutes != 2 || load != 1.5 || memory != 90 || disk != 80 {
+		t.Fatalf("host %+v: thresholds %v %v %v", c.Settings.Host, load, memory, disk)
+	}
+	c.Settings.Host.Memory = 120
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "settings.host") {
+		t.Fatalf("err: %v", err)
+	}
+	// Off by default, and left out of a new config.
+	if data, _ := yaml.Marshal(New("").Settings); strings.Contains(string(data), "host") {
+		t.Errorf("a new config has a host block:\n%s", data)
 	}
 }
