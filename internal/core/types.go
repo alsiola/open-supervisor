@@ -157,6 +157,22 @@ type Checks struct {
 	Runs    []CheckRun `json:"runs,omitempty"`
 }
 
+// Missing are the required checks that haven't reported on the commit at all.
+func (c Checks) Missing(required []string) []string {
+	seen := map[string]bool{}
+	for _, r := range c.Runs {
+		seen[r.Name] = true
+	}
+	var out []string
+	for _, name := range required {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // Tokens are a turn's token counts, summed over the models it used.
 type Tokens struct {
 	Input         int64 `json:"input"`

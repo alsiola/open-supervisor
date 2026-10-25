@@ -26,6 +26,7 @@ type fakeHost struct {
 	comments  map[string][]core.Comment
 	prs       map[int]core.PR
 	checks    map[string]core.Checks
+	required  []string
 	labelOps  []string
 	reads     int
 	posted    []string
@@ -162,6 +163,11 @@ func (h *fakeHost) Checks(_ context.Context, sha string) (core.Checks, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.checks[sha], nil
+}
+func (h *fakeHost) RequiredChecks(context.Context, string) ([]string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.required, nil
 }
 func (h *fakeHost) CreatePR(context.Context, adapter.PRRequest) (core.PR, error) {
 	return core.PR{}, nil
@@ -556,6 +562,41 @@ func TestChecksAndMergeReachTheAgent(t *testing.T) {
 	waitFor(t, "finished", func() bool { return state(p, "4") == store.Finished })
 	if body := agent.turns()[2].Body; !strings.Contains(body, "PR #42 merged") {
 		t.Fatalf("merge turn:\n%s", body)
+	}
+}
+
+func TestMissingRequiredCheckIsNotAPass(t *testing.T) {
+	const sha = "995bdda1234567890"
+	n := 0
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		n++
+		if n == 1 {
+			host.mu.Lock()
+			host.prs[42] = core.PR{ID: 42, State: core.PROpen, Branch: "agent/issue-4", Base: "main", HeadSHA: sha}
+			host.checks[sha] = core.Checks{Complete: true, Any: true, Runs: []core.CheckRun{{Name: "test", State: "success"}}}
+			host.required = []string{"test", "netlify/site/deploy-preview"}
+			host.mu.Unlock()
+			return core.Outcome{OK: true, Status: &core.Status{State: core.Building, Summary: "pushed", PRs: []int{42}}}
+		}
+		return review("reported")
+	})
+	host.issues["4"] = &core.Issue{Key: "4", Title: "Four", Open: true}
+	p.reconcile()
+	waitFor(t, "building", func() bool { return state(p, "4") == store.Building })
+	p.evaluateChecks(sha)
+	time.Sleep(100 * time.Millisecond)
+	if n := len(agent.turns()); n != 1 {
+		t.Fatalf("%d turns: the deploy check hadn't reported yet, so nothing should have woken the agent", n)
+	}
+	p.Store.Update("4", func(x *store.Record) {
+		old := time.Now().Add(-time.Hour)
+		x.HeadAt = &old
+	})
+	p.evaluateChecks(sha)
+	waitFor(t, "missing-checks turn", func() bool { return len(agent.turns()) >= 2 })
+	body := agent.turns()[1].Body
+	if !strings.Contains(body, "Required checks never reported on PR #42 at 995bdda: netlify/site/deploy-preview") || strings.Contains(body, "Checks passed") {
+		t.Fatalf("checks turn:\n%s", body)
 	}
 }
 

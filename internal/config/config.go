@@ -66,7 +66,8 @@ type Settings struct {
 	// MaxAttempts is how many times a failed turn is retried before the issue waits for a hand.
 	MaxAttempts           int `yaml:"maxAttempts"`
 	ChecksDebounceSeconds int `yaml:"checksDebounceSeconds"`
-	// NoChecksMinutes is how long a PR head with no checks at all waits before the agent hears none ran.
+	// NoChecksMinutes is how long a PR head with no checks at all, or without a check the base branch requires,
+	// waits before the agent hears none ran or which never reported.
 	NoChecksMinutes int `yaml:"noChecksMinutes"`
 	// HandoffMinutes: a turn due this long after the last one ended, when the old session's prompt cache has
 	// expired, may start a fresh session from the last turn's handoff note instead of resuming. 0: every turn may.

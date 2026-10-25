@@ -687,19 +687,32 @@ func checksCmd(f *flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			var missing []string
+			if rc, ok := s.b.Repo.(adapter.RequiredChecker); ok && pr.Base != "" {
+				required, err := rc.RequiredChecks(ctx, pr.Base)
+				if err != nil {
+					return err
+				}
+				missing = c.Missing(required)
+			}
 			out := cmd.OutOrStdout()
 			state := "pending"
 			switch {
-			case !c.Any:
+			case !c.Any && len(missing) == 0:
 				state = "no checks"
-			case c.Complete && len(c.Failed) == 0:
+			case c.Complete && len(c.Failed) == 0 && len(missing) == 0:
 				state = "passed"
-			case c.Complete:
+			case c.Complete && len(c.Failed) > 0:
 				state = "failed"
+			case c.Complete || !c.Any:
+				state = "waiting on required checks"
 			}
 			fmt.Fprintf(out, "PR #%d at %s: %s\n", pr.ID, pr.HeadSHA, state)
 			for _, r := range c.Runs {
 				fmt.Fprintf(out, "  %-8s %s %s\n", r.State, r.Name, r.URL)
+			}
+			for _, name := range missing {
+				fmt.Fprintf(out, "  %-8s %s (required, not reported)\n", "missing", name)
 			}
 			if c.Preview != "" {
 				fmt.Fprintf(out, "preview: %s\n", c.Preview)

@@ -129,6 +129,32 @@ func TestChecksEvaluation(t *testing.T) {
 	}
 }
 
+func TestRequiredChecks(t *testing.T) {
+	_, rp := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.EscapedPath() {
+		case "/repos/octo/widgets/branches/release/v%231":
+			fmt.Fprint(w, `{"protection":{"required_status_checks":{"contexts":["netlify/site/deploy-preview"],"checks":[{"context":"netlify/site/deploy-preview"},{"context":"test"}]}}}`)
+		case "/repos/octo/widgets/rules/branches/release/v%231":
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature."}`)
+		case "/repos/octo/widgets/branches/main":
+			fmt.Fprint(w, `{"protection":{"enabled":false,"required_status_checks":{"contexts":[],"checks":[]}}}`)
+		case "/repos/octo/widgets/rules/branches/main":
+			fmt.Fprint(w, `[{"type":"deletion"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"typecheck"}]}}]`)
+		default:
+			t.Errorf("unexpected %s", r.URL.EscapedPath())
+		}
+	}))
+	got, err := rp.RequiredChecks(context.Background(), "release/v#1")
+	if err != nil || strings.Join(got, ",") != "netlify/site/deploy-preview,test" {
+		t.Fatalf("protected branch: %v %v", got, err)
+	}
+	got, err = rp.RequiredChecks(context.Background(), "main")
+	if err != nil || strings.Join(got, ",") != "typecheck" {
+		t.Fatalf("ruleset: %v %v", got, err)
+	}
+}
+
 func TestMarkers(t *testing.T) {
 	cases := map[string]*core.AgentMark{
 		withMark("hi", core.AgentMark{From: "12"}): {From: "12"},

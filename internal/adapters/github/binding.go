@@ -668,6 +668,63 @@ func (r *Repo) evaluate(runs []checkRun, statuses []commitStatus) core.Checks {
 	return out
 }
 
+// RequiredChecks are the status checks the branch's protection and its rulesets require before a merge.
+func (r *Repo) RequiredChecks(ctx context.Context, branch string) ([]string, error) {
+	segs := strings.Split(branch, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	name := strings.Join(segs, "/")
+	type check struct {
+		Context string `json:"context"`
+	}
+	var b struct {
+		Protection struct {
+			RequiredStatusChecks struct {
+				Contexts []string `json:"contexts"`
+				Checks   []check  `json:"checks"`
+			} `json:"required_status_checks"`
+		} `json:"protection"`
+	}
+	if _, err := r.c.call(ctx, false, r.repo, http.MethodGet, r.path("/branches/%s", name), nil, &b); err != nil && !adapter.IsStatus(err, http.StatusNotFound) {
+		return nil, err
+	}
+	var rules []struct {
+		Type       string `json:"type"`
+		Parameters struct {
+			RequiredStatusChecks []check `json:"required_status_checks"`
+		} `json:"parameters"`
+	}
+	// Rulesets aren't on every plan (a private repo on GitHub Free answers 403): then there are none to read.
+	if _, err := r.c.call(ctx, false, r.repo, http.MethodGet, r.path("/rules/branches/%s", name), nil, &rules); err != nil &&
+		!adapter.IsStatus(err, http.StatusForbidden) && !adapter.IsStatus(err, http.StatusNotFound) {
+		return nil, err
+	}
+	var out []string
+	seen := map[string]bool{}
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	rsc := b.Protection.RequiredStatusChecks
+	for _, c := range rsc.Contexts {
+		add(c)
+	}
+	for _, c := range rsc.Checks {
+		add(c.Context)
+	}
+	for _, rule := range rules {
+		if rule.Type == "required_status_checks" {
+			for _, c := range rule.Parameters.RequiredStatusChecks {
+				add(c.Context)
+			}
+		}
+	}
+	return out, nil
+}
+
 func (r *Repo) CreatePR(ctx context.Context, req adapter.PRRequest) (core.PR, error) {
 	base := req.Base
 	if base == "" {
