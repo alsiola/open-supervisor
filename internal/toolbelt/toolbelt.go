@@ -208,7 +208,7 @@ func Command() *cobra.Command {
 	root.PersistentFlags().StringVar(&f.config, "config", "", "config file (default $OPEN_SUPERVISOR_CONFIG or ~/.config/open-supervisor/config.yaml)")
 	root.PersistentFlags().StringVar(&f.project, "project", "", "project name (default $OPEN_SUPERVISOR_PROJECT or the current checkout's)")
 	root.PersistentFlags().StringVar(&f.issue, "issue", "", "issue key (default $OPEN_SUPERVISOR_ISSUE or the current branch's)")
-	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), attachmentCmd(f), worktreeCmd(f), waitCmd(f), scheduleCmd(f), correctionCmd(f), problemCmd(f), inflightCmd(f))
+	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), attachmentCmd(f), worktreeCmd(f), taskCmd(f), waitCmd(f), scheduleCmd(f), correctionCmd(f), problemCmd(f), inflightCmd(f))
 	return root
 }
 
@@ -847,7 +847,7 @@ func worktreeCmd(f *flags) *cobra.Command {
 	var force bool
 	remove := &cobra.Command{
 		Use:   "remove",
-		Short: "Stop anything running from the worktree and remove it (the branch stays); refuses while a PR is open",
+		Short: "Stop anything running from the worktree and remove it (the branch stays); refuses while a PR is open, and leaves it to a task running from it",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := open(f, true)
@@ -867,7 +867,12 @@ func worktreeCmd(f *flags) *cobra.Command {
 					}
 				}
 			}
-			return worktree.Remove(s.worktreeSpec(cmd.ErrOrStderr()))
+			spec := s.worktreeSpec(cmd.ErrOrStderr())
+			if tasks := engine.TasksWithin(s.b.StateDir, spec.Path); len(tasks) > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "leaving the worktree while the tasks running from it go on (%s); the supervisor removes it when the last ends, once the issue is finished\n", engine.TaskNames(tasks))
+				return nil
+			}
+			return worktree.Remove(spec)
 		},
 	}
 	remove.Flags().BoolVar(&force, "force", false, "remove it even while a PR is open")

@@ -242,6 +242,7 @@ The job learns about the delivery from `OPEN_SUPERVISOR_EVENT`, `OPEN_SUPERVISOR
 - **Interjects.** A comment or TUI message that arrives mid-turn goes into the running turn. The agent takes it in after its current tool call.
 - **Sets status labels** from the state each turn ends in, and takes them off while a turn runs. On Jira it can also move the issue through workflow statuses.
 - **Waits.** An agent parks an issue until something happens with `agent wait`: another PR merging or closing (`pr:1257:merged`), another issue closing or its agent ending a turn in a state (`issue:1267:review`), a project job's next run ending (`job:backup`), or a time (`--until`). Any one of the conditions wakes it, with a note saying what happened. Conditions can name another project under the same supervisor (`pr:club/88:merged`). `agent issue create --wait … --until …` opens follow-up work that is held the same way until then. Webhooks, the end of each turn and each job run meet waits as they happen, and the reconcile reads what they missed. `agent schedule <time>` is the same as `agent wait --until <time>`. By hand, label an issue `scheduled` and put a hold marker in its body or a comment: `<!-- runAt: 2026-10-25T09:00Z -->`, or `<!-- waitFor: pr:1257:merged; until 2026-10-25T09:00Z -->` (`[runAt: …]` and `[waitFor: …]` on trackers that can't hide comments). `<!-- waitFor: cancel -->` drops a hold.
+- **Runs long tasks.** `agent task start <name> -- <command>` runs a command for the issue detached from the agent's shell (a backfill, a cache fill), so it isn't stopped by the agent's limit on background commands, the end of the turn, a restart of the supervisor or the issue finishing. Its output goes to a log, and each task is kept as JSON in the project's state folder (`tasks/`), which a project's own health check can read; `agent task list --all` shows them. When one ends, the supervisor says how on the issue (outcome, exit code, time, last line, log) and wakes its agent with the same note unless the issue has finished. A worktree a task runs from stays until the last task there ends, then goes if its issue has finished. `agent task stop <name>` stops one and everything it started.
 - **Webhooks plus reconcile.** Webhooks arrive through the tunnel and are signature-checked. They can also [run a project's jobs](#jobs-on-webhooks). Every few minutes a reconcile reads everything a webhook could have missed, so webhooks are optional.
 - **Retries** a failed turn after 5, then 10, then 15 minutes, then waits for `r`.
 - **Sweeps** once a day: an agent turn folds the corrections agents logged into the project's rule files. It pushes to the main branch, or opens a PR with `sweep.land: pr` (for a protected branch).
@@ -255,7 +256,7 @@ The playbooks (`internal/playbooks`) reach Claude Code as a plugin of skills: `/
 
 ```
 agent context | issue view | issue comment | issue list | issue create | pr list | pr create | pr view
-agent pr comment | pr reply | checks | attachment upload | attachment get | worktree setup | worktree remove | wait | schedule
+agent pr comment | pr reply | checks | attachment upload | attachment get | worktree setup | worktree remove | task start | task list | task stop | wait | schedule
 agent correction | problem | inflight
 ```
 
