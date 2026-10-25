@@ -27,6 +27,7 @@ type Event struct {
 	SHA     string    `json:"sha,omitempty"`
 	Passed  bool      `json:"passed,omitempty"`
 	Failed  []string  `json:"failed,omitempty"`
+	Missing []string  `json:"missing,omitempty"` // checks: required ones that never reported
 	Preview string    `json:"preview,omitempty"`
 	None    bool      `json:"none,omitempty"` // checks: nothing ran on the commit at all
 	Action  string    `json:"action,omitempty"`
@@ -77,6 +78,9 @@ func (e Event) Describe() string {
 		if e.Passed {
 			return "checks passed on " + short(e.SHA)
 		}
+		if len(e.Failed) == 0 && len(e.Missing) > 0 {
+			return "required checks missing on " + short(e.SHA)
+		}
 		return "checks failed on " + short(e.SHA)
 	case EvPR:
 		return fmt.Sprintf("PR #%d %s", e.PR, e.Action)
@@ -91,6 +95,8 @@ func (e Event) Describe() string {
 	}
 	return string(e.Type)
 }
+
+const missingAdvice = "The PR can't merge without them. Find out why they didn't start (a `[skip …]` in the PR title or a commit message stops some deploys) and start them, often with a new push; if they shouldn't run on this PR, say so in your report."
 
 // Render is the events block an agent reads at the start of a turn. Replies go through the supervisor's own
 // agent commands, so the instructions are the same whatever tracker or code host the project uses.
@@ -138,8 +144,14 @@ func Render(events []Event) string {
 					s += "\nPreview: " + e.Preview
 				}
 				parts = append(parts, s)
+			case len(e.Failed) == 0:
+				parts = append(parts, fmt.Sprintf("### Required checks never reported on PR #%d at %s: %s\n%s", e.PR, short(e.SHA), strings.Join(e.Missing, ", "), missingAdvice))
 			default:
-				parts = append(parts, fmt.Sprintf("### Checks failed on PR #%d at %s: %s\nSee `$OPEN_SUPERVISOR agent checks %d` for links to each.", e.PR, short(e.SHA), strings.Join(e.Failed, ", "), e.PR))
+				s := fmt.Sprintf("### Checks failed on PR #%d at %s: %s\nSee `$OPEN_SUPERVISOR agent checks %d` for links to each.", e.PR, short(e.SHA), strings.Join(e.Failed, ", "), e.PR)
+				if len(e.Missing) > 0 {
+					s += fmt.Sprintf("\nThese required checks never reported either: %s. %s", strings.Join(e.Missing, ", "), missingAdvice)
+				}
+				parts = append(parts, s)
 			}
 		case EvPR:
 			parts = append(parts, fmt.Sprintf("### PR #%d %s", e.PR, e.Action))

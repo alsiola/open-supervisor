@@ -138,6 +138,13 @@ type Repo interface {
 	ReplyInline(ctx context.Context, id int, commentID, body string, mark core.AgentMark) (string, error)
 }
 
+// RequiredChecker is a repo whose branches can require checks before a merge (branch protection, rulesets), so
+// a required check that never reports isn't taken for one that passed.
+type RequiredChecker interface {
+	// RequiredChecks are the names of the checks a PR into branch needs.
+	RequiredChecks(ctx context.Context, branch string) ([]string, error)
+}
+
 // PRRequest is a PR to open.
 type PRRequest struct {
 	Title, Body, Head, Base string

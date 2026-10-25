@@ -1349,15 +1349,26 @@ func (p *Project) evaluateChecks(sha string) {
 			x.HeadAt = &now
 		})
 	}
-	// A repo with no CI never reports anything: after a while, say so rather than wait.
-	none := !result.Any && time.Since(headAt) > time.Duration(p.hub.settings().NoChecksMinutes)*time.Minute
-	if !result.Complete && !none {
+	if result.Any && !result.Complete {
 		return
 	}
 	pr := 0
 	if len(r.PRs) > 0 {
 		pr = r.PRs[len(r.PRs)-1]
 	}
+	required, err := p.requiredChecks(ctx, pr)
+	if err != nil {
+		p.callFailed(err, "%s: couldn't read the checks PR #%d requires", p.ref(r.Key), pr)
+		return
+	}
+	missing := result.Missing(required)
+	// A repo with no CI never reports anything, and a required check can be skipped (a deploy's "[skip …]"):
+	// after a while, say so rather than wait, or count what never ran as a pass.
+	waited := time.Since(headAt) > time.Duration(p.hub.settings().NoChecksMinutes)*time.Minute
+	if len(result.Failed) == 0 && (!result.Any || len(missing) > 0) && !waited {
+		return
+	}
+	none := !result.Any && len(missing) == 0
 	sha = r.HeadSHA
 	p.Store.Update(r.Key, func(x *store.Record) {
 		x.ChecksReported = sha
@@ -1365,7 +1376,20 @@ func (p *Project) evaluateChecks(sha string) {
 			x.Preview = result.Preview
 		}
 	})
-	p.enqueue(r.Key, core.Event{Type: core.EvChecks, PR: pr, SHA: sha, Passed: len(result.Failed) == 0, Failed: result.Failed, Preview: result.Preview, None: none, At: time.Now().UTC()})
+	p.enqueue(r.Key, core.Event{Type: core.EvChecks, PR: pr, SHA: sha, Passed: len(result.Failed) == 0 && len(missing) == 0, Failed: result.Failed, Missing: missing, Preview: result.Preview, None: none, At: time.Now().UTC()})
+}
+
+// requiredChecks are the checks the PR's base branch requires, when the code host has such a thing.
+func (p *Project) requiredChecks(ctx context.Context, id int) ([]string, error) {
+	rc, ok := p.Repo.(adapter.RequiredChecker)
+	if !ok || id == 0 {
+		return nil, nil
+	}
+	pr, err := p.Repo.PR(ctx, id)
+	if err != nil || pr.Base == "" {
+		return nil, err
+	}
+	return rc.RequiredChecks(ctx, pr.Base)
 }
 
 // refreshPRs learns an issue's PRs and the head of its open one.

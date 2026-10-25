@@ -30,12 +30,21 @@ func TestRender(t *testing.T) {
 	out := Render([]Event{
 		{Type: EvComment, Comment: &Comment{ID: "99", Kind: OnInline, Author: "ann", Body: "rename this", PR: 4, Path: "a.go", Line: 3, At: at}},
 		{Type: EvChecks, PR: 4, SHA: "abcdef123", Failed: []string{"lint"}},
+		{Type: EvChecks, PR: 5, SHA: "995bdda12", Missing: []string{"netlify/site/deploy-preview"}},
 		{Type: EvMessage, Text: "hi", At: at},
 	})
-	for _, want := range []string{"Inline comment on PR #4 at a.go:3 by ann", "agent pr reply 4 99", "Checks failed on PR #4 at abcdef1: lint", "Message from the owner"} {
+	for _, want := range []string{"Required checks never reported on PR #5 at 995bdda: netlify/site/deploy-preview", "Inline comment on PR #4 at a.go:3 by ann", "agent pr reply 4 99", "Checks failed on PR #4 at abcdef1: lint", "Message from the owner"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+func TestChecksMissing(t *testing.T) {
+	c := Checks{Runs: []CheckRun{{Name: "test", State: "success"}, {Name: "lint", State: "failure"}}}
+	got := c.Missing([]string{"test", "deploy-preview", "lint", "deploy-preview"})
+	if len(got) != 1 || got[0] != "deploy-preview" {
+		t.Fatalf("missing %v", got)
 	}
 }
 
