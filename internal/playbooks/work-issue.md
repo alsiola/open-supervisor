@@ -140,7 +140,7 @@ Post a short start comment on the issue, e.g. `printf 'Working on this on branch
 ### 3. Do the work
 
 - Follow the project's rules, and load each rule skill they list before the work it covers.
-- Keep scratch files in the worktree's `.local/` (or another ignored folder the rules name).
+- Keep scratch files in the worktree's `.local/`, which setup creates (or another ignored folder the rules name).
 - Before opening the PR, run what the rules say must pass (typecheck, tests, build) and make it pass.
 - Commit on the issue's branch with clear messages. The supervisor sets up commit signing (off unless the project asks for it), so don't pass signing flags.
 

@@ -1,5 +1,6 @@
 // Package worktree gives each issue its own git worktree on its own branch, outside the project's checkout so
-// nothing has to be ignored there. Setup copies the files the project lists (.env) on every run and runs the
+// nothing has to be ignored there. Setup makes the .local/ scratch folder the playbook points agents at, copies
+// the files the project lists (.env) on every run and runs the
 // project's setup command when one of the files it watches (a lockfile) has changed; Refresh copies the files
 // alone, before each turn, so a resumed agent that doesn't run Setup again still sees keys added since. Remove stops anything
 // still running from the worktree, removes it and keeps the branch, so nothing committed is lost.
@@ -100,6 +101,7 @@ func Setup(s Spec) (string, error) {
 			return "", err
 		}
 	}
+	s.scratch()
 	// Copied on every run, not only when missing, so a reused worktree picks up keys added since.
 	s.copyFiles()
 	if s.Setup != "" {
@@ -108,6 +110,17 @@ func Setup(s Spec) (string, error) {
 		}
 	}
 	return s.Path, nil
+}
+
+// Scratch is the folder, relative to the worktree, where agents keep files they don't commit.
+const Scratch = ".local"
+
+// scratch makes the worktree's scratch folder, so the first redirect into it doesn't fail. A project that
+// doesn't ignore it sees nothing until something is put there: git doesn't track an empty folder.
+func (s Spec) scratch() {
+	if err := os.MkdirAll(filepath.Join(s.Path, Scratch), 0o755); err != nil {
+		s.logf("couldn't make %s: %v", Scratch, err)
+	}
 }
 
 // Refresh copies the project's files into the worktree again when it exists, so a key added to the main
@@ -152,6 +165,7 @@ func Fresh(s Spec) (string, error) {
 	if head, err := git(s.Path, "rev-parse", "--short", "HEAD"); err == nil {
 		s.logf("checked out %s/%s at %s in %s", s.remote(), base, head, s.Path)
 	}
+	s.scratch()
 	s.copyFiles()
 	if s.Setup != "" {
 		if err := runSetup(s); err != nil {
