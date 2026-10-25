@@ -235,3 +235,40 @@ func TestCatchUp(t *testing.T) {
 		t.Errorf("no remote: %+v", got)
 	}
 }
+
+func TestUnpushed(t *testing.T) {
+	dir := t.TempDir()
+	upstream, root := filepath.Join(dir, "upstream.git"), filepath.Join(dir, "repo")
+	runGit(t, dir, "init", "-q", "--bare", "-b", "main", upstream)
+	runGit(t, dir, "clone", "-q", upstream, root)
+	_ = os.WriteFile(filepath.Join(root, ".gitignore"), []byte(".local/\n"), 0o644)
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-qm", "one")
+	runGit(t, root, "push", "-q", "origin", "HEAD:main")
+	spec := Spec{Root: root, Path: filepath.Join(dir, "data", "issue-3"), Branch: "agent/issue-3", Base: "main"}
+	if lost, err := Unpushed(spec); err != nil || lost != "" {
+		t.Fatalf("no worktree: %q, %v", lost, err)
+	}
+	path, err := Setup(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = os.MkdirAll(filepath.Join(path, ".local"), 0o755)
+	_ = os.WriteFile(filepath.Join(path, ".local", "notes.md"), []byte("x"), 0o644)
+	if lost, err := Unpushed(spec); err != nil || lost != "" {
+		t.Fatalf("fresh worktree with scratch files: %q, %v", lost, err)
+	}
+	_ = os.WriteFile(filepath.Join(path, "b.txt"), []byte("x"), 0o644)
+	if lost, _ := Unpushed(spec); !strings.Contains(lost, "uncommitted") {
+		t.Fatalf("a new file: %q", lost)
+	}
+	runGit(t, path, "add", ".")
+	runGit(t, path, "commit", "-qm", "two")
+	if lost, _ := Unpushed(spec); !strings.Contains(lost, "1 commit") {
+		t.Fatalf("an unpushed commit: %q", lost)
+	}
+	runGit(t, path, "push", "-q", "origin", "HEAD:agent/issue-3")
+	if lost, err := Unpushed(spec); err != nil || lost != "" {
+		t.Fatalf("pushed: %q, %v", lost, err)
+	}
+}

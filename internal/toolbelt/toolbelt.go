@@ -859,7 +859,18 @@ func worktreeCmd(f *flags) *cobra.Command {
 				prs, err := s.issuePRs(ctx)
 				cancel()
 				if err != nil {
-					return err
+					// The PRs can't be read (a rate limit, say): remove it anyway when all its work is pushed, since
+					// the branch keeps it, rather than leave the worktree and whatever runs from it behind.
+					spec := s.worktreeSpec(cmd.ErrOrStderr())
+					lost, gitErr := worktree.Unpushed(spec)
+					if gitErr != nil || lost != "" {
+						if lost == "" {
+							lost = gitErr.Error()
+						}
+						return fmt.Errorf("%w; leaving the worktree, since %s", err, lost)
+					}
+					fmt.Fprintf(cmd.ErrOrStderr(), "couldn't check %s's PRs (%v); removing the worktree, since everything on it is pushed\n", s.key, err)
+					return worktree.Remove(spec)
 				}
 				for _, pr := range prs {
 					if pr.State == core.PROpen {
