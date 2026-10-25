@@ -35,6 +35,9 @@ func TestSetupAndRemove(t *testing.T) {
 	if data, _ := os.ReadFile(filepath.Join(path, ".env")); string(data) != "A=1" {
 		t.Fatal(".env wasn't copied")
 	}
+	if info, err := os.Stat(filepath.Join(path, Scratch)); err != nil || !info.IsDir() {
+		t.Fatalf("no %s scratch folder in the new worktree: %v", Scratch, err)
+	}
 	if _, err := Setup(spec); err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +128,9 @@ func TestFresh(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(filepath.Join(path, ".env")); string(data) != "A=1" {
 		t.Error(".env wasn't copied")
+	}
+	if _, err := os.Stat(filepath.Join(path, Scratch)); err != nil {
+		t.Errorf("no %s scratch folder: %v", Scratch, err)
 	}
 	if data, _ := os.ReadFile(filepath.Join(path, "setup.log")); string(data) != "ran\n" {
 		t.Errorf("setup.log = %q", data)
