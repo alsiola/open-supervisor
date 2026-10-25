@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.3.0](https://github.com/alsiola/open-supervisor/compare/v1.2.1...v1.3.0) (2026-10-25)
+
+### Features
+
+* **toolbelt:** add agent task to run long commands past the turn and the issue ([#65](https://github.com/alsiola/open-supervisor/issues/65)) ([7df2456](https://github.com/alsiola/open-supervisor/commit/7df24562cec920cacdaf38e21b2fdf68fb55b136)), closes [#58](https://github.com/alsiola/open-supervisor/issues/58)
+* **worktree:** refuse a new worktree on a full disk and sweep spare ones ([#63](https://github.com/alsiola/open-supervisor/issues/63)) ([3dcf60c](https://github.com/alsiola/open-supervisor/commit/3dcf60cc9f6b15c66fdd4d96b211fff2d2d1824c))
+
+### Bug Fixes
+
+* **engine:** wait for the checks the base branch requires before reporting a pass ([#64](https://github.com/alsiola/open-supervisor/issues/64)) ([c37edf1](https://github.com/alsiola/open-supervisor/commit/c37edf144e784324604040b1705a384f9d7b4586)), closes [#59](https://github.com/alsiola/open-supervisor/issues/59)
+* **github:** fall back to the bot token and to git when rate limited ([#61](https://github.com/alsiola/open-supervisor/issues/61)) ([de775ef](https://github.com/alsiola/open-supervisor/commit/de775efd36362ce8ccd7d8217d84e42c60947a0e))
+* **worktree:** create the .local/ scratch folder in new worktrees ([#62](https://github.com/alsiola/open-supervisor/issues/62)) ([265fe98](https://github.com/alsiola/open-supervisor/commit/265fe98b849746a0c67de5b71bf2135cb0ae68e9)), closes [#56](https://github.com/alsiola/open-supervisor/issues/56)
+
 ## [1.2.1](https://github.com/alsiola/open-supervisor/compare/v1.2.0...v1.2.1) (2026-10-25)
 
 ### Bug Fixes
