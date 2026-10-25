@@ -25,3 +25,5 @@ When a change only works if a convention is followed (commit format, naming), ad
 - Put behaviour that varies by project (workflow steps, wording, categories) in the repo's own agent files (`CLAUDE.md`, `AGENTS.md`, skills), not behind an open-supervisor config setting.
 - Let project playbook files and rules only add to the core playbooks, never replace them. The core lifecycle stays fixed.
 - Measure each arm of an experiment through to the outcome (later turns, tokens, tool calls, time, completion), not on the drawn turn alone, and record how many times each arm was assigned so feedback counts have a denominator.
+- Design agent-facing features from the interface in: an agent asks the supervisor for an outcome through an `agent` command and never needs to know about markers, labels or tracker conventions. When asked what agents should know about a feature, answer that, not how the mechanism works.
+- When an issue asks for thoughts on an idea, lead with the smallest version that would work and the evidence for or against it. Offer the fuller design (new commands, events, TUI, rollout) only when asked.
