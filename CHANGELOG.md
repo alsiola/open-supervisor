@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.1](https://github.com/alsiola/open-supervisor/compare/v1.2.0...v1.2.1) (2026-10-25)
+
+### Bug Fixes
+
+* **playbooks:** keep sweep and triage body files out of the checkout ([#54](https://github.com/alsiola/open-supervisor/issues/54)) ([f904597](https://github.com/alsiola/open-supervisor/commit/f90459784d91f1a1b505a7565d33c1eed0ea8a8e))
+
 ## [1.2.0](https://github.com/alsiola/open-supervisor/compare/v1.1.0...v1.2.0) (2026-10-24)
 
 ### Features
