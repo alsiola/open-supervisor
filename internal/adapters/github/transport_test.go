@@ -171,3 +171,37 @@ func TestForbiddenWithoutRateLimitIsAnOrdinaryError(t *testing.T) {
 		t.Fatalf("error text %q, want one line ending in GitHub's message", got)
 	}
 }
+
+func TestRateLimitedReadsGoAsTheBot(t *testing.T) {
+	var asBot int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer bot" {
+			atomic.AddInt32(&asBot, 1)
+			fmt.Fprint(w, `{"number":12,"title":"t","state":"open"}`)
+			return
+		}
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"message":"API rate limit exceeded for user ID 1."}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := newConn(adapter.Values{"auth": "token", "token": "tok", "apiUrl": srv.URL}, adapter.Env{HTTP: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, _ := c.Tracker(adapter.Values{"repo": "octo/widgets"}, adapter.ProjectInfo{})
+	if _, err := tr.Issue(context.Background(), "12"); !adapter.IsPaused(err) {
+		t.Fatalf("without a bot: %v, want a PausedError", err)
+	}
+
+	c.write = staticToken("bot")
+	for i := 0; i < 2; i++ {
+		if is, err := tr.Issue(context.Background(), "12"); err != nil || is.Title != "t" {
+			t.Fatalf("read %d with a bot: %+v, %v", i, is, err)
+		}
+	}
+	if asBot != 2 {
+		t.Fatalf("%d reads went as the bot, want 2", asBot)
+	}
+}

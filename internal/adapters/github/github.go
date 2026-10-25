@@ -125,12 +125,22 @@ func newConn(v adapter.Values, env adapter.Env) (*conn, error) {
 	return c, nil
 }
 
-// call makes one API call as the reader (or, with write, the writer) of repo, signing in again after a 401.
+// call makes one API call as the reader (or, with write, the writer) of repo, signing in again after a 401. A
+// read the reader's rate limit refuses goes again as the bot app, which has a budget of its own.
 func (c *conn) call(ctx context.Context, write bool, repo, method, path string, body, out any) (*http.Response, error) {
-	src := c.read
 	if write {
-		src = c.write
+		return c.callAs(ctx, c.write, repo, method, path, body, out)
 	}
+	res, err := c.callAs(ctx, c.read, repo, method, path, body, out)
+	if adapter.IsPaused(err) && c.write != c.read {
+		if res2, err2 := c.callAs(ctx, c.write, repo, method, path, body, out); err2 == nil {
+			return res2, nil
+		}
+	}
+	return res, err
+}
+
+func (c *conn) callAs(ctx context.Context, src tokenSource, repo, method, path string, body, out any) (*http.Response, error) {
 	var res *http.Response
 	var err error
 	for attempt := 0; attempt < 2; attempt++ {

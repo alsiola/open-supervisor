@@ -298,6 +298,29 @@ func Remove(s Spec) error {
 	return nil
 }
 
+// Unpushed says what removing the worktree would lose: uncommitted changes to tracked or new files (ignored
+// ones, like .local/, don't count), or commits no remote-tracking branch has. It is "" when there is nothing.
+func Unpushed(s Spec) (string, error) {
+	if _, err := os.Stat(s.Path); err != nil {
+		return "", nil
+	}
+	status, err := git(s.Path, "status", "--porcelain")
+	if err != nil {
+		return "", err
+	}
+	if status != "" {
+		return "it has uncommitted changes", nil
+	}
+	count, err := git(s.Path, "rev-list", "--count", "HEAD", "--not", "--remotes="+s.remote())
+	if err != nil {
+		return "", err
+	}
+	if n, _ := strconv.Atoi(count); n > 0 {
+		return fmt.Sprintf("%d commit(s) on it aren't pushed", n), nil
+	}
+	return "", nil
+}
+
 func same(a, b string) bool {
 	x, err1 := os.ReadFile(a)
 	y, err2 := os.ReadFile(b)
