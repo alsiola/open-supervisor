@@ -86,6 +86,9 @@ type Project struct {
 	stopped       bool
 	// begun: start has run (a reload starts only the projects it built).
 	begun bool
+	// stopTasks ends the following of the agents' tasks; tasksMu keeps two looks at them from telling an end twice.
+	stopTasks context.CancelFunc
+	tasksMu   sync.Mutex
 }
 
 // source is where the project's issues come from.
@@ -192,6 +195,11 @@ func (p *Project) start() {
 	}
 	p.logf("watching %s (issues) and %s (code) from %s with %s", issues, p.Repo.Describe(), p.Root, p.AgentName)
 	p.Jobs.start()
+	ctx, cancel := context.WithCancel(context.Background())
+	p.mu.Lock()
+	p.stopTasks = cancel
+	p.mu.Unlock()
+	go p.followTasks(ctx)
 }
 
 func (p *Project) stop() {
@@ -201,6 +209,9 @@ func (p *Project) stop() {
 		t.Stop()
 	}
 	chores := []adapter.Turn{p.sweep, p.triage}
+	if p.stopTasks != nil {
+		p.stopTasks()
+	}
 	p.mu.Unlock()
 	p.Jobs.stop()
 	for _, t := range chores {
@@ -1227,7 +1238,9 @@ func (p *Project) applyState(key string, state core.AgentState) {
 		}
 	case core.Finished:
 		path := p.WorktreePath(key)
-		if _, err := os.Stat(path); err == nil {
+		if tasks := TasksWithin(p.StateDir, path); len(tasks) > 0 {
+			p.logf("%s: keeping the worktree until the tasks running from it end (%s)", p.ref(key), TaskNames(tasks))
+		} else if _, err := os.Stat(path); err == nil {
 			if err := worktree.Remove(worktree.Spec{Root: p.Root, Path: path}); err != nil {
 				p.logf("%s: couldn't remove the worktree: %s", p.ref(key), logx.ErrText(err))
 			} else {

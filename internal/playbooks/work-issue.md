@@ -30,6 +30,8 @@ The project may use GitHub, Bitbucket, Jira or something else; you don't need to
 | `$OPEN_SUPERVISOR agent attachment upload <file>` | upload a file (an image, a zip, a document) and print a link to put in a comment |
 | `$OPEN_SUPERVISOR agent attachment get <url> <file>` | download a file a comment links to, signed in (a private repo's attachments need it) |
 | `$OPEN_SUPERVISOR agent wait <condition>... [--until <time>] <file>` | park the issue until something happens or a time comes (see Waiting) |
+| `$OPEN_SUPERVISOR agent task start <name> [--dir <dir>] -- <command>` | run a long command that outlives the turn and the issue (see Long tasks) |
+| `$OPEN_SUPERVISOR agent task list` / `agent task stop <name>` | the issue's tasks with their logs (`--all` for the project's) / stop one |
 | `$OPEN_SUPERVISOR agent correction --area <area> <file>` | log a correction (see Log corrections) |
 | `$OPEN_SUPERVISOR agent problem --kind <kind> <file>` | log a problem you worked around (see Report problems) |
 | `$OPEN_SUPERVISOR agent inflight` | the other issues in flight and what each touches |
@@ -54,7 +56,10 @@ The supervisor wakes you with what happened (or that the time came first). Comme
 
 When follow-up work shouldn't start yet (wave 2 once wave 1 merges, a check once a job has run), open it now with the same conditions: `agent issue create --title <t> --wait pr:1257:merged <file>`. The supervisor holds it and starts it when the condition is met, so nobody has to remember to open it later.
 
-## Ending a turn
+## Long tasks
+
+Anything that could run longer than a few minutes, or past the turn (a backfill, a cache fill, a long import), goes through `$OPEN_SUPERVISOR agent task start <name> -- <command>`, not `nohup`, `&` or a background command, which are stopped when they hit the agent's time limit or the turn or issue ends. It runs the command from the current directory (or `--dir`), returns at once and prints the log's path. The task carries on past the turn and the issue, and the worktree it runs from stays until it ends. When it ends, the supervisor says how on the issue and wakes you with the same note, so end the turn rather than wait for it.
+
 
 Every turn ends with a status (the structured result the supervisor asks for):
 
@@ -199,6 +204,7 @@ Once every PR for the issue is merged or closed, or the issue is closed with no 
 ## Don't
 
 - Don't wait or poll for checks, previews or replies: end the turn and let the supervisor resume you.
+- Don't start a long command with `nohup`, `&` or a background command: use `agent task start` (see Long tasks).
 - Don't push to the base branch, merge the PR or close the issue. The one exception is a scheduled task whose routine says when it may.
 - Don't change the supervisor's labels or the issue's workflow status; the supervisor sets them from your status.
 - Don't edit other agents' worktrees.
