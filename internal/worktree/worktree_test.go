@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -276,5 +277,58 @@ func TestUnpushed(t *testing.T) {
 	runGit(t, path, "push", "-q", "origin", "HEAD:agent/issue-3")
 	if lost, err := Unpushed(spec); err != nil || lost != "" {
 		t.Fatalf("pushed: %q, %v", lost, err)
+	}
+}
+
+func TestSetupRefusesAFullDisk(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "repo")
+	_ = os.MkdirAll(root, 0o755)
+	runGit(t, root, "init", "-q", "-b", "main")
+	_ = os.WriteFile(filepath.Join(root, "a.txt"), []byte("12345"), 0o644)
+	_ = os.WriteFile(filepath.Join(root, "b.txt"), []byte("123"), 0o644)
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-qm", "init")
+	if got := checkoutSize(root, "main"); got != 8 {
+		t.Fatalf("checkoutSize = %d, want 8", got)
+	}
+	spec := Spec{Root: root, Path: Dir(filepath.Join(dir, "data"), "demo", "1"), Branch: "agent/issue-1", Base: "main", Disk: 90}
+	if _, err := Setup(spec); err != nil {
+		t.Fatalf("a disk with room refused: %v", err)
+	}
+	_ = Remove(spec)
+	// Keeping all but a byte of the disk free can't be met.
+	old := MaxReserve
+	MaxReserve = 1 << 62
+	defer func() { MaxReserve = old }()
+	spec.Disk = 1e-12
+	_, err := Setup(spec)
+	var noRoom *NoRoom
+	if !errors.As(err, &noRoom) {
+		t.Fatalf("Setup on a full disk = %v, want NoRoom", err)
+	}
+	if noRoom.Need != 8 || !strings.Contains(err.Error(), "not enough disk space") {
+		t.Fatalf("NoRoom = %+v (%v)", noRoom, err)
+	}
+	if _, err := os.Stat(spec.Path); !os.IsNotExist(err) {
+		t.Fatal("a refused worktree was made anyway")
+	}
+}
+
+func TestSetupClearsAHalfMadeWorktree(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "repo")
+	_ = os.MkdirAll(root, 0o755)
+	runGit(t, root, "init", "-q", "-b", "main")
+	_ = os.WriteFile(filepath.Join(root, "a.txt"), []byte("a"), 0o644)
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-qm", "init")
+	// Whatever made git fail, no folder is left to be reused as if it were whole.
+	spec := Spec{Root: root, Path: Dir(filepath.Join(dir, "data"), "demo", "2"), Branch: "agent/issue-2", Base: "nope"}
+	if _, err := Setup(spec); err == nil {
+		t.Fatal("Setup from a missing base passed")
+	}
+	if _, err := os.Stat(spec.Path); !os.IsNotExist(err) {
+		t.Fatal("the failed worktree was left behind")
 	}
 }

@@ -542,6 +542,7 @@ func (s *Supervisor) loop(ctx context.Context) {
 			if time.Since(lastPrune) >= 6*time.Hour {
 				lastPrune = time.Now()
 				for _, p := range s.Projects() {
+					go p.sweepWorktrees()
 					p.Store.Prune()
 				}
 			}

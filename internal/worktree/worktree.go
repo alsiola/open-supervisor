@@ -1,9 +1,10 @@
 // Package worktree gives each issue its own git worktree on its own branch, outside the project's checkout so
 // nothing has to be ignored there. Setup makes the .local/ scratch folder the playbook points agents at, copies
-// the files the project lists (.env) on every run and runs the
-// project's setup command when one of the files it watches (a lockfile) has changed; Refresh copies the files
-// alone, before each turn, so a resumed agent that doesn't run Setup again still sees keys added since. Remove stops anything
-// still running from the worktree, removes it and keeps the branch, so nothing committed is lost.
+// the files the project lists (.env) on every run and runs the project's setup command when one of the files it
+// watches (a lockfile) has changed; Refresh copies the files alone, before each turn, so a resumed agent that
+// doesn't run Setup again still sees keys added since. Setup won't make a new worktree on a disk it would leave
+// too full, and clears away one git left half-made. Remove stops anything still running from the worktree,
+// removes it and keeps the branch, so nothing committed is lost.
 package worktree
 
 import (
@@ -17,6 +18,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/alsiola/open-supervisor/internal/host"
 )
 
 // Spec is one issue's worktree.
@@ -33,6 +36,10 @@ type Spec struct {
 	Copy      []string
 	Setup     string
 	SetupWhen []string
+	// Disk is the host's disk threshold, the percentage in use over which a disk is running out. Setup doesn't
+	// make a new worktree whose checkout would leave less free than the threshold keeps (at most MaxReserve).
+	// 0 checks nothing.
+	Disk float64
 	// Log receives what happened, a line at a time.
 	Log io.Writer
 }
@@ -75,30 +82,40 @@ func Setup(s Spec) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
 		return "", err
 	}
-	_, statErr := os.Stat(s.Path)
-	switch {
-	case statErr == nil:
+	if _, err := os.Stat(s.Path); err == nil {
 		s.logf("reusing %s", s.Path)
-	case refExists(s.Root, "refs/heads/"+s.Branch):
-		if _, err := git(s.Root, "worktree", "add", "-q", s.Path, s.Branch); err != nil {
+	} else {
+		// start is what the checkout is made from; tracking, a remote branch it follows.
+		var start, tracking string
+		var args []string
+		switch {
+		case refExists(s.Root, "refs/heads/"+s.Branch):
+			start, args = s.Branch, []string{s.Path, s.Branch}
+		case refExists(s.Root, "refs/remotes/"+s.remote()+"/"+s.Branch):
+			start = s.remote() + "/" + s.Branch
+			tracking, args = start, []string{"-b", s.Branch, s.Path, start}
+		default:
+			base := s.Base
+			if base == "" {
+				base = "main"
+			}
+			start = s.remote() + "/" + base
+			if !refExists(s.Root, "refs/remotes/"+start) {
+				start = base
+			}
+			args = []string{"--no-track", "-b", s.Branch, s.Path, start}
+		}
+		if err := s.roomFor(start); err != nil {
 			return "", err
 		}
-	case refExists(s.Root, "refs/remotes/"+s.remote()+"/"+s.Branch):
-		if _, err := git(s.Root, "worktree", "add", "-q", "-b", s.Branch, s.Path, s.remote()+"/"+s.Branch); err != nil {
+		if _, err := git(s.Root, append([]string{"worktree", "add", "-q"}, args...)...); err != nil {
+			// A checkout that failed part-way (a full disk) would be reused next time as if it were whole.
+			_ = os.RemoveAll(s.Path)
+			_, _ = git(s.Root, "worktree", "prune")
 			return "", err
 		}
-		_, _ = git(s.Path, "branch", "-q", "--set-upstream-to", s.remote()+"/"+s.Branch)
-	default:
-		base := s.Base
-		if base == "" {
-			base = "main"
-		}
-		start := s.remote() + "/" + base
-		if !refExists(s.Root, "refs/remotes/"+start) {
-			start = base
-		}
-		if _, err := git(s.Root, "worktree", "add", "-q", "--no-track", "-b", s.Branch, s.Path, start); err != nil {
-			return "", err
+		if tracking != "" {
+			_, _ = git(s.Path, "branch", "-q", "--set-upstream-to", tracking)
 		}
 	}
 	s.scratch()
@@ -120,6 +137,67 @@ const Scratch = ".local"
 func (s Spec) scratch() {
 	if err := os.MkdirAll(filepath.Join(s.Path, Scratch), 0o755); err != nil {
 		s.logf("couldn't make %s: %v", Scratch, err)
+	}
+}
+
+// MaxReserve is the most free space Setup keeps on a disk, so a large one isn't held at its threshold's share.
+var MaxReserve uint64 = 10 << 30
+
+// NoRoom is a new worktree that would leave its disk too full.
+type NoRoom struct {
+	Path string
+	// Free is what the disk has, Need what the checkout takes and Keep what must be left after it, in bytes.
+	Free, Need, Keep uint64
+}
+
+func (e *NoRoom) Error() string {
+	return fmt.Sprintf("not enough disk space for a new worktree at %s: the disk has %s free, and the checkout needs about %s on top of the %s kept free (settings.host.disk)",
+		e.Path, Bytes(e.Free), Bytes(e.Need), Bytes(e.Keep))
+}
+
+// roomFor checks the worktree's disk has room for a checkout of ref. A disk it can't read doesn't stop it.
+func (s Spec) roomFor(ref string) error {
+	if s.Disk <= 0 || s.Disk >= 100 {
+		return nil
+	}
+	d, err := host.DiskAt(s.Path)
+	if err != nil || d.Total == 0 {
+		return nil
+	}
+	need := checkoutSize(s.Root, ref)
+	keep := min(uint64(float64(d.Total)*(100-s.Disk)/100), MaxReserve)
+	if d.Free >= need+keep {
+		return nil
+	}
+	return &NoRoom{Path: s.Path, Free: d.Free, Need: need, Keep: keep}
+}
+
+// checkoutSize is how many bytes ref's files take, 0 when git can't say.
+func checkoutSize(root, ref string) uint64 {
+	out, err := exec.Command("git", "-C", root, "ls-tree", "-r", "-l", "-z", ref).Output()
+	if err != nil {
+		return 0
+	}
+	var total uint64
+	for _, entry := range strings.Split(string(out), "\x00") {
+		meta, _, _ := strings.Cut(entry, "\t")
+		if f := strings.Fields(meta); len(f) == 4 {
+			n, _ := strconv.ParseUint(f[3], 10, 64)
+			total += n
+		}
+	}
+	return total
+}
+
+// Bytes is a size for people to read: "1.4 GB".
+func Bytes(n uint64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.0f MB", float64(n)/(1<<20))
+	default:
+		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
 	}
 }
 
@@ -159,7 +237,12 @@ func Fresh(s Spec) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
 		return "", err
 	}
+	if err := s.roomFor(s.remote() + "/" + base); err != nil {
+		return "", err
+	}
 	if _, err := git(s.Root, "worktree", "add", "-q", "--detach", s.Path, s.remote()+"/"+base); err != nil {
+		_ = os.RemoveAll(s.Path)
+		_, _ = git(s.Root, "worktree", "prune")
 		return "", err
 	}
 	if head, err := git(s.Path, "rev-parse", "--short", "HEAD"); err == nil {

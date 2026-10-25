@@ -703,7 +703,8 @@ func (j *Jobs) execute(job config.Job, req *jobReq) {
 		j.sweepFresh(job)
 		base := j.base()
 		wt := j.p.Spec.Worktree
-		spec := worktree.Spec{Root: j.p.Root, Remote: j.p.git.RemoteName(), Path: j.freshDir(job, run), Base: base, Copy: wt.Copy, Setup: wt.Setup, Log: out}
+		_, _, disk := j.p.hub.settings().Host.Thresholds()
+		spec := worktree.Spec{Root: j.p.Root, Remote: j.p.git.RemoteName(), Path: j.freshDir(job, run), Base: base, Copy: wt.Copy, Setup: wt.Setup, Disk: disk, Log: out}
 		got, err := worktree.Fresh(spec)
 		run.Dir = got
 		if err != nil {
