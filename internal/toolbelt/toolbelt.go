@@ -25,6 +25,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/engine"
 	"github.com/alsiola/open-supervisor/internal/problems"
+	"github.com/alsiola/open-supervisor/internal/store"
 	"github.com/alsiola/open-supervisor/internal/worktree"
 )
 
@@ -822,7 +823,21 @@ func (s *session) worktreeSpec(log io.Writer) worktree.Spec {
 		cancel()
 	}
 	w := s.b.Spec.Worktree
-	return worktree.Spec{Root: s.b.Root, Remote: s.b.Git.RemoteName(), Path: s.worktree(), Branch: s.branch(), Base: base, Copy: w.Copy, Setup: w.Setup, SetupWhen: w.SetupWhen, Log: log}
+	_, _, disk := s.cfg.Settings.Host.Thresholds()
+	return worktree.Spec{Root: s.b.Root, Remote: s.b.Git.RemoteName(), Path: s.worktree(), Branch: s.branch(), Base: base, Copy: w.Copy, Setup: w.Setup, SetupWhen: w.SetupWhen, Disk: disk, Log: log}
+}
+
+// crowd says how many issue worktrees the project has and which of them could go, for a disk too full for another.
+func (s *session) crowd() string {
+	st := store.New(s.b.StateDir, nil)
+	_ = st.Load()
+	all, spare := engine.IssueWorktrees(config.DataDir(), s.b.StateDir, s.b.Spec.Name, st)
+	msg := fmt.Sprintf("The project has %d issue worktrees", len(all))
+	if len(spare) == 0 {
+		return msg + ", all for issues still in progress; free space elsewhere, or ask the owner, then run setup again"
+	}
+	return fmt.Sprintf("%s; %d are for issues finished or no longer held, which can go: %s. Free space, then run setup again",
+		msg, len(spare), engine.SpareNames(spare))
 }
 
 func worktreeCmd(f *flags) *cobra.Command {
@@ -837,6 +852,9 @@ func worktreeCmd(f *flags) *cobra.Command {
 				return err
 			}
 			path, err := worktree.Setup(s.worktreeSpec(cmd.ErrOrStderr()))
+			if noRoom := (*worktree.NoRoom)(nil); errors.As(err, &noRoom) {
+				return fmt.Errorf("%w. %s", err, s.crowd())
+			}
 			if err != nil {
 				return err
 			}

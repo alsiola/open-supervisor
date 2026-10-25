@@ -90,6 +90,12 @@ func Read(paths []string) (Sample, error) {
 	return s, nil
 }
 
+// DiskAt is the filesystem path is on, measured at its nearest parent that exists.
+func DiskAt(path string) (Disk, error) {
+	total, free, _, err := diskSpace(existing(path))
+	return Disk{Path: path, Total: total, Free: free}, err
+}
+
 // existing is path, or its nearest parent that exists.
 func existing(path string) string {
 	for {
