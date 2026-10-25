@@ -42,4 +42,5 @@ The message also names a report file and says what to do with the causes you can
 - Don't commit anything in a triage except the fixes in step 4.
 - Don't fix anything that needs a judgement call: report or file it.
 - Don't change open-supervisor's own files from a project's triage, or open issues on its tracker unless the message's `Upstream` line says it is one of the projects here.
+- Don't write an issue, comment or PR body into the checkout: pass it on stdin (`-` for `<file>` or `--body-file`), or write it in a temporary directory outside the checkout. A stray file there leaves the checkout dirty, so the next triage won't land a commit.
 - Don't touch another project's files: a triage works on the checkout it starts in.
