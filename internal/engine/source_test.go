@@ -352,3 +352,45 @@ func TestReloadCarriesAHookToItsNewOwner(t *testing.T) {
 		t.Fatal("the hook's path should have changed")
 	}
 }
+
+func TestHandLabelledIssueIsListedAsStranded(t *testing.T) {
+	s, src, web, _ := setupRouted(t, "")
+	host.issues["6"] = &core.Issue{Key: "6", Title: "Released by hand", Open: true, Labels: []string{"web", "agent-in-progress"}}
+	host.issues["7"] = &core.Issue{Key: "7", Title: "Dropped", Open: true, Labels: []string{"web"}}
+	src.reconcile()
+	waitFor(t, "7 claimed", func() bool { return state(web, "7") == store.Review })
+	web.Drop("7")
+	src.reconcile()
+	time.Sleep(50 * time.Millisecond)
+	if web.Store.Get("6") != nil || web.Store.Get("7") != nil {
+		t.Fatal("claimed an issue labelled agent-in-progress")
+	}
+	// 7 was dropped here, so its label is ours: only 6 is stranded.
+	if st := src.Stranded(); len(st) != 1 || st[0].Key != "6" || s.Stranded() != 1 {
+		t.Fatalf("stranded: %+v", st)
+	}
+	// Removing the label releases it.
+	host.mu.Lock()
+	host.issues["6"].Labels = []string{"web"}
+	host.mu.Unlock()
+	src.onSignal(core.Signal{Type: core.SigIssueChanged, Key: "6"})
+	waitFor(t, "6 claimed", func() bool { return state(web, "6") == store.Review })
+	if len(src.Stranded()) != 0 {
+		t.Fatalf("still stranded: %+v", src.Stranded())
+	}
+}
+
+func TestStrandedIssueCanBeClaimedByHand(t *testing.T) {
+	_, src, web, _ := setupRouted(t, "")
+	host.issues["6"] = &core.Issue{Key: "6", Title: "Released by hand", Open: true, Labels: []string{"web", "agent-in-progress"}}
+	src.reconcile()
+	waitFor(t, "stranded", func() bool { return len(src.Stranded()) == 1 })
+	if err := web.ClaimNow("6"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "claimed", func() bool { return state(web, "6") == store.Review })
+	src.reconcile()
+	if len(src.Stranded()) != 0 {
+		t.Fatalf("still stranded: %+v", src.Stranded())
+	}
+}

@@ -155,6 +155,15 @@ func (s *Supervisor) Unrouted() int {
 	return n
 }
 
+// Stranded counts the open issues that carry the claimed label with no session, across every source.
+func (s *Supervisor) Stranded() int {
+	n := 0
+	for _, src := range s.Sources() {
+		n += len(src.Stranded())
+	}
+	return n
+}
+
 // Project finds a project by name.
 func (s *Supervisor) Project(name string) *Project {
 	for _, p := range s.Projects() {

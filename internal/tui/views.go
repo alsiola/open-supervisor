@@ -48,6 +48,9 @@ func (m *model) header() []string {
 	if n := sup.Unrouted(); n > 0 {
 		parts = append(parts, yellowS.Render(fmt.Sprintf("%d unrouted", n)))
 	}
+	if n := sup.Stranded(); n > 0 {
+		parts = append(parts, yellowS.Render(fmt.Sprintf("%d stranded", n)))
+	}
 	parts = append(parts, m.reconcileText())
 	if u := m.usageText(); u != "" {
 		parts = append(parts, u)
@@ -245,7 +248,8 @@ func (m *model) renderList() string {
 		}
 		out = append(out, line)
 	}
-	// Under the issues in flight, the ones no route takes, for claiming by hand (c project#KEY).
+	// Under the issues in flight, the ones no route takes and the ones labelled claimed with no session, for
+	// claiming by hand (c project#KEY).
 	if un := m.unroutedLines(infoW); len(un) > 0 && len(out) < 3+listH-1 {
 		out = append(out, "")
 		for _, l := range un {
@@ -280,12 +284,16 @@ func (m *model) renderList() string {
 	return m.paint(out)
 }
 
-// unroutedLines are the open issues no route takes, by source.
+// unroutedLines are the open issues no route takes, and those stranded under the claimed label, by source.
 func (m *model) unroutedLines(infoW int) []string {
 	var out []string
 	for _, src := range m.sup.Sources() {
 		for _, i := range src.Unrouted() {
 			out = append(out, dim(fmt.Sprintf(" %s %s %s %s", pad(src.Name, 11), pad(i.Key, 9), pad(i.Title, 34), pad("unrouted: no route takes it; c <project>#"+i.Key+" claims it", infoW+38))))
+		}
+		for _, i := range src.Stranded() {
+			name, _ := src.Route(i)
+			out = append(out, dim(fmt.Sprintf(" %s %s %s %s", pad(name, 11), pad(i.Key, 9), pad(i.Title, 34), pad("stranded: labelled "+src.Labels.Claimed+" with no session; remove the label or c "+name+"#"+i.Key, infoW+38))))
 		}
 	}
 	return out

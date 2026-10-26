@@ -39,6 +39,7 @@ type Source struct {
 	mu            sync.Mutex
 	projects      []*Project
 	unrouted      map[string]core.Issue
+	stranded      map[string]core.Issue
 	warned        map[string]string
 	reconciling   bool
 	lastReconcile time.Time
@@ -125,8 +126,12 @@ func (s *Source) Holder(key string) *Project {
 func (s *Source) Unrouted() []core.Issue {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]core.Issue, 0, len(s.unrouted))
-	for _, i := range s.unrouted {
+	return oldestFirst(s.unrouted)
+}
+
+func oldestFirst(issues map[string]core.Issue) []core.Issue {
+	out := make([]core.Issue, 0, len(issues))
+	for _, i := range issues {
 		out = append(out, i)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -200,6 +205,14 @@ func (s *Source) labelSpecs() []adapter.Label {
 	return out
 }
 
+// Stranded are the open issues that carry the claimed label though no project of the source ever claimed them,
+// oldest first: nothing will claim them until the label goes.
+func (s *Source) Stranded() []core.Issue {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return oldestFirst(s.stranded)
+}
+
 // claimable reports whether an issue is one the supervisor would claim, routes aside.
 func (s *Source) claimable(issue core.Issue) bool {
 	if !issue.Open || issue.Waiting || issue.HasLabel(s.Labels.Claimed) {
@@ -215,9 +228,45 @@ func (s *Source) dispatch(issue core.Issue, reopened bool) {
 		s.noRoute(issue)
 		return
 	}
+	p := s.project(name)
+	if p != nil && !reopened && s.isStranded(issue) {
+		s.strand(p, issue)
+		return
+	}
 	s.forget(issue.Key)
-	if p := s.project(name); p != nil {
+	if p != nil {
 		p.maybeClaim(issue, reopened)
+	}
+}
+
+// isStranded reports whether an open issue nobody holds carries the claimed label though no project of the
+// source ever claimed it: someone added the label by hand, and maybeClaim will pass it over for good.
+func (s *Source) isStranded(issue core.Issue) bool {
+	if !issue.Open || issue.Waiting || !issue.HasLabel(s.Labels.Claimed) || !s.Labels.Admits(issue.HasLabel) {
+		return false
+	}
+	for _, p := range s.Projects() {
+		if !p.Store.LastClaim(issue.Key).IsZero() {
+			return false
+		}
+	}
+	return true
+}
+
+// strand notes, once, a stranded issue its route's project would otherwise claim. It isn't claimed: the label
+// may be another supervisor's.
+func (s *Source) strand(p *Project, issue core.Issue) {
+	s.mu.Lock()
+	if s.stranded == nil {
+		s.stranded = map[string]core.Issue{}
+	}
+	_, known := s.stranded[issue.Key]
+	s.stranded[issue.Key] = issue
+	delete(s.unrouted, issue.Key)
+	s.mu.Unlock()
+	if !known {
+		p.logf("%s: carries %s but nothing here ever claimed it, so it is left alone; remove the label to release it, or claim it (c %s#%s)", p.ref(issue.Key), s.Labels.Claimed, p.Name, issue.Key)
+		s.hub.changed()
 	}
 }
 
@@ -249,11 +298,14 @@ func (s *Source) noRoute(issue core.Issue) {
 	}
 }
 
-// forget drops an issue from the unrouted list.
+// forget drops an issue from the unrouted and stranded lists.
 func (s *Source) forget(key string) {
 	s.mu.Lock()
-	_, ok := s.unrouted[key]
+	_, un := s.unrouted[key]
+	_, st := s.stranded[key]
+	ok := un || st
 	delete(s.unrouted, key)
+	delete(s.stranded, key)
 	s.mu.Unlock()
 	if ok {
 		s.hub.changed()
@@ -424,9 +476,9 @@ func (s *Source) reconcile() {
 			s.noRoute(issue)
 			continue
 		}
-		s.forget(issue.Key)
 		p := s.project(name)
 		if p == nil {
+			s.forget(issue.Key)
 			continue
 		}
 		counts[p]++
@@ -434,6 +486,11 @@ func (s *Source) reconcile() {
 		if issue.HasLabel(s.Labels.Claimed) {
 			reopened = s.reopenedSinceLastClaim(ctx, issue)
 		}
+		if !reopened && s.isStranded(issue) {
+			s.strand(p, issue)
+			continue
+		}
+		s.forget(issue.Key)
 		p.maybeClaim(issue, reopened)
 	}
 	s.mu.Lock()
@@ -442,7 +499,12 @@ func (s *Source) reconcile() {
 			delete(s.unrouted, key)
 		}
 	}
-	unrouted := len(s.unrouted)
+	for key := range s.stranded {
+		if !openKeys[key] {
+			delete(s.stranded, key)
+		}
+	}
+	unrouted, stranded := len(s.unrouted), len(s.stranded)
 	s.lastReconcile = time.Now()
 	s.mu.Unlock()
 	for _, p := range live {
@@ -452,6 +514,9 @@ func (s *Source) reconcile() {
 		msg := fmt.Sprintf("reconciled: %d open issues", len(open))
 		if unrouted > 0 {
 			msg += fmt.Sprintf(", %d unrouted", unrouted)
+		}
+		if stranded > 0 {
+			msg += fmt.Sprintf(", %d labelled %s with no session", stranded, s.Labels.Claimed)
 		}
 		s.logf("%s", msg)
 	}
