@@ -6,7 +6,7 @@ Every service open-supervisor talks to sits behind a small Go interface in [`int
 | --- | --- | --- | --- |
 | agent | `Agent`, optionally `Transcripts`, `UsageReporter` | Claude Code | Codex CLI, Gemini CLI, an Anthropic API tool loop |
 | repo | `RepoProvider` → `Repo`, optionally `Reactor`, `Hooked` | GitHub, Bitbucket Cloud | GitLab, Bitbucket Data Center, Gitea |
-| tracker | `TrackerProvider` → `Tracker`, optionally `Reactor`, `ReactionReader`, `Transitioner`, `Hooked` | GitHub Issues, Jira, Linear | GitLab Issues, Shortcut |
+| tracker | `TrackerProvider` → `Tracker`, optionally `Reactor`, `Transitioner`, `Hooked` | GitHub Issues, Jira, Linear | GitLab Issues, Shortcut |
 | telemetry | `Telemetry` | PostHog | OpenTelemetry (OTLP), Datadog, StatsD |
 | tunnel | `Tunnel` | ngrok, Cloudflare Tunnel, static URL | Tailscale Funnel |
 

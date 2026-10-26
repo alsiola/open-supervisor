@@ -45,8 +45,6 @@ type Turn struct {
 	Summary   string       `json:"summary,omitempty"`
 	Error     string       `json:"error,omitempty"`
 	Events    []core.Event `json:"events"`
-	// Arm, on a turn that could have resumed a cold session, is which the draw picked: "resume" or "handoff".
-	Arm string `json:"arm,omitempty"`
 	// Handoff: the turn started a fresh session from the last turn's handoff note.
 	Handoff bool                `json:"handoff,omitempty"`
 	Handle  *adapter.TurnHandle `json:"handle,omitempty"`
@@ -77,10 +75,6 @@ type Record struct {
 	Handoff string `json:"handoff,omitempty"`
 	// PastSessions are the sessions the issue ran in before a handoff, oldest first.
 	PastSessions []string `json:"pastSessions,omitempty"`
-	// Trial is the handoff experiment's run in progress on the issue, from its draw until the next or the finish.
-	Trial *Trial `json:"trial,omitempty"`
-	// Feedback are the comments asking whether a session kept up its performance after a cold turn, being watched.
-	Feedback []Feedback `json:"feedback,omitempty"`
 	// Seen are comment ids already handed to the agent (bounded).
 	Seen []string `json:"seen"`
 	// Since: comments at or before this instant were ingested; the reconcile asks for newer ones.
@@ -104,49 +98,6 @@ type Record struct {
 	WaitSince *time.Time  `json:"waitSince,omitempty"`
 	ClaimedAt time.Time   `json:"claimedAt"`
 	UpdatedAt time.Time   `json:"updatedAt"`
-}
-
-// Trial is the run of turns that follows one draw in the handoff experiment, added up so the two arms can be
-// compared through to completion rather than on the drawn turn alone.
-type Trial struct {
-	ID        string       `json:"id"`
-	Arm       string       `json:"arm"`
-	StartedAt time.Time    `json:"startedAt"`
-	Turns     int          `json:"turns"`
-	Failed    int          `json:"failed,omitempty"`
-	Cost      float64      `json:"cost"`
-	Tokens    *core.Tokens `json:"tokens,omitempty"`
-	// ModelCalls and ToolCalls are the agent's requests and tool calls; AgentSeconds is the time turns ran.
-	ModelCalls   int     `json:"modelCalls"`
-	ToolCalls    int     `json:"toolCalls"`
-	AgentSeconds float64 `json:"agentSeconds"`
-	// FollowUps are the comments and messages the turns were handed after the draw.
-	FollowUps int `json:"followUps"`
-}
-
-// Add counts a turn into the trial.
-func (t *Trial) Add(o core.Outcome, followUps int) {
-	t.Turns++
-	if !o.OK {
-		t.Failed++
-	}
-	t.Cost += o.Cost
-	t.Tokens = t.Tokens.Add(o.Tokens)
-	t.ModelCalls += o.ModelCalls
-	t.ToolCalls += o.ToolCalls
-	t.AgentSeconds += o.Duration.Seconds()
-	t.FollowUps += followUps
-}
-
-// Feedback is a comment asking whether a session kept up its performance on a turn drawn into the handoff
-// experiment.
-type Feedback struct {
-	URL      string    `json:"url"`
-	Session  string    `json:"session"`
-	Arm      string    `json:"arm,omitempty"`
-	Trial    string    `json:"trial,omitempty"`
-	Turn     int       `json:"turn"`
-	PostedAt time.Time `json:"postedAt"`
 }
 
 // HasPR reports whether the PR belongs to the issue.

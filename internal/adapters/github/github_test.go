@@ -512,25 +512,6 @@ func TestOpenIssue(t *testing.T) {
 	}
 }
 
-func TestReactions(t *testing.T) {
-	tr, _ := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/repos/octo/widgets/issues/comments/77" {
-			t.Errorf("%s %s", r.Method, r.URL.Path)
-		}
-		fmt.Fprint(w, `{"id": 77, "reactions": {"url": "x", "total_count": 3, "+1": 1, "-1": 2, "laugh": 0}}`)
-	}))
-	counts, err := tr.Reactions(context.Background(), "https://github.com/octo/widgets/issues/9#issuecomment-77")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if counts["-1"] != 2 || counts["+1"] != 1 || counts["total_count"] != 0 {
-		t.Errorf("counts %v", counts)
-	}
-	if _, err := tr.Reactions(context.Background(), "https://github.com/octo/widgets/issues/9"); err == nil {
-		t.Error("read reactions without a comment id")
-	}
-}
-
 func TestPRsForReadsBranchAndTimeline(t *testing.T) {
 	_, rp := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
