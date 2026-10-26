@@ -70,11 +70,8 @@ type Settings struct {
 	// waits before the agent hears none ran or which never reported.
 	NoChecksMinutes int `yaml:"noChecksMinutes"`
 	// HandoffMinutes: a turn due this long after the last one ended, when the old session's prompt cache has
-	// expired, may start a fresh session from the last turn's handoff note instead of resuming. 0: every turn may.
+	// expired, starts a fresh session from the last turn's handoff note instead of resuming. 0: every turn does.
 	HandoffMinutes *int `yaml:"handoffMinutes,omitempty"`
-	// HandoffShare is the share of those turns, picked at random, that start from the handoff; the rest resume,
-	// so the two can be compared. 0 always resumes, 1 always hands off.
-	HandoffShare *float64 `yaml:"handoffShare,omitempty"`
 	// Host watches the machine the supervisor runs on; off unless host.minutes is set.
 	Host   Host `yaml:"host,omitempty"`
 	DryRun bool `yaml:"dryRun,omitempty"`
@@ -301,7 +298,6 @@ func DefaultSettings() Settings {
 		ChecksDebounceSeconds: 20,
 		NoChecksMinutes:       10,
 		HandoffMinutes:        ptr(55),
-		HandoffShare:          ptr(0.5),
 	}
 }
 
@@ -421,9 +417,6 @@ func (c *Config) fill() {
 	}
 	if s.HandoffMinutes == nil || *s.HandoffMinutes < 0 {
 		s.HandoffMinutes = d.HandoffMinutes
-	}
-	if s.HandoffShare == nil || *s.HandoffShare < 0 || *s.HandoffShare > 1 {
-		s.HandoffShare = d.HandoffShare
 	}
 	s.Labels = s.Labels.Merge(d.Labels)
 	if c.Connections == nil {

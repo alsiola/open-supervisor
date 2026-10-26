@@ -413,29 +413,6 @@ func (t *Tracker) Comment(ctx context.Context, key, body string, mark core.Agent
 	return t.post(ctx, t.path("/issues/%d/comments", n), withMark(body, mark))
 }
 
-var issueCommentRe = regexp.MustCompile(`#issuecomment-(\d+)$`)
-
-// Reactions reads the reaction counts GitHub keeps on an issue comment.
-func (t *Tracker) Reactions(ctx context.Context, commentURL string) (map[string]int, error) {
-	m := issueCommentRe.FindStringSubmatch(commentURL)
-	if m == nil {
-		return nil, fmt.Errorf("%q isn't an issue comment's URL", commentURL)
-	}
-	var out struct {
-		Reactions map[string]any `json:"reactions"`
-	}
-	if _, err := t.c.call(ctx, false, t.repo, http.MethodGet, t.path("/issues/comments/%s", m[1]), nil, &out); err != nil {
-		return nil, err
-	}
-	counts := map[string]int{}
-	for k, v := range out.Reactions {
-		if n, ok := v.(float64); ok && k != "total_count" {
-			counts[k] = int(n)
-		}
-	}
-	return counts, nil
-}
-
 func (t *Tracker) OpenIssue(ctx context.Context, title, body string, labels []string) (core.Issue, error) {
 	var i rawIssue
 	req := map[string]any{"title": title, "body": body}

@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -709,9 +708,6 @@ func (p *Project) Drop(key string) {
 		t.Kill()
 	}
 	p.Store.Remove(key)
-	if r.Trial != nil {
-		p.endTrial(key, r.Trial, "dropped", string(r.State))
-	}
 	p.logf("%s: dropped from the list", p.ref(key))
 	go p.setStatus(key, "")
 	p.hub.changed()
@@ -840,11 +836,11 @@ func (p *Project) runTurn(key string) {
 	if r.Turns == 0 {
 		kind = "start"
 	}
-	// A session that has run before is resumed, even when its first turn never ended. A cold one may instead
-	// hand off to a fresh session that starts from the last turn's note.
+	// A session that has run before is resumed, even when its first turn never ended. A cold one instead hands
+	// off to a fresh session that starts from the last turn's note.
 	session := r.Session
 	resume := p.Agent.SessionExists(p.Root, session)
-	handoff, arm := p.handsOff(r, resume)
+	handoff := p.handsOff(r, resume)
 	if handoff && resume {
 		session, resume = p.Agent.NewSession(), false
 	}
@@ -877,18 +873,13 @@ func (p *Project) runTurn(key string) {
 		return
 	}
 	h := turn.Handle()
-	var ended *store.Trial
 	p.Store.Update(key, func(x *store.Record) {
 		if session != x.Session {
 			x.PastSessions = append(x.PastSessions, x.Session)
 			x.Session = session
 		}
-		if arm != "" {
-			ended = x.Trial
-			x.Trial = &store.Trial{ID: fmt.Sprintf("%s-%d", key, x.Turns+1), Arm: arm, StartedAt: h.StartedAt}
-		}
 		x.State = store.Running
-		x.LastTurn = &store.Turn{Kind: kind, StartedAt: h.StartedAt, Events: events, Handle: &h, Arm: arm, Handoff: handoff}
+		x.LastTurn = &store.Turn{Kind: kind, StartedAt: h.StartedAt, Events: events, Handle: &h, Handoff: handoff}
 	})
 	p.mu.Lock()
 	p.running[key] = turn
@@ -898,24 +889,13 @@ func (p *Project) runTurn(key string) {
 	if r.State == store.Failed || p.Labels.Status(string(r.State)) != "" {
 		p.setStatus(key, "")
 	}
-	if ended != nil {
-		p.endTrial(key, ended, "next_draw", "")
-	}
-	if arm != "" {
-		props := p.trialProps(key, p.Store.Get(key).Trial)
-		props["session"] = session
-		p.hub.capture("handoff_assigned", props)
-	}
 	desc := make([]string, len(events))
 	for i, e := range events {
 		desc[i] = e.Describe()
 	}
 	detail := kind
-	switch {
-	case handoff:
+	if handoff {
 		detail = "handoff to a fresh session"
-	case arm != "":
-		detail += ", resumed cold"
 	}
 	if len(desc) > 0 {
 		detail += ": " + strings.Join(desc, ", ")
@@ -924,157 +904,21 @@ func (p *Project) runTurn(key string) {
 	p.settle(key, events, turn)
 }
 
-// handsOff reports whether the issue's next turn starts a fresh session from the last turn's handoff note. A
-// session that never got as far as being written always does. One whose last turn ended more than
-// handoffMinutes ago, so its prompt cache has expired and resuming would rebuild the whole context first, is in
-// the experiment: a draw sends handoffShare of them to a fresh session and resumes the rest, and arm says which.
-func (p *Project) handsOff(r *store.Record, resume bool) (handoff bool, arm string) {
+// handsOff reports whether the issue's next turn starts a fresh session from the last turn's handoff note: when
+// the session never got as far as being written, or its last turn ended more than handoffMinutes ago, so its
+// prompt cache has expired and resuming would rebuild the whole context first.
+func (p *Project) handsOff(r *store.Record, resume bool) bool {
 	if r.Turns == 0 || strings.TrimSpace(r.Handoff) == "" {
-		return false, ""
+		return false
 	}
 	if !resume {
-		return true, ""
+		return true
 	}
 	st := p.hub.settings()
-	if st.HandoffShare == nil || *st.HandoffShare <= 0 || st.HandoffMinutes == nil || r.LastTurn == nil || r.LastTurn.EndedAt == nil {
-		return false, ""
+	if st.HandoffMinutes == nil || r.LastTurn == nil || r.LastTurn.EndedAt == nil {
+		return false
 	}
-	if time.Since(*r.LastTurn.EndedAt) <= time.Duration(*st.HandoffMinutes)*time.Minute {
-		return false, ""
-	}
-	if rand.Float64() < *st.HandoffShare {
-		return true, "handoff"
-	}
-	return false, "resume"
-}
-
-// feedbackText is the comment after a turn drawn into the handoff experiment. It reads the same whichever arm the
-// draw picked, so whoever answers doesn't know if the session resumed or started afresh from a handoff.
-const feedbackText = "There was a long gap between messages, did you find performance was maintained from previous turns? " +
-	"Hit 👍 on this comment if it was, or 👎 if it got worse."
-
-// askFeedback asks on the issue whether the session that just took a turn drawn into the handoff experiment,
-// on either arm, kept up its performance, where the tracker can count the 👍 and 👎, and watches the comment.
-func (p *Project) askFeedback(key string) {
-	_, ok := p.Tracker.(adapter.ReactionReader)
-	r := p.Store.Get(key)
-	if !ok || r == nil || r.LastTurn == nil || r.LastTurn.Arm == "" || p.hub.settings().DryRun {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	url, err := p.Tracker.Comment(ctx, key, feedbackText, core.AgentMark{From: key})
-	if err != nil {
-		p.callFailed(err, "%s: couldn't ask for feedback on the cold turn", p.ref(key))
-		return
-	}
-	f := store.Feedback{URL: url, Session: r.Session, Arm: r.LastTurn.Arm, Turn: r.Turns, PostedAt: time.Now().UTC()}
-	if r.Trial != nil {
-		f.Trial = r.Trial.ID
-	}
-	p.Store.Update(key, func(x *store.Record) { x.Feedback = append(x.Feedback, f) })
-	p.hub.capture("handoff_feedback_asked", p.feedbackProps(key, f))
-}
-
-// feedbackWindow is how long a feedback comment is watched for a 👍 or 👎.
-const feedbackWindow = 7 * 24 * time.Hour
-
-// readFeedback looks for a 👍 or 👎 on the issue's feedback comments, sends an event for each comment that has
-// one, and stops watching those and the ones past the window.
-func (p *Project) readFeedback(ctx context.Context, r *store.Record) {
-	rr, ok := p.Tracker.(adapter.ReactionReader)
-	if !ok || len(r.Feedback) == 0 {
-		return
-	}
-	done := map[string]bool{}
-	for _, f := range r.Feedback {
-		if time.Since(f.PostedAt) > feedbackWindow {
-			done[f.URL] = true
-			continue
-		}
-		counts, err := rr.Reactions(ctx, f.URL)
-		if err != nil {
-			p.callFailed(err, "%s: couldn't read the reactions on the cold turn's feedback", p.ref(r.Key))
-			continue
-		}
-		up, down := counts["+1"], counts["-1"]
-		if up == 0 && down == 0 {
-			continue
-		}
-		props := p.feedbackProps(r.Key, f)
-		props["thumbs_up"] = up
-		props["thumbs_down"] = down
-		props["verdict"] = verdict(up, down)
-		props["hours_after"] = time.Since(f.PostedAt).Hours()
-		p.hub.capture("handoff_feedback", props)
-		p.logf("%s: feedback on the cold turn in session %s: %s", p.ref(r.Key), f.Session, props["verdict"])
-		done[f.URL] = true
-	}
-	if len(done) == 0 {
-		return
-	}
-	p.Store.Update(r.Key, func(x *store.Record) {
-		var keep []store.Feedback
-		for _, f := range x.Feedback {
-			if !done[f.URL] {
-				keep = append(keep, f)
-			}
-		}
-		x.Feedback = keep
-	})
-}
-
-// verdict is what a feedback comment's reactions say: "maintained" on a 👍, "worse" on a 👎, "mixed" on both.
-func verdict(up, down int) string {
-	switch {
-	case up > 0 && down > 0:
-		return "mixed"
-	case down > 0:
-		return "worse"
-	default:
-		return "maintained"
-	}
-}
-
-// endTrial sends what a trial added up to: endedBy is "finished" when the issue got there, "next_draw" when
-// another cold turn started a new trial first, or "dropped" when the owner dropped the issue.
-func (p *Project) endTrial(key string, t *store.Trial, endedBy, state string) {
-	props := p.trialProps(key, t)
-	props["ended_by"] = endedBy
-	props["completed"] = endedBy == "finished"
-	props["final_state"] = state
-	props["turns"] = t.Turns
-	props["failed_turns"] = t.Failed
-	props["cost_usd"] = t.Cost
-	props["model_calls"] = t.ModelCalls
-	props["tool_calls"] = t.ToolCalls
-	props["agent_seconds"] = int(t.AgentSeconds)
-	props["elapsed_hours"] = time.Since(t.StartedAt).Hours()
-	props["follow_ups"] = t.FollowUps
-	if t.Tokens != nil {
-		props["input_tokens"] = t.Tokens.Input
-		props["output_tokens"] = t.Tokens.Output
-		props["cache_read_tokens"] = t.Tokens.CacheRead
-		props["cache_creation_tokens"] = t.Tokens.CacheCreation
-	}
-	p.hub.capture("handoff_trial", props)
-}
-
-func (p *Project) trialProps(key string, t *store.Trial) map[string]any {
-	return map[string]any{"project": p.Name, "issue": key, "agent": p.AgentName, "trial": t.ID, "arm": t.Arm}
-}
-
-func (p *Project) feedbackProps(key string, f store.Feedback) map[string]any {
-	return map[string]any{
-		"project": p.Name,
-		"issue":   key,
-		"agent":   p.AgentName,
-		"session": f.Session,
-		"arm":     f.Arm,
-		"trial":   f.Trial,
-		"turn":    f.Turn,
-		"comment": f.URL,
-	}
+	return time.Since(*r.LastTurn.EndedAt) > time.Duration(*st.HandoffMinutes)*time.Minute
 }
 
 var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -1128,28 +972,9 @@ func (p *Project) settle(key string, events []core.Event, turn adapter.Turn) {
 			x.LastTurn.Models = outcome.Models
 			x.LastTurn.Handle = nil
 		}
-		if x.Trial != nil {
-			followUps := 0
-			if x.LastTurn != nil {
-				for _, e := range x.LastTurn.Events {
-					if e.Interjects() {
-						followUps++
-					}
-				}
-			}
-			x.Trial.Add(outcome, followUps)
-		}
 	})
 	p.logf("%s: turn ended %s after %.1f min: %s", p.ref(key), s.State, outcome.Duration.Minutes(), s.Summary)
 	p.report(key, outcome)
-	p.askFeedback(key)
-	if s.State == core.Finished {
-		var done *store.Trial
-		p.Store.Update(key, func(x *store.Record) { done, x.Trial = x.Trial, nil })
-		if done != nil {
-			p.endTrial(key, done, "finished", string(s.State))
-		}
-	}
 	if s.State != core.Finished && p.hold(key) {
 		if r := p.Store.Get(key); r != nil {
 			p.logf("%s: waiting for %s", p.ref(key), holdText(r))
@@ -1206,10 +1031,6 @@ func (p *Project) failed(key string, events []core.Event, outcome core.Outcome) 
 			x.LastTurn.Tokens = outcome.Tokens
 			x.LastTurn.Models = outcome.Models
 			x.LastTurn.Handle = nil
-		}
-		// A limit hit says nothing about the arm, so it isn't counted against it.
-		if x.Trial != nil && !outcome.Limited {
-			x.Trial.Add(outcome, 0)
 		}
 	})
 	p.report(key, outcome)
@@ -1283,16 +1104,9 @@ func (p *Project) report(key string, o core.Outcome) {
 		props["title"] = r.Title
 		props["turn"] = r.Turns
 		props["session"] = r.Session
-		if r.Trial != nil {
-			props["trial"] = r.Trial.ID
-			props["trial_arm"] = r.Trial.Arm
-		}
 		if r.LastTurn != nil {
 			props["kind"] = r.LastTurn.Kind
 			props["handoff"] = r.LastTurn.Handoff
-			if r.LastTurn.Arm != "" {
-				props["handoff_arm"] = r.LastTurn.Arm
-			}
 			types := make([]string, len(r.LastTurn.Events))
 			for i, e := range r.LastTurn.Events {
 				types[i] = string(e.Type)
@@ -1516,7 +1330,6 @@ func (p *Project) maintain(ctx context.Context, openKeys map[string]bool, routed
 			continue
 		}
 		p.readComments(ctx, fresh)
-		p.readFeedback(ctx, fresh)
 		p.checkWaits(r.Key)
 		if fresh.State != store.Finished && !fresh.IssueClosedReported && !openKeys[r.Key] && p.closed(ctx, r.Key) {
 			p.Store.Update(r.Key, func(x *store.Record) { x.IssueClosedReported = true })
