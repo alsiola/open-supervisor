@@ -79,3 +79,22 @@ func TestHoldForChecksBeforeAnyCall(t *testing.T) {
 		t.Errorf("a time alone: %+v %v", h, err)
 	}
 }
+
+func TestWithRef(t *testing.T) {
+	if got := withRef("Rewrites the parser.", "Closes #12"); got != "Closes #12\n\nRewrites the parser." {
+		t.Fatalf("added: %q", got)
+	}
+	if got := withRef("Rewrites the parser.\n\nCloses #12", "Closes #12"); got != "Rewrites the parser.\n\nCloses #12" {
+		t.Fatalf("kept: %q", got)
+	}
+}
+
+func TestPREditNeedsAChange(t *testing.T) {
+	cmd := Command()
+	cmd.SetArgs([]string{"pr", "edit", "7"})
+	cmd.SetOut(new(strings.Builder))
+	cmd.SetErr(new(strings.Builder))
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--title, --body-file") {
+		t.Fatalf("err: %v", err)
+	}
+}

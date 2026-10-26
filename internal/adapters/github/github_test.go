@@ -585,3 +585,24 @@ func TestPRsForReadsSharedTrackerTimeline(t *testing.T) {
 		t.Fatalf("PRs %+v (timeline read: %q)", prs, asked)
 	}
 }
+
+func TestEditPR(t *testing.T) {
+	var got map[string]any
+	_, rp := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/repos/octo/widgets/pulls/7" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"number": 7, "title": "New title", "body": "Closes #3\n\nNew body", "state": "open", "html_url": "https://github.com/octo/widgets/pull/7"}`)
+	}))
+	pr, err := rp.EditPR(context.Background(), 7, "New title", "Closes #3\n\nNew body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["title"] != "New title" || got["body"] != "Closes #3\n\nNew body" {
+		t.Errorf("sent %v", got)
+	}
+	if pr.ID != 7 || pr.URL != "https://github.com/octo/widgets/pull/7" {
+		t.Errorf("pr %+v", pr)
+	}
+}

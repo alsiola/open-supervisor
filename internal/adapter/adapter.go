@@ -132,6 +132,8 @@ type Repo interface {
 	// Checks is the combined state of the checks on a commit, with the deploy preview's URL once it is up.
 	Checks(ctx context.Context, sha string) (core.Checks, error)
 	CreatePR(ctx context.Context, req PRRequest) (core.PR, error)
+	// EditPR replaces a PR's title and body.
+	EditPR(ctx context.Context, id int, title, body string) (core.PR, error)
 	// CommentPR posts on a PR's conversation, marked as an agent's.
 	CommentPR(ctx context.Context, id int, body string, mark core.AgentMark) (string, error)
 	// ReplyInline answers in an inline review thread.
