@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/alsiola/open-supervisor/compare/v1.3.0...v1.4.0) (2026-10-26)
+
+### Features
+
+* **engine:** hand off every cold session to a fresh one and end the handoff trial ([#69](https://github.com/alsiola/open-supervisor/issues/69)) ([da4727d](https://github.com/alsiola/open-supervisor/commit/da4727d587988005ecffcd82ab43772cca155e4d))
+* **toolbelt:** add agent pr edit to change a PR's title and body ([#67](https://github.com/alsiola/open-supervisor/issues/67)) ([1b5107d](https://github.com/alsiola/open-supervisor/commit/1b5107d81a2151130a6d9cbcf727ed1adfc1b3cf)), closes [#66](https://github.com/alsiola/open-supervisor/issues/66)
+
 ## [1.3.0](https://github.com/alsiola/open-supervisor/compare/v1.2.1...v1.3.0) (2026-10-25)
 
 ### Features
