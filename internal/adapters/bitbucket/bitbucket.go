@@ -407,6 +407,17 @@ func (r *Repo) CreatePR(ctx context.Context, req adapter.PRRequest) (core.PR, er
 	return p.pr(), nil
 }
 
+func (r *Repo) EditPR(ctx context.Context, id int, title, body string) (core.PR, error) {
+	if r.c.dryRun {
+		return core.PR{ID: id, Title: title, Body: body, State: core.PROpen}, nil
+	}
+	var p rawPR
+	if _, err := r.c.api.Do(ctx, "PUT", r.path("pullrequests/%d", id), map[string]any{"title": title, "description": body}, &p); err != nil {
+		return core.PR{}, err
+	}
+	return p.pr(), nil
+}
+
 func (r *Repo) postComment(ctx context.Context, id int, body map[string]any) (string, error) {
 	if r.c.dryRun {
 		return "", nil

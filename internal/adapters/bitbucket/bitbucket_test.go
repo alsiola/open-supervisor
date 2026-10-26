@@ -217,3 +217,24 @@ func TestParseWebhook(t *testing.T) {
 }
 
 func mustRe(s string) *regexp.Regexp { return regexp.MustCompile(s) }
+
+func TestEditPR(t *testing.T) {
+	var got map[string]any
+	r, _ := testRepo(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != "PUT" || !strings.HasSuffix(req.URL.Path, "/repositories/acme/site/pullrequests/7") {
+			t.Errorf("%s %s", req.Method, req.URL.Path)
+		}
+		_ = json.NewDecoder(req.Body).Decode(&got)
+		_, _ = io.WriteString(w, `{"id": 7, "title": "New title", "description": "New body", "state": "OPEN"}`)
+	})
+	pr, err := r.EditPR(context.Background(), 7, "New title", "New body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["title"] != "New title" || got["description"] != "New body" {
+		t.Errorf("sent %v", got)
+	}
+	if pr.ID != 7 || pr.Title != "New title" {
+		t.Errorf("pr %+v", pr)
+	}
+}

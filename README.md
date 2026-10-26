@@ -256,7 +256,7 @@ The playbooks (`internal/playbooks`) reach Claude Code as a plugin of skills: `/
 
 ```
 agent context | issue view | issue comment | issue list | issue create | pr list | pr create | pr view
-agent pr comment | pr reply | checks | attachment upload | attachment get | worktree setup | worktree remove | task start | task list | task stop | wait | schedule
+agent pr edit | pr comment | pr reply | checks | attachment upload | attachment get | worktree setup | worktree remove | task start | task list | task stop | wait | schedule
 agent correction | problem | inflight
 ```
 

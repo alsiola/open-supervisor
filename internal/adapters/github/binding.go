@@ -741,6 +741,14 @@ func (r *Repo) CreatePR(ctx context.Context, req adapter.PRRequest) (core.PR, er
 	return p.pr(), nil
 }
 
+func (r *Repo) EditPR(ctx context.Context, id int, title, body string) (core.PR, error) {
+	var p rawPull
+	if _, err := r.c.call(ctx, true, r.repo, http.MethodPatch, r.path("/pulls/%d", id), map[string]any{"title": title, "body": body}, &p); err != nil {
+		return core.PR{}, err
+	}
+	return p.pr(), nil
+}
+
 func (r *Repo) CommentPR(ctx context.Context, id int, body string, mark core.AgentMark) (string, error) {
 	return r.post(ctx, r.path("/issues/%d/comments", id), withMark(body, mark))
 }

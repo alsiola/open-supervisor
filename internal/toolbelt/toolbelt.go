@@ -459,6 +459,39 @@ func (s *session) issuePRs(ctx context.Context) ([]core.PR, error) {
 	return out, nil
 }
 
+// pickPR is the PR args name, or with none the issue's open PR.
+func (s *session) pickPR(ctx context.Context, args []string) (core.PR, error) {
+	if len(args) == 1 {
+		id, err := atoi(args[0])
+		if err != nil {
+			return core.PR{}, err
+		}
+		return s.b.Repo.PR(ctx, id)
+	}
+	prs, err := s.issuePRs(ctx)
+	if err != nil {
+		return core.PR{}, err
+	}
+	var pr core.PR
+	for _, p := range prs {
+		if p.State == core.PROpen {
+			pr = p
+		}
+	}
+	if pr.ID == 0 {
+		return core.PR{}, errors.New("the issue has no open PR")
+	}
+	return pr, nil
+}
+
+// withRef puts the line that links a PR to its issue at the top of body, unless body already has it.
+func withRef(body, ref string) string {
+	if strings.Contains(body, ref) {
+		return body
+	}
+	return ref + "\n\n" + body
+}
+
 func containsFold(xs []string, x string) bool {
 	for _, y := range xs {
 		if strings.EqualFold(x, y) {
@@ -552,9 +585,7 @@ func prCmd(f *flags) *cobra.Command {
 			}
 			if head == "" {
 				head = s.branch()
-				if ref := s.b.Tracker.RefFor(s.key); !strings.Contains(body, ref) {
-					body = ref + "\n\n" + body
-				}
+				body = withRef(body, s.b.Tracker.RefFor(s.key))
 			}
 			ctx, cancel := timeout()
 			defer cancel()
@@ -583,6 +614,50 @@ func prCmd(f *flags) *cobra.Command {
 	create.Flags().StringVar(&base, "base", "", "the branch to merge into (default the project's base branch)")
 	create.Flags().StringVar(&head, "head", "", "the branch to open it from, for a PR outside an issue (a sweep's or triage's)")
 	create.Flags().BoolVar(&draft, "draft", false, "open it as a draft")
+	var editTitle, editBody string
+	edit := &cobra.Command{
+		Use:   "edit [pr] [--title <title>] [--body-file <file|->]",
+		Short: "Change a PR's title or body (default the issue's open PR), keeping its link to the issue",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if editTitle == "" && editBody == "" {
+				return errors.New("give --title, --body-file or both")
+			}
+			s, err := open(f, len(args) == 0)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := timeout()
+			defer cancel()
+			pr, err := s.pickPR(ctx, args)
+			if err != nil {
+				return err
+			}
+			title, body := pr.Title, pr.Body
+			if editTitle != "" {
+				title = editTitle
+			}
+			if editBody != "" {
+				if body, err = readBody(editBody); err != nil {
+					return err
+				}
+			}
+			if s.key != "" && (pr.Branch == s.branch() || containsFold(s.b.Tracker.RefsIn(pr.Title+"\n"+pr.Body), s.key)) {
+				body = withRef(body, s.b.Tracker.RefFor(s.key))
+			}
+			if s.dryRun {
+				fmt.Fprintln(cmd.OutOrStdout(), "dry run: would edit PR", pr.ID)
+				return nil
+			}
+			if pr, err = s.b.Repo.EditPR(ctx, pr.ID, title, body); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "#%d %s\n", pr.ID, pr.URL)
+			return nil
+		},
+	}
+	edit.Flags().StringVar(&editTitle, "title", "", "the PR's new title")
+	edit.Flags().StringVar(&editBody, "body-file", "", "a file with the PR's new body, or - for stdin")
 	comment := &cobra.Command{
 		Use:   "comment <pr> <file|->",
 		Short: "Comment on a PR's conversation",
@@ -645,7 +720,7 @@ func prCmd(f *flags) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.AddCommand(list, view, create, comment, reply)
+	cmd.AddCommand(list, view, create, edit, comment, reply)
 	return cmd
 }
 
@@ -661,28 +736,9 @@ func checksCmd(f *flags) *cobra.Command {
 			}
 			ctx, cancel := timeout()
 			defer cancel()
-			var pr core.PR
-			if len(args) == 1 {
-				id, err := atoi(args[0])
-				if err != nil {
-					return err
-				}
-				if pr, err = s.b.Repo.PR(ctx, id); err != nil {
-					return err
-				}
-			} else {
-				prs, err := s.issuePRs(ctx)
-				if err != nil {
-					return err
-				}
-				for _, p := range prs {
-					if p.State == core.PROpen {
-						pr = p
-					}
-				}
-				if pr.ID == 0 {
-					return errors.New("the issue has no open PR")
-				}
+			pr, err := s.pickPR(ctx, args)
+			if err != nil {
+				return err
 			}
 			c, err := s.b.Repo.Checks(ctx, pr.HeadSHA)
 			if err != nil {

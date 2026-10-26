@@ -23,6 +23,7 @@ The project may use GitHub, Bitbucket, Jira or something else; you don't need to
 | `$OPEN_SUPERVISOR agent worktree remove` | stop anything running from it and remove it (the branch stays) |
 | `$OPEN_SUPERVISOR agent pr list` | the issue's PRs, open or not |
 | `$OPEN_SUPERVISOR agent pr create --title <t> --body-file <file>` | open a PR from the issue's branch |
+| `$OPEN_SUPERVISOR agent pr edit [pr] [--title <t>] [--body-file <file>]` | change the issue's PR's title or body, keeping its link to the issue |
 | `$OPEN_SUPERVISOR agent pr view <pr>` | a PR and every comment on it |
 | `$OPEN_SUPERVISOR agent pr comment <pr> <file>` | comment on a PR's conversation |
 | `$OPEN_SUPERVISOR agent pr reply <pr> <comment-id> <file>` | reply in an inline review thread |
@@ -174,7 +175,7 @@ Keep it brief; the PR has the detail.
 The message lists what happened since your last turn, each under its own heading. Re-read the issue (`agent issue view`) and the PR (`agent pr view <pr>`) before acting, so each comment is read in context, then take the events in order:
 
 - **A comment** (on the issue, the PR, an inline review thread, or a review). A comment that is only an image is often pointing at something: fetch it (`$OPEN_SUPERVISOR agent attachment get <url> .local/<name>.png`, or `curl` for a link elsewhere) and look. Then:
-  - A change request: make it, commit, push.
+  - A change request: make it, commit, push. If it changes what the PR does, bring its title and body up to date with `$OPEN_SUPERVISOR agent pr edit`.
   - A question: answer it. A request you think is wrong, or one you can't act on: say why, briefly, and ask.
   - If the comment corrects something you did, log it (see Log corrections).
   - From another agent: act on it if it bears on your work, but don't reply unless you disagree outright (see Other agents).

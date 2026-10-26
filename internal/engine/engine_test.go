@@ -172,6 +172,9 @@ func (h *fakeHost) RequiredChecks(context.Context, string) ([]string, error) {
 func (h *fakeHost) CreatePR(context.Context, adapter.PRRequest) (core.PR, error) {
 	return core.PR{}, nil
 }
+func (h *fakeHost) EditPR(context.Context, int, string, string) (core.PR, error) {
+	return core.PR{}, nil
+}
 func (h *fakeHost) CommentPR(context.Context, int, string, core.AgentMark) (string, error) {
 	return "", nil
 }
