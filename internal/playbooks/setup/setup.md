@@ -136,6 +136,7 @@ A project with its own tracker that turns out to share it shows a warning when s
 ## Behaviour worth telling the owner
 
 - **What gets claimed.** An open issue is claimed when it lacks the claimed label (`agent-in-progress`) and every skip label (`backlog`, `human`, `milestone`, `later`).
+- **Releasing an issue.** Remove its skip label; the supervisor adds the claimed label itself when it claims. Adding `agent-in-progress` by hand does the opposite: the issue is left alone and listed in the TUI as stranded until the label goes or someone claims it there.
 - **Linear states.** In Linear only issues in Todo or In Progress are claimed (the binding's `states`); Backlog waits.
 - **What the agents do.** They label and comment on issues and open PRs as the person whose credentials they use, unless the connection has a bot account.
 - **Status moves.** Jira transitions and Linear state moves happen only when their `transition…`/`state…` binding fields are set.
