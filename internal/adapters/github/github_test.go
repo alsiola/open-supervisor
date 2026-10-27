@@ -181,15 +181,20 @@ func TestMarkers(t *testing.T) {
 	if got := tr.RefsIn("Closes #12, fixes #3 and refs #12; see #99"); strings.Join(got, ",") != "12,3" {
 		t.Errorf("RefsIn = %v", got)
 	}
-	if len(tr.RefsIn(tr.RefFor("5"))) != 1 {
-		t.Errorf("RefFor isn't read back by RefsIn")
+	for _, closes := range []bool{true, false} {
+		if len(tr.RefsIn(tr.RefFor("5", closes))) != 1 {
+			t.Errorf("RefFor(closes=%v) isn't read back by RefsIn", closes)
+		}
+	}
+	if ref := tr.RefFor("5", false); ref != "Refs #5" {
+		t.Errorf("partial RefFor = %q", ref)
 	}
 	if got := tr.RefsIn("Closes octo/widgets#7 and fixes other/repo#8"); strings.Join(got, ",") != "7" {
 		t.Errorf("full refs: %v", got)
 	}
 	// A planning repo's issues, worked in other repositories: only full references are its own.
 	shared := &Tracker{binding: tr.binding, shared: true}
-	if ref := shared.RefFor("5"); ref != "Closes octo/widgets#5" {
+	if ref := shared.RefFor("5", true); ref != "Closes octo/widgets#5" {
 		t.Errorf("shared RefFor = %q", ref)
 	}
 	if got := shared.RefsIn("Closes #3, closes Octo/Widgets#5"); strings.Join(got, ",") != "5" {

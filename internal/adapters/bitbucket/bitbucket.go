@@ -224,7 +224,8 @@ func quote(s string) string {
 	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
 }
 
-// PRsFor finds PRs from the branch or whose description mentions ref, in any state.
+// PRsFor finds PRs from the branch or whose description mentions the issue ref names, in any state. It searches
+// for the issue without ref's word ("ENG-9" for "Closes ENG-9"), so a PR that only refers to it is found too.
 func (r *Repo) PRsFor(ctx context.Context, branch, ref string) ([]core.PR, error) {
 	found := map[int]core.PR{}
 	var order []int
@@ -243,8 +244,8 @@ func (r *Repo) PRsFor(ctx context.Context, branch, ref string) ([]core.PR, error
 			return nil, err
 		}
 	}
-	if ref != "" {
-		if err := add("description ~ " + quote(ref)); err != nil {
+	if words := strings.Fields(ref); len(words) > 0 {
+		if err := add("description ~ " + quote(words[len(words)-1])); err != nil {
 			return nil, err
 		}
 	}

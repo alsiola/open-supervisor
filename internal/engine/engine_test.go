@@ -133,7 +133,12 @@ func (h *fakeHost) RefsIn(text string) []string {
 	}
 	return out
 }
-func (h *fakeHost) RefFor(key string) string { return "Closes #" + key }
+func (h *fakeHost) RefFor(key string, closes bool) string {
+	if !closes {
+		return "Refs #" + key
+	}
+	return "Closes #" + key
+}
 func (h *fakeHost) HoldMarker(hold core.Hold) string {
 	return "<!-- " + hold.Spec() + " -->"
 }

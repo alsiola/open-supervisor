@@ -158,8 +158,11 @@ func TestBindingAndRefs(t *testing.T) {
 	if refs := tr.RefsIn("Closes eng-12, OPS-3; not XENG-4 or WEB-5. ENG-12"); strings.Join(refs, ",") != "ENG-12,OPS-3" {
 		t.Errorf("refs: %v", refs)
 	}
-	if tr.RefFor("ENG-9") != "Closes ENG-9" {
+	if tr.RefFor("ENG-9", true) != "Closes ENG-9" || tr.RefFor("ENG-9", false) != "Part of ENG-9" {
 		t.Error("RefFor")
+	}
+	if refs := tr.RefsIn(tr.RefFor("ENG-9", false)); strings.Join(refs, ",") != "ENG-9" {
+		t.Errorf("partial RefFor isn't read back: %v", refs)
 	}
 	at := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
 	if got, ok := core.RunAtIn(tr.HoldMarker(core.Hold{Until: &at})); !ok || !got.Equal(at) {

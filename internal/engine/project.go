@@ -1239,7 +1239,7 @@ func (p *Project) refreshPRs(key string) {
 	}
 	ctx, cancel := ctxTimeout(2 * time.Minute)
 	defer cancel()
-	found, err := p.Repo.PRsFor(ctx, p.BranchFor(key), p.Tracker.RefFor(key))
+	found, err := p.Repo.PRsFor(ctx, p.BranchFor(key), p.Tracker.RefFor(key, true))
 	if err != nil {
 		p.callFailed(err, "%s: couldn't read its PRs", p.ref(key))
 		return
