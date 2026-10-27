@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -42,6 +43,19 @@ func (e *APIError) Error() string {
 func IsStatus(err error, status int) bool {
 	var e *APIError
 	return errors.As(err, &e) && e.Status == status
+}
+
+// MayHaveLanded reports whether a write that failed with err may still have been made: the service answered
+// with a 5xx, or the call timed out or lost its connection before an answer came back. Retrying such a write
+// blindly risks doing it twice.
+func MayHaveLanded(err error) bool {
+	var e *APIError
+	if errors.As(err, &e) {
+		return e.Status >= 500
+	}
+	var ne net.Error
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.As(err, &ne) && ne.Timeout()
 }
 
 // PausedError is a call an adapter refused without making it, because the service asked it to wait (a rate

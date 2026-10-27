@@ -1,6 +1,12 @@
 package adapter
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"testing"
+)
 
 func TestAPIErrorIsOneLine(t *testing.T) {
 	for _, tc := range []struct{ body, want string }{
@@ -10,6 +16,25 @@ func TestAPIErrorIsOneLine(t *testing.T) {
 	} {
 		if got := (&APIError{Method: "GET", URL: "u", Status: 403, Body: tc.body}).Error(); got != tc.want {
 			t.Errorf("got %q, want %q", got, tc.want)
+		}
+	}
+}
+
+func TestMayHaveLanded(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{&APIError{Status: 502}, true},
+		{fmt.Errorf("creating: %w", &APIError{Status: 504}), true},
+		{&APIError{Status: 422}, false},
+		{context.DeadlineExceeded, true},
+		{io.ErrUnexpectedEOF, true},
+		{errors.New("bad credentials"), false},
+		{&PausedError{Service: "GitHub"}, false},
+	} {
+		if got := MayHaveLanded(tc.err); got != tc.want {
+			t.Errorf("%v: got %v, want %v", tc.err, got, tc.want)
 		}
 	}
 }

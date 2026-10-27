@@ -192,6 +192,42 @@ func readBody(arg string) (string, error) {
 	return body, nil
 }
 
+// createLookups are the pauses before each look for a PR whose create call failed in a way that may have
+// made it anyway; the code host can take a moment to list a PR it has just made.
+var createLookups = []time.Duration{0, 2 * time.Second, 5 * time.Second}
+
+// createPR opens req's PR. When the call fails with a 5xx or a timeout, the PR may have been made anyway (GitHub
+// often makes it and answers 502), so it looks for an open PR from the same head into the same base and returns
+// that, saying so on log, rather than reporting a failure an agent would work round or retry into a duplicate.
+func createPR(ctx context.Context, repo adapter.Repo, req adapter.PRRequest, log io.Writer) (core.PR, error) {
+	pr, err := repo.CreatePR(ctx, req)
+	if err == nil || !adapter.MayHaveLanded(err) {
+		return pr, err
+	}
+	// The call's own context may be what timed out.
+	look, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	for _, pause := range createLookups {
+		select {
+		case <-time.After(pause):
+		case <-look.Done():
+			return core.PR{}, err
+		}
+		found, lerr := repo.PRsFor(look, req.Head, "")
+		if lerr != nil {
+			continue
+		}
+		for i := len(found) - 1; i >= 0; i-- {
+			p := found[i]
+			if p.State == core.PROpen && p.Branch == req.Head && (p.Base == "" || req.Base == "" || p.Base == req.Base) {
+				fmt.Fprintf(log, "creating the PR failed (%v), but it was made: #%d\n", err, p.ID)
+				return p, nil
+			}
+		}
+	}
+	return core.PR{}, fmt.Errorf("%w (no open PR from %s was found afterwards; check `agent pr list` before trying again)", err, req.Head)
+}
+
 func timeout() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 2*time.Minute)
 }
@@ -601,7 +637,7 @@ func prCmd(f *flags) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "dry run: would open %s → %s\n", head, base)
 				return nil
 			}
-			pr, err := s.b.Repo.CreatePR(ctx, adapter.PRRequest{Title: title, Body: body, Head: head, Base: base, Draft: draft})
+			pr, err := createPR(ctx, s.b.Repo, adapter.PRRequest{Title: title, Body: body, Head: head, Base: base, Draft: draft}, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
