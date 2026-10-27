@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.0](https://github.com/alsiola/open-supervisor/compare/v1.4.0...v1.5.0) (2026-10-27)
+
+### Features
+
+* share agents' findings with the other issues they bear on, as an opt-in coordination mode ([#73](https://github.com/alsiola/open-supervisor/issues/73)) ([d76a817](https://github.com/alsiola/open-supervisor/commit/d76a817bbea98092bacb719c6c66defdae75782b))
+
+### Bug Fixes
+
+* **engine:** list issues labelled claimed with no session instead of skipping them silently ([#71](https://github.com/alsiola/open-supervisor/issues/71)) ([c7d597c](https://github.com/alsiola/open-supervisor/commit/c7d597c5e14510cafaa92f6fa2587632cc35793c)), closes [#70](https://github.com/alsiola/open-supervisor/issues/70)
+* **toolbelt:** report the PR that agent pr create made when the host answers 5xx ([#77](https://github.com/alsiola/open-supervisor/issues/77)) ([dd51ba1](https://github.com/alsiola/open-supervisor/commit/dd51ba115e5d2dd5d600f83bb9b30867ab2b710e))
+* **worktree:** clear landed issues' worktrees and tell an agent when its worktree is gone ([e44185e](https://github.com/alsiola/open-supervisor/commit/e44185e8dd0e1b0575a5175be596b82fbde9b0a2))
+
 ## [1.4.0](https://github.com/alsiola/open-supervisor/compare/v1.3.0...v1.4.0) (2026-10-26)
 
 ### Features
