@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/alsiola/open-supervisor/internal/adapter"
+	"github.com/alsiola/open-supervisor/internal/ambient"
 	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/logx"
@@ -42,6 +43,8 @@ type hub interface {
 	// limit holds every turn on an agent until a time, after one hit the subscription's usage limit; a zero time
 	// lifts the hold.
 	limit(agent string, until time.Time)
+	// share hands a comment read on one of the project's issues to ambient sharing (see Supervisor.share).
+	share(p *Project, on string, c core.Comment)
 	// jobsChanged rebuilds the hooks after the events or webhooks a project's jobs take changed, and points the
 	// project's again.
 	jobsChanged(p *Project)
@@ -395,6 +398,7 @@ func (p *Project) ingest(r *store.Record, c core.Comment) bool {
 // ingestOpt is ingest; schedule false queues the comment without starting a turn, so a batch read in one go
 // becomes one turn.
 func (p *Project) ingestOpt(r *store.Record, c core.Comment, schedule bool) bool {
+	p.hub.share(p, r.Key, c)
 	// The mark comes first: agents post through a bot app when one is set up, and another agent's comment
 	// still has to reach this one.
 	if c.Agent != nil {
@@ -417,6 +421,12 @@ func (p *Project) ingestOpt(r *store.Record, c core.Comment, schedule bool) bool
 	})
 	if !fresh {
 		return false
+	}
+	if c.Agent != nil {
+		// Comments that reach one agent from another's work, direct or shared, are the coordination
+		// experiment's measure of how much agents tell each other.
+		p.hub.capture("agent_cross_comment", map[string]any{"project": p.Name, "issue": r.Key, "from": c.Agent.From,
+			"shared": ambient.IsShare(c.Body), "coordination": p.hub.settings().Ambient.Mode(), "chars": len(c.Body)})
 	}
 	cc := c
 	p.enqueueOpt(r.Key, core.Event{Type: core.EvComment, Comment: &cc, At: c.At}, schedule)
@@ -1088,9 +1098,14 @@ func (p *Project) report(key string, o core.Outcome) {
 		"models":      o.Models,
 		"model_calls": o.ModelCalls,
 		"tool_calls":  o.ToolCalls,
+		// coordination says which arm of the coordination experiment the turn ran under.
+		"coordination": p.hub.settings().Ambient.Mode(),
 	}
 	if o.Status != nil {
 		props["state"] = string(o.Status.State)
+		if len(o.Status.Shared) > 0 {
+			props["shared_used"] = o.Status.Shared
+		}
 	} else if !o.OK {
 		props["state"] = "failed"
 	}

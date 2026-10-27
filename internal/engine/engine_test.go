@@ -30,6 +30,9 @@ type fakeHost struct {
 	labelOps []string
 	reads    int
 	posted   []string
+	// postedTo and marks are, for each comment posted, the issue it went on and the mark it carried.
+	postedTo []string
+	marks    []core.AgentMark
 }
 
 func newHost() *fakeHost {
@@ -111,6 +114,8 @@ func (h *fakeHost) Comment(_ context.Context, key, body string, mark core.AgentM
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.posted = append(h.posted, body)
+	h.postedTo = append(h.postedTo, key)
+	h.marks = append(h.marks, mark)
 	return fmt.Sprintf("https://fake/issues/%s#issuecomment-%d", key, len(h.posted)), nil
 }
 func (h *fakeHost) comments_() []string {

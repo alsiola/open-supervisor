@@ -24,6 +24,8 @@ type Status struct {
 	Preview string     `json:"preview,omitempty"`
 	Touches string     `json:"touches,omitempty"`
 	Handoff string     `json:"handoff,omitempty"`
+	// Shared are the links of comments shared with the issue automatically that changed what the turn did.
+	Shared []string `json:"shared,omitempty"`
 }
 
 // StatusSchema is the JSON schema an agent is asked to end each issue turn with.
@@ -43,6 +45,7 @@ var StatusSchema = map[string]any{
 		"touches": map[string]any{"type": "string", "description": "What the work changes (pages, data, pipeline steps), in a few words, for other agents."},
 		"handoff": map[string]any{"type": "string", "description": "A note to the session that picks this issue up next if this one has gone cold: " +
 			"what is pending, the judgement calls you made and why, and what to check next. Intent only; the issue, the PR and git hold the facts."},
+		"shared": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "The links of comments shared with this issue automatically that changed what you did this turn; leave out when none did."},
 	},
 	"required":             []string{"state", "summary"},
 	"additionalProperties": false,

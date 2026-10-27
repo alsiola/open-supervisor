@@ -469,7 +469,7 @@ func writePlaybooks(path string) error {
 			return err
 		}
 		agent := conn.(adapter.Agent)
-		if err := agent.Prepare(context.Background(), playbooks.All()); err != nil {
+		if err := agent.Prepare(context.Background(), playbooks.All(cfg.Settings.Ambient.Mode())); err != nil {
 			fmt.Printf("%s: %v\n", name, err)
 		}
 		if d, ok := conn.(interface{ PluginDir() string }); ok {
