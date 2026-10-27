@@ -1,12 +1,12 @@
 # Release builds: the release workflow (.github/workflows/release.yml, run by hand) has semantic-release tag the
-# next version, then runs this with the notes it wrote.
+# next version, then runs this with the notes it wrote. The workflow runs the tests before anything is tagged,
+# so they aren't a hook here, where a failure would leave the tag pushed and nothing published.
 version: 2
 project_name: open-supervisor
 
 before:
   hooks:
     - go mod tidy
-    - go test ./...
 
 builds:
   - main: ./cmd/open-supervisor
