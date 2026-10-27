@@ -2,6 +2,8 @@
 # since the last tag to pick the next version, writes CHANGELOG.md, commits and tags it on main, then hands
 # the tag to goreleaser, which builds every platform, publishes the GitHub release with the same notes and
 # updates the Homebrew tap. With no feat/fix/breaking commit since the last tag, it releases nothing.
+# The tests run first: once the tag is pushed, a failure can only leave a tag with no release behind, and a
+# re-run of that run checks out the commit before the release and quietly publishes nothing. Start a new run.
 name: release
 on:
   workflow_dispatch:
@@ -26,6 +28,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - run: go test ./...
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"

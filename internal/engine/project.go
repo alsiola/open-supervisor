@@ -1023,6 +1023,8 @@ func (p *Project) failed(key string, events []core.Event, outcome core.Outcome) 
 		if outcome.ResetsAt != nil {
 			limitRetry = outcome.ResetsAt.Add(limitGrace)
 		}
+		// Hold the agent before the record turns Failed, so a schedule in between can't start another turn on it.
+		p.hub.limit(p.AgentName, limitRetry)
 	}
 	r := p.Store.Update(key, func(x *store.Record) {
 		x.State = store.Failed
@@ -1054,7 +1056,6 @@ func (p *Project) failed(key string, events []core.Event, outcome core.Outcome) 
 	switch {
 	case outcome.Limited:
 		retry = " (retry at " + core.Clock(limitRetry) + ")"
-		p.hub.limit(p.AgentName, limitRetry)
 	case r != nil && r.Attempts < p.hub.settings().MaxAttempts:
 		retry = fmt.Sprintf(" (retry in %d min)", r.Attempts*5)
 	}
