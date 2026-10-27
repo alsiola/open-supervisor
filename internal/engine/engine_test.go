@@ -729,3 +729,23 @@ func TestSigningKeptWhenAskedFor(t *testing.T) {
 		t.Fatalf("signing turned off: %s", env)
 	}
 }
+
+func TestResumedTurnHearsItsWorktreeIsGone(t *testing.T) {
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") })
+	host.issues["7"] = &core.Issue{Key: "7", Title: "Seven", Open: true}
+	p.reconcile()
+	waitFor(t, "first turn", func() bool { return state(p, "7") == store.Review })
+	if strings.Contains(agent.turns()[0].Body, "worktree is gone") {
+		t.Fatal("the first turn heard its worktree was gone")
+	}
+	// The branch is there and the worktree isn't, as after a sweep or a removal by hand.
+	gitIn(t, p.Root, "commit", "-q", "--allow-empty", "-m", "init")
+	gitIn(t, p.Root, "branch", p.BranchFor("7"))
+	time.Sleep(50 * time.Millisecond)
+	host.comments["7"] = []core.Comment{{ID: "c1", Kind: core.OnIssue, Author: "owner", Body: "one more thing", At: time.Now().UTC().Add(time.Second)}}
+	p.reconcile()
+	waitFor(t, "second turn", func() bool { return len(agent.turns()) == 2 && state(p, "7") == store.Review })
+	if body := agent.turns()[1].Body; !strings.Contains(body, "Your worktree is gone") {
+		t.Fatalf("second turn body lacks the note:\n%s", body)
+	}
+}

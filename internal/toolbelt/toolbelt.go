@@ -932,16 +932,30 @@ func (s *session) worktreeSpec(log io.Writer) worktree.Spec {
 	return worktree.Spec{Root: s.b.Root, Remote: s.b.Git.RemoteName(), Path: s.worktree(), Branch: s.branch(), Base: base, Copy: w.Copy, Setup: w.Setup, SetupWhen: w.SetupWhen, Disk: disk, Log: log}
 }
 
-// crowd says how many issue worktrees the project has and which of them could go, for a disk too full for another.
-func (s *session) crowd() string {
+// spare lists the project's issue worktrees, and of those the ones its issues no longer need.
+func (s *session) spare() (all []string, spare []engine.SpareWorktree) {
 	st := store.New(s.b.StateDir, nil)
 	_ = st.Load()
-	all, spare := engine.IssueWorktrees(config.DataDir(), s.b.StateDir, s.b.Spec.Name, st)
+	return engine.IssueWorktrees(config.DataDir(), s.b.StateDir, s.b.Spec.Name, st)
+}
+
+// makeRoom removes the spare worktrees that can go without losing work, for a disk too full for another. It
+// reports whether it removed any.
+func (s *session) makeRoom(log io.Writer) bool {
+	_, spare := s.spare()
+	return engine.RemoveSpare(s.b.Root, s.b.Git.RemoteName(), spare, func(format string, args ...any) {
+		fmt.Fprintf(log, format+"\n", args...)
+	}) > 0
+}
+
+// crowd says how many issue worktrees the project has and which of them could go, for a disk too full for another.
+func (s *session) crowd() string {
+	all, spare := s.spare()
 	msg := fmt.Sprintf("The project has %d issue worktrees", len(all))
 	if len(spare) == 0 {
 		return msg + ", all for issues still in progress; free space elsewhere, or ask the owner, then run setup again"
 	}
-	return fmt.Sprintf("%s; %d are for issues finished or no longer held, which can go: %s. Free space, then run setup again",
+	return fmt.Sprintf("%s; %d are for issues finished, landed or no longer held, but have work on them that isn't pushed or were touched in the last day: %s. Free space, then run setup again",
 		msg, len(spare), engine.SpareNames(spare))
 }
 
@@ -956,7 +970,12 @@ func worktreeCmd(f *flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			path, err := worktree.Setup(s.worktreeSpec(cmd.ErrOrStderr()))
+			spec := s.worktreeSpec(cmd.ErrOrStderr())
+			path, err := worktree.Setup(spec)
+			// A full disk: clear the worktrees no issue needs any more, and try once more before giving up.
+			if noRoom := (*worktree.NoRoom)(nil); errors.As(err, &noRoom) && s.makeRoom(cmd.ErrOrStderr()) {
+				path, err = worktree.Setup(spec)
+			}
 			if noRoom := (*worktree.NoRoom)(nil); errors.As(err, &noRoom) {
 				return fmt.Errorf("%w. %s", err, s.crowd())
 			}

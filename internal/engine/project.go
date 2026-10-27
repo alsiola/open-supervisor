@@ -785,6 +785,9 @@ func (p *Project) inflight(except string) string {
 	return strings.Join(others, "\n")
 }
 
+// worktreeGone tells a resumed agent its worktree went since its last turn (cleared as spare, or by hand).
+const worktreeGone = "## Your worktree is gone\n\nThe issue's worktree isn't there any more. `agent worktree setup` makes it again from the branch, with everything committed and pushed; anything else that was in it, such as scratch files in `.local/`, is lost."
+
 func (p *Project) turnBody(r *store.Record, events []core.Event, handoff bool) (args, body string) {
 	if handoff {
 		return r.Key + " handoff", "## Handoff from your last session\n\n" + strings.TrimSpace(r.Handoff) +
@@ -858,6 +861,9 @@ func (p *Project) runTurn(key string) {
 	// up to date with the main checkout first.
 	worktree.Refresh(worktree.Spec{Root: p.Root, Path: p.WorktreePath(key), Copy: p.Spec.Worktree.Copy})
 	args, body := p.turnBody(r, events, handoff)
+	if r.Turns > 0 && worktree.Gone(p.Root, p.WorktreePath(key), p.BranchFor(key)) {
+		body += "\n\n" + worktreeGone
+	}
 	body = withExtra(body, playbooks.Project(p.Root, "work-issue"))
 	ctx := context.Background()
 	turn, err := p.Agent.Start(ctx, adapter.TurnSpec{
