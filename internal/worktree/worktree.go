@@ -395,6 +395,15 @@ func Remove(s Spec) error {
 	return nil
 }
 
+// Gone reports whether an issue's worktree was made and has since been removed: its branch is there and the
+// worktree isn't.
+func Gone(root, path, branch string) bool {
+	if _, err := os.Stat(path); err == nil {
+		return false
+	}
+	return refExists(root, "refs/heads/"+branch)
+}
+
 // Unpushed says what removing the worktree would lose: uncommitted changes to tracked or new files (ignored
 // ones, like .local/, don't count), or commits no remote-tracking branch has. It is "" when there is nothing.
 func Unpushed(s Spec) (string, error) {

@@ -54,6 +54,12 @@ func TestSetupAndRemove(t *testing.T) {
 	if out, _ := exec.Command("git", "-C", root, "branch", "--list", spec.Branch).Output(); !strings.Contains(string(out), spec.Branch) {
 		t.Fatal("the branch went with the worktree")
 	}
+	if !Gone(root, path, spec.Branch) {
+		t.Fatal("Gone = false for a worktree removed with its branch left")
+	}
+	if Gone(root, path, "agent/issue-never") {
+		t.Fatal("Gone = true for an issue that never had a branch")
+	}
 }
 
 func TestSetupSkippedWithoutWatchedFiles(t *testing.T) {
