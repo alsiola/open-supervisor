@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -452,7 +453,7 @@ func (p *Project) ingestOpt(r *store.Record, c core.Comment, schedule bool) bool
 }
 
 // enqueue queues an event for the issue's next turn, or hands it to the running turn when it is one people
-// said and the turn can take it.
+// said and the turn can take it. Another agent's comment only waits for the next turn: it never starts one.
 func (p *Project) enqueue(key string, e core.Event) { p.enqueueOpt(key, e, true) }
 
 func (p *Project) enqueueOpt(key string, e core.Event, schedule bool) {
@@ -464,14 +465,16 @@ func (p *Project) enqueueOpt(key string, e core.Event, schedule bool) {
 		return
 	}
 	suffix := ""
-	switch r.State {
-	case store.Running:
+	switch {
+	case !e.Wakes():
+		suffix = " (queued for the next turn)"
+	case r.State == store.Running:
 		suffix = " (queued; a turn is running)"
-	case store.Manual:
+	case r.State == store.Manual:
 		suffix = " (queued; you are attached)"
 	}
 	p.logf("%s: %s%s", p.ref(key), e.Describe(), suffix)
-	if schedule {
+	if schedule && e.Wakes() {
 		p.hub.schedule()
 	}
 }
@@ -745,7 +748,7 @@ func (p *Project) runnable(r *store.Record) bool {
 	case r.State == store.Failed && r.RetryAfter != nil && time.Now().Before(*r.RetryAfter):
 		return false
 	}
-	return r.State == store.Queued || len(r.Queue) > 0
+	return r.State == store.Queued || slices.ContainsFunc(r.Queue, core.Event.Wakes)
 }
 
 // candidates are the issues with a turn to run: the ones already under way first, then the oldest claim.

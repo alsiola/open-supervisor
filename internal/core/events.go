@@ -53,7 +53,13 @@ func (e Event) Same(o Event) bool {
 // Interjects reports whether the event may be handed to a turn already running: what people say. The rest
 // waits for the next turn.
 func (e Event) Interjects() bool {
-	return e.Type == EvComment || e.Type == EvMessage
+	return (e.Type == EvComment || e.Type == EvMessage) && e.Wakes()
+}
+
+// Wakes reports whether the event is reason enough for a turn. Another agent's comment, direct or shared, isn't:
+// it waits in the queue and arrives with the next turn something else starts.
+func (e Event) Wakes() bool {
+	return e.Type != EvComment || e.Comment == nil || e.Comment.Agent == nil
 }
 
 func short(sha string) string {

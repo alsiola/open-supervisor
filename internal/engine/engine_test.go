@@ -398,6 +398,53 @@ func TestCommentsBecomeTheNextTurnsEvents(t *testing.T) {
 	}
 }
 
+func TestAgentCommentWaitsForTheNextTurn(t *testing.T) {
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") })
+	host.issues["5"] = &core.Issue{Key: "5", Title: "Five", Open: true}
+	p.reconcile()
+	waitFor(t, "first turn", func() bool { return state(p, "5") == store.Review })
+	time.Sleep(50 * time.Millisecond) // let the first turn finish settling
+	// Another agent's comment, direct or shared, is queued on the sleeping issue but starts no turn.
+	p.ingest(p.Store.Get("5"), core.Comment{ID: "c1", Kind: core.OnIssue, Author: "agent-app[bot]", Bot: true,
+		Body: "I'm doing the header", At: time.Now().UTC(), Agent: &core.AgentMark{From: "9"}})
+	time.Sleep(100 * time.Millisecond)
+	if n := len(agent.turns()); n != 1 || len(p.Store.Get("5").Queue) != 1 || len(p.candidates()) != 0 {
+		t.Fatalf("an agent's comment started a turn: %d turns, %d queued", n, len(p.Store.Get("5").Queue))
+	}
+	// It arrives with the next turn something else starts.
+	p.Message("5", "carry on")
+	waitFor(t, "second turn", func() bool { return len(agent.turns()) == 2 && state(p, "5") == store.Review })
+	if body := agent.turns()[1].Body; !strings.Contains(body, "I'm doing the header") || !strings.Contains(body, "carry on") {
+		t.Fatalf("second turn body:\n%s", body)
+	}
+}
+
+func TestAgentCommentIsNotSentToTheRunningTurn(t *testing.T) {
+	release := make(chan struct{})
+	running := make(chan *fakeTurn, 1)
+	_, p := setup(t, func(spec adapter.TurnSpec, ft *fakeTurn) core.Outcome {
+		running <- ft
+		<-release
+		return review("ok")
+	})
+	host.issues["7"] = &core.Issue{Key: "7", Title: "Seven", Open: true}
+	p.reconcile()
+	ft := <-running
+	waitFor(t, "running", func() bool { return state(p, "7") == store.Running && p.Running("7") != nil })
+	p.ingest(p.Store.Get("7"), core.Comment{ID: "c1", Kind: core.OnIssue, Author: "agent-app[bot]", Bot: true,
+		Body: "Shared from #3", At: time.Now().UTC(), Agent: &core.AgentMark{From: "3"}})
+	close(release)
+	waitFor(t, "review", func() bool { return state(p, "7") == store.Review })
+	time.Sleep(100 * time.Millisecond)
+	if got := ft.received(); len(got) != 0 {
+		t.Fatalf("sent to the running turn: %q", got)
+	}
+	// Still queued for the next turn, which it doesn't start by itself.
+	if n, q := len(agent.turns()), len(p.Store.Get("7").Queue); n != 1 || q != 1 {
+		t.Fatalf("%d turns, %d queued", n, q)
+	}
+}
+
 func TestStatusLabelComesOffWhileATurnRuns(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
