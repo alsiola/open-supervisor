@@ -123,7 +123,7 @@ func TestPRsFor(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"values": []any{pr}})
 	})
-	prs, err := r.PRsFor(context.Background(), "agent/issue-PROJ-1", "PROJ-1")
+	prs, err := r.PRsFor(context.Background(), "agent/issue-PROJ-1", "Part of PROJ-1")
 	if err != nil {
 		t.Fatal(err)
 	}

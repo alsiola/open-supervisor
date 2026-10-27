@@ -482,7 +482,7 @@ func upstreamIssueURL(title, body string) string {
 
 // issuePRs are the PRs that belong to the issue: from its branch, or referring to it.
 func (s *session) issuePRs(ctx context.Context) ([]core.PR, error) {
-	found, err := s.b.Repo.PRsFor(ctx, s.branch(), s.b.Tracker.RefFor(s.key))
+	found, err := s.b.Repo.PRsFor(ctx, s.branch(), s.b.Tracker.RefFor(s.key, true))
 	if err != nil {
 		return nil, err
 	}
@@ -520,12 +520,47 @@ func (s *session) pickPR(ctx context.Context, args []string) (core.PR, error) {
 	return pr, nil
 }
 
-// withRef puts the line that links a PR to its issue at the top of body, unless body already has it.
-func withRef(body, ref string) string {
-	if strings.Contains(body, ref) {
+// linkIssue is body with the line that links the PR to the issue: one that closes it on merge, or with partial
+// one that only refers to it. force says the agent chose which (see withRef).
+func (s *session) linkIssue(body string, partial, force bool) string {
+	t := s.b.Tracker
+	return withRef(body, t.RefFor(s.key, !partial), t.RefFor(s.key, partial), containsFold(t.RefsIn(body), s.key), force)
+}
+
+// isPartial is a PR body that links the issue without closing it.
+func (s *session) isPartial(body string) bool {
+	ref := s.b.Tracker.RefFor(s.key, false)
+	return ref != s.b.Tracker.RefFor(s.key, true) && hasLine(body, ref)
+}
+
+// withRef puts ref, the line that links a PR to its issue, at the top of body, unless body already refers to
+// the issue (refers), keeping the word it uses. With force the agent chose ref's form, so a line of the other
+// form gives way to it.
+func withRef(body, ref, other string, refers, force bool) string {
+	if force && other != ref {
+		lines := strings.Split(body, "\n")
+		for i, l := range lines {
+			if strings.EqualFold(strings.TrimSpace(l), other) {
+				lines[i] = ref
+			}
+		}
+		body = strings.Join(lines, "\n")
+		refers = hasLine(body, ref)
+	}
+	if refers {
 		return body
 	}
 	return ref + "\n\n" + body
+}
+
+// hasLine is body with line on a line of its own, whatever its case.
+func hasLine(body, line string) bool {
+	for _, l := range strings.Split(body, "\n") {
+		if strings.EqualFold(strings.TrimSpace(l), line) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsFold(xs []string, x string) bool {
@@ -602,12 +637,15 @@ func prCmd(f *flags) *cobra.Command {
 		},
 	}
 	var title, bodyFile, base, head string
-	var draft bool
+	var draft, partial bool
 	create := &cobra.Command{
-		Use:   "create --title <title> --body-file <file|->",
+		Use:   "create --title <title> --body-file <file|-> [--partial]",
 		Short: "Open a PR from the issue's branch, or from --head outside an issue",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if partial && head != "" {
+				return errors.New("--partial is for an issue's PR, not one from --head")
+			}
 			s, err := open(f, head == "")
 			if err != nil {
 				return err
@@ -621,7 +659,7 @@ func prCmd(f *flags) *cobra.Command {
 			}
 			if head == "" {
 				head = s.branch()
-				body = withRef(body, s.b.Tracker.RefFor(s.key))
+				body = s.linkIssue(body, partial, partial)
 			}
 			ctx, cancel := timeout()
 			defer cancel()
@@ -650,14 +688,17 @@ func prCmd(f *flags) *cobra.Command {
 	create.Flags().StringVar(&base, "base", "", "the branch to merge into (default the project's base branch)")
 	create.Flags().StringVar(&head, "head", "", "the branch to open it from, for a PR outside an issue (a sweep's or triage's)")
 	create.Flags().BoolVar(&draft, "draft", false, "open it as a draft")
+	create.Flags().BoolVar(&partial, "partial", false, "the PR does part of the issue: merging it leaves the issue open")
 	var editTitle, editBody string
+	var editPartial bool
 	edit := &cobra.Command{
-		Use:   "edit [pr] [--title <title>] [--body-file <file|->]",
+		Use:   "edit [pr] [--title <title>] [--body-file <file|->] [--partial[=false]]",
 		Short: "Change a PR's title or body (default the issue's open PR), keeping its link to the issue",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if editTitle == "" && editBody == "" {
-				return errors.New("give --title, --body-file or both")
+			choose := cmd.Flags().Changed("partial")
+			if editTitle == "" && editBody == "" && !choose {
+				return errors.New("give --title, --body-file, --partial or more than one")
 			}
 			s, err := open(f, len(args) == 0)
 			if err != nil {
@@ -678,8 +719,16 @@ func prCmd(f *flags) *cobra.Command {
 					return err
 				}
 			}
-			if s.key != "" && (pr.Branch == s.branch() || containsFold(s.b.Tracker.RefsIn(pr.Title+"\n"+pr.Body), s.key)) {
-				body = withRef(body, s.b.Tracker.RefFor(s.key))
+			switch {
+			case s.key != "" && (pr.Branch == s.branch() || containsFold(s.b.Tracker.RefsIn(pr.Title+"\n"+pr.Body), s.key)):
+				// Without --partial the PR keeps the link it had: one that only referred to the issue still does.
+				p := editPartial
+				if !choose {
+					p = s.isPartial(pr.Body)
+				}
+				body = s.linkIssue(body, p, choose)
+			case choose:
+				return fmt.Errorf("PR #%d isn't this issue's, so --partial has no link to change", pr.ID)
 			}
 			if s.dryRun {
 				fmt.Fprintln(cmd.OutOrStdout(), "dry run: would edit PR", pr.ID)
@@ -694,6 +743,7 @@ func prCmd(f *flags) *cobra.Command {
 	}
 	edit.Flags().StringVar(&editTitle, "title", "", "the PR's new title")
 	edit.Flags().StringVar(&editBody, "body-file", "", "a file with the PR's new body, or - for stdin")
+	edit.Flags().BoolVar(&editPartial, "partial", false, "the PR does part of the issue (merging it leaves the issue open); --partial=false to have it close the issue again")
 	comment := &cobra.Command{
 		Use:   "comment <pr> <file|->",
 		Short: "Comment on a PR's conversation",

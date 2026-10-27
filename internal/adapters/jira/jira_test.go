@@ -62,7 +62,7 @@ func TestRefs(t *testing.T) {
 	if len(got) != 2 || got[0] != "PROJ-12" || got[1] != "PROJ-3" {
 		t.Errorf("refs: %v", got)
 	}
-	if tr.RefFor("PROJ-9") != "PROJ-9" {
+	if tr.RefFor("PROJ-9", true) != "PROJ-9" || tr.RefFor("PROJ-9", false) != "PROJ-9" {
 		t.Error("RefFor")
 	}
 	at := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)

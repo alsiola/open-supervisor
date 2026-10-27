@@ -26,8 +26,8 @@ The project may use GitHub, Bitbucket, Jira or something else; you don't need to
 | `$OPEN_SUPERVISOR agent worktree setup` | create or reuse the issue's worktree on its branch; prints the path last |
 | `$OPEN_SUPERVISOR agent worktree remove` | stop anything running from it and remove it (the branch stays) |
 | `$OPEN_SUPERVISOR agent pr list` | the issue's PRs, open or not |
-| `$OPEN_SUPERVISOR agent pr create --title <t> --body-file <file>` | open a PR from the issue's branch |
-| `$OPEN_SUPERVISOR agent pr edit [pr] [--title <t>] [--body-file <file>]` | change the issue's PR's title or body, keeping its link to the issue |
+| `$OPEN_SUPERVISOR agent pr create --title <t> --body-file <file> [--partial]` | open a PR from the issue's branch; `--partial` when merging it shouldn't close the issue |
+| `$OPEN_SUPERVISOR agent pr edit [pr] [--title <t>] [--body-file <file>] [--partial[=false]]` | change the issue's PR's title or body, keeping its link to the issue; `--partial` switches whether merging it closes the issue |
 | `$OPEN_SUPERVISOR agent pr view <pr>` | a PR and every comment on it |
 | `$OPEN_SUPERVISOR agent pr comment <pr> <file>` | comment on a PR's conversation |
 | `$OPEN_SUPERVISOR agent pr reply <pr> <comment-id> <file>` | reply in an inline review thread |
@@ -171,7 +171,7 @@ Post a short start comment on the issue, e.g. `printf 'Working on this on branch
   - what changed, as short sections
   - anything from the issue you didn't do, and why
   - anything else the project's rules ask a PR body to carry
-  The command adds the line that links the PR to the issue.
+  The command adds the line that links the PR to the issue, so merging it closes the issue. When the issue has more to do after this PR (a second PR to come, a lab or data PR split from the piece it feeds), add `--partial`: the PR is still the issue's, but merging it leaves the issue open. `agent pr edit --partial` (or `--partial=false`) changes your mind later.
 - Don't wait for the checks. End the turn with `building`, the PR number in `prs` and `touches` filled in. The supervisor resumes you when every check on the PR's head has finished, with the result and the deploy preview's URL if the project has one.
 
 ### 5. Report on the issue
@@ -203,7 +203,7 @@ The message lists what happened since your last turn, each under its own heading
 - **Checks passed**, with the preview: if the report (step 5) isn't posted yet, post it now. Otherwise, if you pushed changes for feedback, reply to that feedback with the preview and end with `review`.
 - **Required checks never reported**: checks the base branch requires (a deploy preview, say) never started on the head. Find out why (a `[skip …]` in the PR title or a commit message stops some deploys), start them, often with a new push, and end with `building`. If they rightly don't run on this PR, report as in step 5 and say so.
 - **No checks ran**: the repo has no CI. Treat the PR as checked once what the rules say must pass has passed locally, and report as in step 5.
-- **PR merged or closed**, or **the issue closed** with no PR: clean up (see Cleaning up) and end with `finished`.
+- **PR merged or closed**, or **the issue closed** with no PR: clean up (see Cleaning up) and end with `finished`. If a `--partial` PR merged and the issue still has work left, it isn't over: keep the worktree, carry on with the rest (the next PR from the same branch, rebased onto the updated base branch first) and end with the state that work is in.
 - **A note from the supervisor**: do what it says.
 - **What you were waiting for**: the wait is over (see Waiting). Pick the work up, or wait again if what's left still isn't ready.
 - **A message from the owner**, typed into the supervisor: treat it like a comment, but answer in your session (your summary or final reply), not on the issue, unless it asks for a comment.
@@ -220,7 +220,7 @@ When your last turn ended long enough ago that resuming would cost more than sta
 
 ## Cleaning up
 
-Once every PR for the issue is merged or closed, or the issue is closed with no PR: `$OPEN_SUPERVISOR agent worktree remove`. It stops anything still running from the worktree and removes it; the branch stays. Then end the turn with `finished`. The supervisor keeps your session: a later comment or a reopen resumes it.
+Once every PR for the issue is merged or closed and nothing is left to do on it, or the issue is closed with no PR: `$OPEN_SUPERVISOR agent worktree remove`. It stops anything still running from the worktree and removes it; the branch stays. Then end the turn with `finished`. The supervisor keeps your session: a later comment or a reopen resumes it.
 
 ## Don't
 

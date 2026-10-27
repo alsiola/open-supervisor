@@ -81,11 +81,35 @@ func TestHoldForChecksBeforeAnyCall(t *testing.T) {
 }
 
 func TestWithRef(t *testing.T) {
-	if got := withRef("Rewrites the parser.", "Closes #12"); got != "Closes #12\n\nRewrites the parser." {
-		t.Fatalf("added: %q", got)
+	for _, c := range []struct {
+		name, body, ref, other string
+		refers, force          bool
+		want                   string
+	}{
+		{"added", "Rewrites the parser.", "Closes #12", "Refs #12", false, false, "Closes #12\n\nRewrites the parser."},
+		{"kept", "Rewrites the parser.\n\nCloses #12", "Closes #12", "Refs #12", true, false, "Rewrites the parser.\n\nCloses #12"},
+		// pr edit on a partial PR: the body's Refs line stands rather than gaining a Closes above it.
+		{"own word kept", "Refs #12\n\nRewrites the parser.", "Closes #12", "Refs #12", true, false, "Refs #12\n\nRewrites the parser."},
+		{"partial added", "Rewrites the parser.", "Refs #12", "Closes #12", false, true, "Refs #12\n\nRewrites the parser."},
+		{"made partial", "closes #12\n\nRewrites the parser.", "Refs #12", "Closes #12", true, true, "Refs #12\n\nRewrites the parser."},
+		{"closing again", "Refs #12\n\nRewrites the parser.", "Closes #12", "Refs #12", true, true, "Closes #12\n\nRewrites the parser."},
+		// A closing word in the prose isn't the link line, so the chosen line goes on top.
+		{"prose", "Fixes #12 in part.", "Refs #12", "Closes #12", true, true, "Refs #12\n\nFixes #12 in part."},
+		{"one form", "Rewrites the parser.", "PROJ-12", "PROJ-12", false, true, "PROJ-12\n\nRewrites the parser."},
+	} {
+		if got := withRef(c.body, c.ref, c.other, c.refers, c.force); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
 	}
-	if got := withRef("Rewrites the parser.\n\nCloses #12", "Closes #12"); got != "Rewrites the parser.\n\nCloses #12" {
-		t.Fatalf("kept: %q", got)
+}
+
+func TestPartialIsForAnIssuesPR(t *testing.T) {
+	cmd := Command()
+	cmd.SetArgs([]string{"pr", "create", "--title", "t", "--body-file", "-", "--head", "sweep", "--partial"})
+	cmd.SetOut(new(strings.Builder))
+	cmd.SetErr(new(strings.Builder))
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--partial is for an issue's PR") {
+		t.Fatalf("err: %v", err)
 	}
 }
 

@@ -213,7 +213,8 @@ func (t *Tracker) RefsIn(text string) []string {
 	return out
 }
 
-func (t *Tracker) RefFor(key string) string { return key }
+// RefFor is the key alone: Jira links a PR that names it and never closes the issue from one.
+func (t *Tracker) RefFor(key string, _ bool) string { return key }
 
 func (t *Tracker) HoldMarker(h core.Hold) string {
 	return "[" + h.Spec() + "]"

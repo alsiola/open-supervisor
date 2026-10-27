@@ -103,8 +103,10 @@ type Tracker interface {
 	IssueURL(key string) string
 	// RefsIn returns the issue keys a PR's title or body refers to ("Closes #12", "PROJ-12").
 	RefsIn(text string) []string
-	// RefFor is how a PR body should refer to the issue so the tracker links (and maybe closes) it.
-	RefFor(key string) string
+	// RefFor is how a PR body should refer to the issue so the tracker links it: closing it when the PR merges
+	// where the tracker can, or with closes false only referring to it, for a PR that does part of the work.
+	// RefsIn reads either back.
+	RefFor(key string, closes bool) string
 	// HoldMarker is a marker for the hold (see core.HoldIn), in the form this tracker's comments and bodies
 	// can carry: hidden where they can hide things.
 	HoldMarker(h core.Hold) string

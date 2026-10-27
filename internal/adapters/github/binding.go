@@ -446,11 +446,15 @@ func (t *Tracker) RefsIn(text string) []string {
 	return out
 }
 
-func (t *Tracker) RefFor(key string) string {
-	if t.shared {
-		return "Closes " + t.repo + "#" + strings.TrimPrefix(key, "#")
+func (t *Tracker) RefFor(key string, closes bool) string {
+	word := "Closes "
+	if !closes {
+		word = "Refs "
 	}
-	return "Closes #" + strings.TrimPrefix(key, "#")
+	if t.shared {
+		return word + t.repo + "#" + strings.TrimPrefix(key, "#")
+	}
+	return word + "#" + strings.TrimPrefix(key, "#")
 }
 
 func (t *Tracker) HoldMarker(h core.Hold) string {

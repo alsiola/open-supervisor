@@ -233,8 +233,14 @@ func (t *Tracker) RefsIn(text string) []string {
 	return out
 }
 
-// RefFor uses one of Linear's magic words, so the PR is linked and closes the issue when it merges.
-func (t *Tracker) RefFor(key string) string { return "Closes " + key }
+// RefFor uses one of Linear's magic words, so the PR is linked and closes the issue when it merges, or with
+// closes false is linked without closing it.
+func (t *Tracker) RefFor(key string, closes bool) string {
+	if !closes {
+		return "Part of " + key
+	}
+	return "Closes " + key
+}
 
 func (t *Tracker) HoldMarker(h core.Hold) string {
 	return "[" + h.Spec() + "]"
