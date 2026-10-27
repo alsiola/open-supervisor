@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -279,12 +280,96 @@ func TestAmbientGivesUpAfterRepeatedFailures(t *testing.T) {
 
 func TestAmbientSkipsCommentsFromBeforeItWasOn(t *testing.T) {
 	s, p, j := ambientSetup(t)
+	// What the reconcile reads back at start-up, posted the night before.
+	c := agentComment("c1", "1", tunnelFinding)
+	c.At = time.Now().Add(-time.Hour)
+	p.ingest(p.Store.Get("1"), c)
+	settle(s)
+	if j.count() != 0 {
+		t.Fatal("a comment from before ambient sharing was on was shared")
+	}
+	// Switched off and on again, it starts afresh.
+	off := *s.Config()
+	off.Settings.Ambient.On = false
+	if err := s.Reload(&off); err != nil {
+		t.Fatal(err)
+	}
+	between := agentComment("c2", "1", tunnelFinding)
+	on := off
+	on.Settings.Ambient.On = true
+	if err := s.Reload(&on); err != nil {
+		t.Fatal(err)
+	}
+	p = s.Project("demo")
+	p.ingest(p.Store.Get("1"), between)
+	p.ingest(p.Store.Get("1"), agentComment("c3", "1", tunnelFinding))
+	settle(s)
+	if n := j.count(); n != 2 {
+		t.Fatalf("asked %d times; want only the comment posted after it went back on, put to 2 and 3", n)
+	}
+}
+
+func TestAmbientSkipsOldComments(t *testing.T) {
+	s, p, j := ambientSetup(t)
+	s.ambMu.Lock()
+	s.ambOn = time.Now().Add(-72 * time.Hour)
+	s.ambMu.Unlock()
 	c := agentComment("c1", "1", tunnelFinding)
 	c.At = time.Now().Add(-48 * time.Hour)
 	p.ingest(p.Store.Get("1"), c)
 	settle(s)
 	if j.count() != 0 {
 		t.Fatal("a two-day-old comment was shared")
+	}
+}
+
+func TestAmbientSkipsClosedAndFinishedSources(t *testing.T) {
+	s, p, j := ambientSetup(t)
+	p.ingest(p.Store.Get("4"), agentComment("c1", "4", tunnelFinding)) // finished
+	p.ingest(p.Store.Get("5"), agentComment("c2", "5", tunnelFinding)) // closed on the tracker
+	// The closed issue's agent commenting on an open issue is skipped too.
+	direct := agentComment("c3", "5", tunnelFinding)
+	direct.URL = "https://fake/issues/3#issuecomment-c3"
+	p.ingest(p.Store.Get("3"), direct)
+	settle(s)
+	if n := j.count(); n != 0 {
+		t.Fatalf("a closed or finished issue's comment was put to the model %d times", n)
+	}
+}
+
+func TestAmbientKeepsSharesInTheirProject(t *testing.T) {
+	s, p, j := ambientSetup(t)
+	root := filepath.Join(t.TempDir(), "club")
+	if out, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	// The other project's issue would take the share if it were asked. Both projects read the same fake tracker,
+	// so every issue on it is labelled as claimed already, for the new project's first look to leave alone.
+	host.issues["21"] = &core.Issue{Key: "21", Title: "Agents not resumed on the club site", Open: true, URL: "https://fake/issues/21"}
+	for _, i := range host.issues {
+		i.Labels = append(i.Labels, "agent-in-progress")
+	}
+	cfg := *s.Config()
+	cfg.Projects = append(append([]*config.Project{}, cfg.Projects...), &config.Project{Name: "club", Root: root,
+		Repo: cfg.Projects[0].Repo, Tracker: cfg.Projects[0].Tracker})
+	if err := s.Reload(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	p, club := s.Project("demo"), s.Project("club")
+	club.Store.Create("21", "Agents not resumed on the club site", "https://fake/issues/21", "s-21")
+	club.Store.Update("21", func(r *store.Record) { r.State = store.Review })
+	p.ingest(p.Store.Get("1"), agentComment("c1", "1", tunnelFinding))
+	settle(s)
+	for _, issue := range j.issuesAsked() {
+		if strings.Contains(issue, "club") {
+			t.Fatalf("put to another project's issue: %v", j.issuesAsked())
+		}
+	}
+	if n := j.count(); n != 2 {
+		t.Fatalf("asked %d times", n)
+	}
+	if posts := host.posts(); len(posts) != 1 || posts[0].key != "2" {
+		t.Fatalf("posted %+v", posts)
 	}
 }
 

@@ -75,11 +75,12 @@ type Supervisor struct {
 	host       hostWatch
 	hostSample *hostinfo.Sample
 
-	// amb is the ambient sharing for the settings it was made for (see sharer), ambErr why it last couldn't
-	// start, and ledger what it has asked and shared, kept across changes to the settings. judgeFor stands in
-	// for OpenRouter in tests.
+	// amb is the ambient sharing for the settings it was made for (see sharer), ambOn when this run of the
+	// supervisor switched it on (zero while off), ambErr why it last couldn't start, and ledger what it has
+	// asked and shared, kept across changes to the settings. judgeFor stands in for OpenRouter in tests.
 	ambMu    sync.Mutex
 	amb      *sharer
+	ambOn    time.Time
 	ambErr   string
 	ledger   *ambient.Ledger
 	judgeFor func(config.Ambient) ambient.Judge
@@ -113,6 +114,7 @@ func New(cfg *config.Config, opts Options) (*Supervisor, error) {
 		cfg.Settings.DryRun = true
 	}
 	s.cfg = cfg
+	s.ambientSwitched(config.Settings{}, cfg.Settings)
 	s.conns = OpenConnections(cfg, s.adapterEnv())
 	projects, sources, err := s.build(cfg, nil, nil)
 	if err != nil {
@@ -1081,6 +1083,7 @@ func (s *Supervisor) Reload(cfg *config.Config) error {
 		s.mu.Unlock()
 		return err
 	}
+	s.ambientSwitched(old.Settings, cfg.Settings)
 	kept := map[*Project]bool{}
 	for _, p := range projects {
 		kept[p] = true

@@ -18,13 +18,28 @@ import (
 )
 
 // Ambient sharing (settings.ambient): every comment an agent posts, on its issue or its PRs, is put to a
-// decisions model against every other active issue under the supervisor, and posted on each it could bear on.
+// decisions model against every other active issue in the same project, and posted on each it could bear on.
 // It runs in the background: nothing an agent does waits on it, and a failure only means a share that didn't
-// happen.
+// happen. A share never wakes the agent it lands on: like any other agent's comment, it waits for that issue's
+// next turn.
 
-// sourceMaxAge: a comment older than this when first seen (the reconcile reading back after ambient sharing was
-// turned on) isn't shared.
+// sourceMaxAge: a comment older than this when first seen (the reconcile reading back an issue's comments)
+// isn't shared, even if it was posted after ambient sharing was switched on.
 const sourceMaxAge = 24 * time.Hour
+
+// ambientSwitched notes when ambient sharing goes on or off, so only comments posted after it went on, in this
+// run of the supervisor, are shared: not what the reconcile reads back from before then.
+func (s *Supervisor) ambientSwitched(was, now config.Settings) {
+	on := func(st config.Settings) bool { return st.Ambient.Settled().On && !st.DryRun }
+	s.ambMu.Lock()
+	defer s.ambMu.Unlock()
+	switch {
+	case !on(now):
+		s.ambOn = time.Time{}
+	case !on(was) || s.ambOn.IsZero():
+		s.ambOn = time.Now()
+	}
+}
 
 // issueTTL is how long an issue's description is reused before it is read again.
 const issueTTL = 30 * time.Minute
@@ -90,6 +105,9 @@ func (s *Supervisor) share(p *Project, on string, c core.Comment) {
 	if c.Agent == nil || c.Agent.From == "" || ambient.IsShare(c.Body) || !ambient.Substantive(c.Body) {
 		return
 	}
+	if !p.shareable(on) || !p.shareable(c.Agent.From) {
+		return
+	}
 	sh := s.sharer()
 	if sh == nil {
 		return
@@ -99,6 +117,13 @@ func (s *Supervisor) share(p *Project, on string, c core.Comment) {
 		defer sh.wg.Done()
 		sh.pass(s, p, on, c)
 	}()
+}
+
+// shareable reports whether a comment on, or from the agent of, the issue may be shared: it is one the project
+// is working, not finished or closed.
+func (p *Project) shareable(key string) bool {
+	r := p.Store.Get(key)
+	return r != nil && r.State != store.Finished && r.State != store.Scheduled && !r.IssueClosedReported
 }
 
 // target is an issue a comment may be shared with.
@@ -118,7 +143,10 @@ func (sh *sharer) pass(s *Supervisor, p *Project, on string, c core.Comment) {
 	}
 	defer sh.ledger.End(source)
 	first := !sh.ledger.Seen(source)
-	if first && time.Since(c.At) > sourceMaxAge {
+	s.ambMu.Lock()
+	since := s.ambOn
+	s.ambMu.Unlock()
+	if first && (time.Since(c.At) > sourceMaxAge || since.IsZero() || c.At.Before(since)) {
 		return
 	}
 	retry := map[string]bool{}
@@ -130,18 +158,17 @@ func (sh *sharer) pass(s *Supervisor, p *Project, on string, c core.Comment) {
 			return
 		}
 	}
+	// Only the source's own project: another project's issues are about something else.
 	var targets []target
-	for _, q := range s.Projects() {
-		for _, r := range q.Store.Active() {
-			if r.IssueClosedReported || (q == p && (r.Key == on || r.Key == c.Agent.From)) {
-				continue
-			}
-			t := target{q, r}
-			if !first && !retry[t.id()] {
-				continue
-			}
-			targets = append(targets, t)
+	for _, r := range p.Store.Active() {
+		if r.IssueClosedReported || r.Key == on || r.Key == c.Agent.From {
+			continue
 		}
+		t := target{p, r}
+		if !first && !retry[t.id()] {
+			continue
+		}
+		targets = append(targets, t)
 	}
 	if first {
 		sh.ledger.MarkSeen(source)
@@ -242,13 +269,7 @@ func (sh *sharer) one(s *Supervisor, p *Project, c core.Comment, source string, 
 		sh.ledger.Decide(source, t.id(), v.P, "")
 		return v, true, false, false
 	}
-	from := c.Agent.From
-	if t.p != p {
-		// Another project's issue keys can be the same as this one's: name the project, so the share's mark
-		// never reads as the target's own agent's.
-		from = p.Name + "/" + from
-	}
-	url, err := t.p.Tracker.Comment(ctx, t.r.Key, ambient.Body(originFor(origin, p, t.p), c.Body), core.AgentMark{From: from})
+	url, err := t.p.Tracker.Comment(ctx, t.r.Key, ambient.Body(origin, c.Body), core.AgentMark{From: c.Agent.From})
 	if err != nil {
 		line["error"] = "post: " + logx.ErrText(err)
 		sh.ledger.Fail(source, t.id(), v.P, err)
@@ -316,7 +337,7 @@ func progress(r *store.Record) string {
 	return strings.Join(parts, "\n")
 }
 
-// sourceOrigin is where the comment was posted, as a share on the same project names it.
+// sourceOrigin is where the comment was posted, as the share names it.
 func sourceOrigin(p *Project, on string, c core.Comment) ambient.Origin {
 	o := ambient.Origin{Issue: p.ref(c.Agent.From), URL: c.URL, Where: "on the issue"}
 	if on != c.Agent.From {
@@ -332,14 +353,6 @@ func sourceOrigin(p *Project, on string, c core.Comment) ambient.Origin {
 		o.Where = fmt.Sprintf("in a review thread on PR #%d", c.PR)
 	case core.OnReview:
 		o.Where = fmt.Sprintf("in a review of PR #%d", c.PR)
-	}
-	return o
-}
-
-// originFor is the origin as the target sees it: another project's issue is named with its project.
-func originFor(o ambient.Origin, from, to *Project) ambient.Origin {
-	if from != to {
-		o.Issue = from.Name + " " + o.Issue
 	}
 	return o
 }
