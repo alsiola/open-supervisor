@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.5.1](https://github.com/alsiola/open-supervisor/compare/v1.5.0...v1.5.1) (2026-10-27)
+
+### Bug Fixes
+
+* **engine:** hold an agent at its usage limit before its turn is marked failed ([#80](https://github.com/alsiola/open-supervisor/issues/80)) ([eda6159](https://github.com/alsiola/open-supervisor/commit/eda6159bcc832b8c9f6c4d8c5c2cc4652b474adb))
+
 ## [1.5.0](https://github.com/alsiola/open-supervisor/compare/v1.4.0...v1.5.0) (2026-10-27)
 
 ### Features
