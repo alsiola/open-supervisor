@@ -22,8 +22,9 @@ var setupGuide string
 // It is kept apart from All, so agents working issues never see it. bin is how the agent runs the supervisor.
 func Setup(bin string) string { return strings.ReplaceAll(setupGuide, "{{bin}}", bin) }
 
-// All returns every playbook by name ("work-issue", "sweep").
-func All() map[string]string {
+// All returns every playbook by name ("work-issue", "sweep"), with the parts for the way agents coordinate
+// ("direct" or "ambient", see config.Ambient).
+func All(mode string) map[string]string {
 	out := map[string]string{}
 	entries, _ := files.ReadDir(".")
 	for _, e := range entries {
@@ -31,9 +32,33 @@ func All() map[string]string {
 		if err != nil {
 			continue
 		}
-		out[strings.TrimSuffix(e.Name(), ".md")] = string(data)
+		out[strings.TrimSuffix(e.Name(), ".md")] = forMode(string(data), mode)
 	}
 	return out
+}
+
+// forMode keeps the parts of a playbook for one way of coordinating. A part starts with a line
+// `<!-- direct -->` or `<!-- ambient -->` and runs to the next such line or `<!-- end -->`; the marker lines go.
+func forMode(text, mode string) string {
+	var out []string
+	keep := true
+	for _, line := range strings.SplitAfter(text, "\n") {
+		switch strings.TrimSpace(line) {
+		case "<!-- direct -->":
+			keep = mode != "ambient"
+			continue
+		case "<!-- ambient -->":
+			keep = mode == "ambient"
+			continue
+		case "<!-- end -->":
+			keep = true
+			continue
+		}
+		if keep {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "")
 }
 
 // ProjectDir is where a project keeps its own playbooks, in its checkout.

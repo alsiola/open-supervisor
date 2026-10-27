@@ -17,7 +17,11 @@ The project may use GitHub, Bitbucket, Jira or something else; you don't need to
 | --- | --- |
 | `$OPEN_SUPERVISOR agent context` | the project, issue, branch, worktree, base branch, remote and where the rules are |
 | `$OPEN_SUPERVISOR agent issue view` | the issue and every comment on it |
+<!-- direct -->
 | `$OPEN_SUPERVISOR agent issue comment <file>` | comment on the issue (`--issue <key>` for another agent's issue) |
+<!-- ambient -->
+| `$OPEN_SUPERVISOR agent issue comment <file>` | comment on the issue |
+<!-- end -->
 | `$OPEN_SUPERVISOR agent issue create --title <t> [--wait <condition>] [--until <time>] <file>` | open a new issue; with `--wait` or `--until`, it isn't worked until then (see Waiting) |
 | `$OPEN_SUPERVISOR agent worktree setup` | create or reuse the issue's worktree on its branch; prints the path last |
 | `$OPEN_SUPERVISOR agent worktree remove` | stop anything running from it and remove it (the branch stays) |
@@ -75,6 +79,9 @@ Every turn ends with a status (the structured result the supervisor asks for):
 - `preview`: the deploy preview's URL, once you know it.
 - `touches`: what the work changes (pages, data, pipeline steps, packages), in a few words. Other agents on the same project read it to spot overlap.
 - `handoff`: a short note to whoever picks the issue up next, in case your session has gone cold by then (see Fresh session). Write it every turn. Say what is pending, the judgement calls you made and why, and what to check next. Leave out what the issue, the PR and git already show.
+<!-- ambient -->
+- `shared`: the links of the comments shared with your issue automatically (see Other agents) that changed what you did this turn. Leave it out when none did.
+<!-- end -->
 
 The supervisor sets the issue's status labels (and, on some trackers, its workflow status) from `state`; never change those yourself.
 
@@ -82,6 +89,7 @@ The supervisor sets the issue's status labels (and, on some trackers, its workfl
 
 The first turn's message lists the issues in flight, with what each touches (`agent inflight` prints it again). When the note says another issue overlaps yours, or you notice overlap yourself (the same page, component, dataset or pipeline step), read that issue and its PR before you build. Build on its branch or wait for its PR to merge (`agent wait pr:<n>:merged`) rather than making the same change twice.
 
+<!-- direct -->
 Comment on another agent's issue rarely, unless you are supervising its work. Do it when:
 
 - your work turns up something that helps its work in progress, or
@@ -90,6 +98,13 @@ Comment on another agent's issue rarely, unless you are supervising its work. Do
 Don't comment just because you work in the same file, because one of you will need to rebase, or about anything that only depends on who merges first. When you do comment, use `agent issue comment --issue <other> <file>`, which reaches the agent working it; each agent hears only about its own issue and PRs, so reply to another agent on its issue, not yours.
 
 Comments from other agents arrive as events like the owner's, but you don't need to answer them. Act on what they tell you, and reply only in exceptional cases, such as when you disagree outright on the way forward.
+
+<!-- ambient -->
+Don't comment on other agents' issues to tell them about your work. Post on your own issue and PR as usual, and the supervisor shares what you post with the other issues it could bear on.
+
+Comments headed **Shared automatically** are such shares, quoted from another issue's thread with a link to the original. The supervisor picked them out as possibly relevant; it hasn't checked them. Read the original when it matters, act on the share if it bears on your work, and don't reply to it. When one changes what you do, list its link in your status's `shared`.
+
+<!-- end -->
 
 ## Log corrections
 
@@ -178,7 +193,11 @@ The message lists what happened since your last turn, each under its own heading
   - A change request: make it, commit, push. If it changes what the PR does, bring its title and body up to date with `$OPEN_SUPERVISOR agent pr edit`.
   - A question: answer it. A request you think is wrong, or one you can't act on: say why, briefly, and ask.
   - If the comment corrects something you did, log it (see Log corrections).
+<!-- direct -->
   - From another agent: act on it if it bears on your work, but don't reply unless you disagree outright (see Other agents).
+<!-- ambient -->
+  - From another agent, or shared automatically: act on it if it bears on your work, but don't reply (see Other agents).
+<!-- end -->
   - Reply where the comment was made, with the command its heading names. Say what changed, with the short commit SHA, and add a preview link when it helps. One comment can answer several points from the same person in the same place.
 - **Checks failed**: `$OPEN_SUPERVISOR agent checks` links each failing check. Read its log, reproduce it locally, fix it, push, and end with `building`.
 - **Checks passed**, with the preview: if the report (step 5) isn't posted yet, post it now. Otherwise, if you pushed changes for feedback, reply to that feedback with the preview and end with `review`.

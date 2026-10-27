@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/alsiola/open-supervisor/internal/adapter"
+	"github.com/alsiola/open-supervisor/internal/ambient"
 	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/core"
 	hostinfo "github.com/alsiola/open-supervisor/internal/host"
@@ -73,6 +74,15 @@ type Supervisor struct {
 	// host is the watch on the machine's load, memory and disks, and hostSample its last reading.
 	host       hostWatch
 	hostSample *hostinfo.Sample
+
+	// amb is the ambient sharing for the settings it was made for (see sharer), ambErr why it last couldn't
+	// start, and ledger what it has asked and shared, kept across changes to the settings. judgeFor stands in
+	// for OpenRouter in tests.
+	ambMu    sync.Mutex
+	amb      *sharer
+	ambErr   string
+	ledger   *ambient.Ledger
+	judgeFor func(config.Ambient) ambient.Judge
 
 	shellMu sync.Mutex
 	shells  []*Shell
@@ -516,7 +526,7 @@ func (s *Supervisor) prepareAgents() {
 		}
 		done[p.AgentName] = true
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		if err := p.Agent.Prepare(ctx, playbooks.All()); err != nil {
+		if err := p.Agent.Prepare(ctx, playbooks.All(s.settings().Ambient.Mode())); err != nil {
 			logx.Default.Printf("agent %s: %s", p.AgentName, logx.ErrText(err))
 		}
 		cancel()

@@ -73,8 +73,50 @@ type Settings struct {
 	// expired, starts a fresh session from the last turn's handoff note instead of resuming. 0: every turn does.
 	HandoffMinutes *int `yaml:"handoffMinutes,omitempty"`
 	// Host watches the machine the supervisor runs on; off unless host.minutes is set.
-	Host   Host `yaml:"host,omitempty"`
-	DryRun bool `yaml:"dryRun,omitempty"`
+	Host Host `yaml:"host,omitempty"`
+	// Ambient shares what agents post with the other issues it bears on, in place of agents commenting on each
+	// other's issues; off unless ambient.on is set.
+	Ambient Ambient `yaml:"ambient,omitempty"`
+	DryRun  bool    `yaml:"dryRun,omitempty"`
+}
+
+// Ambient is the coordination experiment: with On, every comment an agent posts is judged against every other
+// active issue by a decisions model on OpenRouter, and posted on each it could bear on. Agents are then no longer
+// asked to comment on each other's issues. Off, agents coordinate directly, as before.
+type Ambient struct {
+	On bool `yaml:"on,omitempty"`
+	// Key is the OpenRouter API key, as a secret reference.
+	Key string `yaml:"key,omitempty"`
+	// Model is the OpenRouter decisions model; cloudflare/clef-omni unless set.
+	Model string `yaml:"model,omitempty"`
+	// Threshold is the probability at or above which a comment is shared; DefaultAmbientThreshold unless set.
+	Threshold float64 `yaml:"threshold,omitempty"`
+}
+
+// DefaultAmbientThreshold: on representative pairs clef-omni put findings that bear on an issue at 0.56–0.69,
+// and status updates and same-area chatter at 0.02–0.12.
+const DefaultAmbientThreshold = 0.4
+
+// DefaultAmbientModel is the decisions model ambient sharing asks unless the config names another.
+const DefaultAmbientModel = "cloudflare/clef-omni"
+
+// Mode is how agents coordinate: "ambient" or "direct".
+func (a Ambient) Mode() string {
+	if a.On {
+		return "ambient"
+	}
+	return "direct"
+}
+
+// Settled is the setting with the defaults for any left out.
+func (a Ambient) Settled() Ambient {
+	if a.Model == "" {
+		a.Model = DefaultAmbientModel
+	}
+	if a.Threshold == 0 {
+		a.Threshold = DefaultAmbientThreshold
+	}
+	return a
 }
 
 // Host is the optional watch on the machine the supervisor runs on. Every few minutes it sends telemetry a
@@ -462,6 +504,12 @@ func (c *Config) Validate() error {
 	}
 	if h := c.Settings.Host; h.Minutes < 0 || h.Load < 0 || h.Memory < 0 || h.Memory > 100 || h.Disk < 0 || h.Disk > 100 {
 		errs = append(errs, "settings.host: minutes and load can't be negative, and memory and disk are percentages (0–100)")
+	}
+	if a := c.Settings.Ambient; a.On && a.Key == "" {
+		errs = append(errs, "settings.ambient: needs a key (an OpenRouter API key, as a secret reference) when on")
+	}
+	if a := c.Settings.Ambient; a.Threshold < 0 || a.Threshold > 1 {
+		errs = append(errs, "settings.ambient.threshold: a probability, 0–1")
 	}
 	role := func(where, name string, r adapter.Role) {
 		if name == "" {

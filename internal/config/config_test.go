@@ -152,3 +152,26 @@ func TestHost(t *testing.T) {
 		t.Errorf("a new config has a host block:\n%s", data)
 	}
 }
+
+func TestAmbient(t *testing.T) {
+	c := New(filepath.Join(t.TempDir(), "config.yaml"))
+	if c.Settings.Ambient.Mode() != "direct" {
+		t.Fatal("ambient sharing is on by default")
+	}
+	c.Settings.Ambient.On = true
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "settings.ambient") {
+		t.Fatalf("on without a key: %v", err)
+	}
+	c.Settings.Ambient.Key = "env:OPENROUTER_API_KEY"
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	a := c.Settings.Ambient.Settled()
+	if a.Mode() != "ambient" || a.Model != "cloudflare/clef-omni" || a.Threshold != DefaultAmbientThreshold {
+		t.Fatalf("settled %+v", a)
+	}
+	c.Settings.Ambient.Threshold = 1.5
+	if err := c.Validate(); err == nil {
+		t.Fatal("a threshold over 1 passed")
+	}
+}
