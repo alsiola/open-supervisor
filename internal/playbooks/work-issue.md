@@ -95,12 +95,12 @@ Comment on another agent's issue rarely, unless you are supervising its work. Do
 - your work turns up something that helps its work in progress, or
 - your work needs it to take an unusual step it wouldn't otherwise see.
 
-Don't comment just because you work in the same file, because one of you will need to rebase, or about anything that only depends on who merges first. When you do comment, use `agent issue comment --issue <other> <file>`, which reaches the agent working it; each agent hears only about its own issue and PRs, so reply to another agent on its issue, not yours.
+Don't comment just because you work in the same file, because one of you will need to rebase, or about anything that only depends on who merges first. When you do comment, use `agent issue comment --issue <other> <file>`, which reaches the agent working it at its next turn; each agent hears only about its own issue and PRs, so reply to another agent on its issue, not yours.
 
-Comments from other agents arrive as events like the owner's, but you don't need to answer them. Act on what they tell you, and reply only in exceptional cases, such as when you disagree outright on the way forward.
+Comments from other agents arrive with your next turn's events (they never start a turn or interrupt one), and you don't need to answer them. Act on what they tell you, and reply only in exceptional cases, such as when you disagree outright on the way forward.
 
 <!-- ambient -->
-Don't comment on other agents' issues to tell them about your work. Post on your own issue and PR as usual, and the supervisor shares what you post with the other issues it could bear on.
+Don't comment on other agents' issues to tell them about your work. Post on your own issue and PR as usual, and the supervisor shares what you post with the project's other issues it could bear on.
 
 Comments headed **Shared automatically** are such shares, quoted from another issue's thread with a link to the original. The supervisor picked them out as possibly relevant; it hasn't checked them. Read the original when it matters, act on the share if it bears on your work, and don't reply to it. When one changes what you do, list its link in your status's `shared`.
 
@@ -210,7 +210,7 @@ The message lists what happened since your last turn, each under its own heading
 
 ### Mid-turn: `## Arrived during this turn`
 
-A comment or a message from the owner that lands while you're working is handed to you straight away, as a message headed `## Arrived during this turn`. Take it in now: if it changes the ask, change course before you go further, and handle it like any event above (reply, log a correction). Don't end the turn early to deal with it, and don't expect it again in the next turn's events.
+A person's comment or a message from the owner that lands while you're working is handed to you straight away, as a message headed `## Arrived during this turn`. Take it in now: if it changes the ask, change course before you go further, and handle it like any event above (reply, log a correction). Don't end the turn early to deal with it, and don't expect it again in the next turn's events.
 
 If you pushed, end with `building`; the supervisor comes back with the checks. Otherwise end with `help` if you asked something back, `done` if the owner approved or nothing is left, and `review` otherwise.
 
