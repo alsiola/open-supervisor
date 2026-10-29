@@ -82,9 +82,15 @@ func Setup(s Spec) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
 		return "", err
 	}
-	if _, err := os.Stat(s.Path); err == nil {
+	whole, err := s.checkedOut()
+	if err != nil {
+		return "", err
+	}
+	if whole {
 		s.logf("reusing %s", s.Path)
 	} else {
+		// A worktree registered at a folder that has since gone stops git adding one there again.
+		_, _ = git(s.Root, "worktree", "prune")
 		// start is what the checkout is made from; tracking, a remote branch it follows.
 		var start, tracking string
 		var args []string
@@ -127,6 +133,51 @@ func Setup(s Spec) (string, error) {
 		}
 	}
 	return s.Path, nil
+}
+
+// checkedOut reports whether the worktree's folder is a checkout of its own. A folder with no checkout in it
+// (only files copied in, or a cache a dev server left running from it wrote) is cleared so Setup can add the
+// worktree again; it would otherwise be reused as one, with nothing in it. A folder git once checked out to but
+// no longer knows is repaired, or left for someone to look at, since it may hold uncommitted work.
+func (s Spec) checkedOut() (bool, error) {
+	if _, err := os.Stat(s.Path); err != nil {
+		return false, nil
+	}
+	if s.toplevel() {
+		return true, nil
+	}
+	if _, err := os.Lstat(filepath.Join(s.Path, ".git")); err == nil {
+		_, _ = git(s.Root, "worktree", "repair", s.Path)
+		if s.toplevel() {
+			s.logf("repaired the worktree at %s", s.Path)
+			return true, nil
+		}
+		return false, fmt.Errorf("%s has a .git but isn't a worktree git can use; look at it, remove it and run setup again", s.Path)
+	}
+	s.logf("%s isn't a checkout; clearing it and adding the worktree again", s.Path)
+	killWithin(s.Path)
+	if err := os.RemoveAll(s.Path); err != nil {
+		return false, fmt.Errorf("clearing %s, which isn't a checkout: %w", s.Path, err)
+	}
+	return false, nil
+}
+
+// toplevel reports whether the worktree's folder is the top of a git checkout, not a folder inside another.
+func (s Spec) toplevel() bool {
+	top, err := git(s.Path, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return false
+	}
+	return samePath(top, s.Path)
+}
+
+func samePath(a, b string) bool {
+	x, err1 := filepath.EvalSymlinks(a)
+	y, err2 := filepath.EvalSymlinks(b)
+	if err1 != nil || err2 != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return x == y
 }
 
 // Scratch is the folder, relative to the worktree, where agents keep files they don't commit.
