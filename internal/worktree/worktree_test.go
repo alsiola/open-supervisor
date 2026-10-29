@@ -338,3 +338,53 @@ func TestSetupClearsAHalfMadeWorktree(t *testing.T) {
 		t.Fatal("the failed worktree was left behind")
 	}
 }
+
+func TestSetupReplacesAFolderThatIsNoCheckout(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "repo")
+	_ = os.MkdirAll(root, 0o755)
+	runGit(t, root, "init", "-q", "-b", "main")
+	_ = os.WriteFile(filepath.Join(root, "lock.txt"), []byte("v1"), 0o644)
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-qm", "init")
+	_ = os.WriteFile(filepath.Join(root, ".env"), []byte("A=1"), 0o644)
+	spec := Spec{Root: root, Path: Dir(filepath.Join(dir, "data"), "demo", "3"), Branch: "agent/issue-3", Base: "main",
+		Copy: []string{".env"}, Setup: "echo ran >> setup.log", SetupWhen: []string{"lock.txt"}}
+	if _, err := Setup(spec); err != nil {
+		t.Fatal(err)
+	}
+	// The checkout goes, its registration stays, and the folder comes back with only what was copied or cached.
+	_ = os.RemoveAll(spec.Path)
+	_ = os.MkdirAll(filepath.Join(spec.Path, "node_modules", ".vite"), 0o755)
+	_ = os.WriteFile(filepath.Join(spec.Path, ".env"), []byte("A=1"), 0o644)
+	path, err := Setup(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(path, "lock.txt")); err != nil {
+		t.Fatal("Setup reused a folder with no checkout in it")
+	}
+	if data, _ := os.ReadFile(filepath.Join(path, "setup.log")); !strings.Contains(string(data), "ran") {
+		t.Fatal("setup didn't run in the new checkout")
+	}
+}
+
+func TestSetupLeavesABrokenCheckout(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "repo")
+	_ = os.MkdirAll(root, 0o755)
+	runGit(t, root, "init", "-q", "-b", "main")
+	_ = os.WriteFile(filepath.Join(root, "a.txt"), []byte("a"), 0o644)
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-qm", "init")
+	spec := Spec{Root: root, Path: Dir(filepath.Join(dir, "data"), "demo", "4"), Branch: "agent/issue-4", Base: "main"}
+	_ = os.MkdirAll(spec.Path, 0o755)
+	_ = os.WriteFile(filepath.Join(spec.Path, ".git"), []byte("gitdir: "+filepath.Join(dir, "nowhere")+"\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(spec.Path, "work.txt"), []byte("uncommitted"), 0o644)
+	if _, err := Setup(spec); err == nil {
+		t.Fatal("Setup passed over a checkout git can't use")
+	}
+	if _, err := os.Stat(filepath.Join(spec.Path, "work.txt")); err != nil {
+		t.Fatal("Setup cleared a folder that may hold uncommitted work")
+	}
+}
