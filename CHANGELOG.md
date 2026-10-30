@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.6.0](https://github.com/alsiola/open-supervisor/compare/v1.5.1...v1.6.0) (2026-10-30)
+
+### Features
+
+* **toolbelt:** let agent pr create --partial open a PR that leaves its issue open on merge ([#84](https://github.com/alsiola/open-supervisor/issues/84)) ([4d083d7](https://github.com/alsiola/open-supervisor/commit/4d083d7651dadbd2e0cca90355da7c1cbf4dd143))
+
+### Bug Fixes
+
+* keep ambient shares in their project and never wake an agent for another agent's comment ([#82](https://github.com/alsiola/open-supervisor/issues/82)) ([11f8897](https://github.com/alsiola/open-supervisor/commit/11f88978faaf44c51b7d5637de491c34d6445f7b)), closes [#81](https://github.com/alsiola/open-supervisor/issues/81)
+* **worktree:** add the worktree again when its folder holds no checkout ([#86](https://github.com/alsiola/open-supervisor/issues/86)) ([5666649](https://github.com/alsiola/open-supervisor/commit/56666497f75e065fd2d7ec17194a7a84289f9e10))
+
 ## [1.5.1](https://github.com/alsiola/open-supervisor/compare/v1.5.0...v1.5.1) (2026-10-27)
 
 ### Bug Fixes
