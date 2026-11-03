@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/alsiola/open-supervisor/internal/proc"
@@ -20,7 +21,10 @@ var killGrace = 3 * time.Second
 // killWithin stops processes started from the worktree (a dev server keeps writing into it after the delete),
 // with everything they started. A process counts when the path is in its command line, or when its working
 // directory is in the worktree: a global binary run from inside it (agent-browser, npx) never names the path.
-// The caller and its ancestors are spared, since an agent's shell may itself be sitting in the worktree.
+// The caller, its ancestors and its process group are spared: an agent's shell may itself be sitting in the
+// worktree, and so may the rest of the command it ran (the `tail` in `agent worktree remove | tail`), which would
+// otherwise be stopped mid-command and lose its output. Everything the supervisor starts that outlives a command
+// (turns, tasks, jobs) runs in its own session, so the caller's group never covers it.
 func killWithin(path string) {
 	roots := map[int]bool{}
 	for _, pid := range pgrep(path + string(filepath.Separator)) {
@@ -32,10 +36,16 @@ func killWithin(path string) {
 	if len(roots) == 0 {
 		return
 	}
-	parents := processTable()
+	parents, groups := processTable()
 	spared := map[int]bool{}
 	for pid := os.Getpid(); pid > 1 && !spared[pid]; pid = parents[pid] {
 		spared[pid] = true
+	}
+	own := syscall.Getpgrp()
+	for pid, pgid := range groups {
+		if pgid == own {
+			spared[pid] = true
+		}
 	}
 	var pids []int
 	for _, pid := range withDescendants(roots, parents) {
@@ -106,22 +116,24 @@ func cwdWithin(path string) []int {
 	return pids
 }
 
-// processTable maps every running process to its parent.
-func processTable() map[int]int {
-	out, _ := exec.Command("ps", "-A", "-o", "pid=,ppid=").Output()
-	parents := map[int]int{}
+// processTable maps every running process to its parent and to its process group.
+func processTable() (parents, groups map[int]int) {
+	out, _ := exec.Command("ps", "-A", "-o", "pid=,ppid=,pgid=").Output()
+	parents, groups = map[int]int{}, map[int]int{}
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Fields(line)
-		if len(f) != 2 {
+		if len(f) != 3 {
 			continue
 		}
 		pid, err1 := strconv.Atoi(f[0])
 		ppid, err2 := strconv.Atoi(f[1])
-		if err1 == nil && err2 == nil {
+		pgid, err3 := strconv.Atoi(f[2])
+		if err1 == nil && err2 == nil && err3 == nil {
 			parents[pid] = ppid
+			groups[pid] = pgid
 		}
 	}
-	return parents
+	return parents, groups
 }
 
 // withDescendants is the roots and everything below them, parents before children.
