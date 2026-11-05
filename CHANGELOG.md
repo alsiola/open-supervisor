@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.6.1](https://github.com/alsiola/open-supervisor/compare/v1.6.0...v1.6.1) (2026-11-05)
+
+### Bug Fixes
+
+* **engine:** give each issue its own time to read its comments in a reconcile ([#91](https://github.com/alsiola/open-supervisor/issues/91)) ([4f7a295](https://github.com/alsiola/open-supervisor/commit/4f7a295786f83b4a12aae5c031f0e9bd7e6baa09))
+* **engine:** stop the reconcile reading issues and PRs closed over an hour ago ([#94](https://github.com/alsiola/open-supervisor/issues/94)) ([51fb675](https://github.com/alsiola/open-supervisor/commit/51fb67597098aedd8bc53352b904902a4945392a))
+* **engine:** take a building turn with nothing to wake it as help ([#92](https://github.com/alsiola/open-supervisor/issues/92)) ([ee7b4b8](https://github.com/alsiola/open-supervisor/commit/ee7b4b8cbd489272d5e1db35cb1296c7bbcf4ed3))
+* **worktree:** spare the rest of the calling command when agent worktree remove stops processes ([#88](https://github.com/alsiola/open-supervisor/issues/88)) ([c2320da](https://github.com/alsiola/open-supervisor/commit/c2320da5b8293fcb68eb5576cad0b6bd05d77966))
+
 ## [1.6.0](https://github.com/alsiola/open-supervisor/compare/v1.5.1...v1.6.0) (2026-10-30)
 
 ### Features
