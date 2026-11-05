@@ -8,11 +8,55 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/alsiola/open-supervisor/internal/proc"
 )
+
+// TestMain lets the test binary stand in for `agent worktree remove` when a test runs it with
+// KILL_WITHIN_HELPER set to a worktree's path.
+func TestMain(m *testing.M) {
+	if path := os.Getenv("KILL_WITHIN_HELPER"); path != "" {
+		killWithin(path)
+		os.Stdout.WriteString("removed\n")
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// An agent runs the remove from a shell sitting in the worktree, piped through something else. The rest of its
+// command shares its process group and has to live, or the command dies with 143 and loses its output; a
+// process left running from the worktree by an earlier command, in its own group, still goes.
+func TestKillWithinSparesTheCallersCommand(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wt")
+	_ = os.MkdirAll(path, 0o755)
+	server := exec.Command("sleep", "60")
+	server.Dir = path
+	server.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = server.Wait() }()
+	defer func() { _ = server.Process.Kill() }()
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell := exec.Command("sh", "-c", `cd "$1" && sleep 0.2 && "$2" | cat; echo "exit $?"`, "sh", path, self)
+	shell.Env = append(os.Environ(), "KILL_WITHIN_HELPER="+path)
+	shell.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // like an agent's Bash tool call
+	out, err := shell.CombinedOutput()
+	if err != nil || string(out) != "removed\nexit 0\n" {
+		t.Errorf("the calling command was disturbed: %v, %q", err, out)
+	}
+	time.Sleep(100 * time.Millisecond) // the server is reaped by its Wait
+	if proc.Alive(server.Process.Pid) {
+		t.Error("the process left running from the worktree survived")
+	}
+}
 
 // A process run from inside the worktree by a global binary names no path in its command line, and what it
 // starts may move elsewhere: both have to go.
@@ -24,6 +68,7 @@ func TestKillWithinFindsProcessesByWorkingDirectory(t *testing.T) {
 	other.Dir = outside
 	parent := exec.Command("sh", "-c", `(cd / && exec sleep 61) & echo $! > child.pid; wait`)
 	parent.Dir = filepath.Join(path, "sub")
+	parent.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // started by an earlier command, not this one
 	for _, c := range []*exec.Cmd{other, parent} {
 		if err := c.Start(); err != nil {
 			t.Fatal(err)
