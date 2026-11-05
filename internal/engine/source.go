@@ -455,7 +455,7 @@ func (s *Source) reconcile() {
 	if len(live) == 0 {
 		return
 	}
-	ctx, cancel := ctxTimeout(5 * time.Minute)
+	ctx, cancel := ctxTimeout(reconcileTimeout)
 	defer cancel()
 	open, err := s.Tracker.Candidates(ctx)
 	if err != nil {
@@ -508,7 +508,7 @@ func (s *Source) reconcile() {
 	s.lastReconcile = time.Now()
 	s.mu.Unlock()
 	for _, p := range live {
-		p.maintain(ctx, openKeys, counts[p], before[p])
+		p.maintain(openKeys, counts[p], before[p])
 	}
 	if !s.Spec.Implicit() {
 		msg := fmt.Sprintf("reconciled: %d open issues", len(open))
