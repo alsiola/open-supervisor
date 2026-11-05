@@ -994,14 +994,15 @@ func (p *Project) settle(key string, events []core.Event, turn adapter.Turn) {
 	})
 	p.logf("%s: turn ended %s after %.1f min: %s", p.ref(key), s.State, outcome.Duration.Minutes(), s.Summary)
 	p.report(key, outcome)
+	state := s.State
 	if s.State != core.Finished && p.hold(key) {
 		if r := p.Store.Get(key); r != nil {
 			p.logf("%s: waiting for %s", p.ref(key), holdText(r))
 		}
 	} else {
-		p.applyState(key, s.State)
+		state = p.applyState(key, s.State)
 	}
-	go p.hub.fact(core.Fact{Kind: core.CondIssue, Project: p.Name, Ref: key, On: string(s.State)})
+	go p.hub.fact(core.Fact{Kind: core.CondIssue, Project: p.Name, Ref: key, On: string(state)})
 	p.hub.schedule()
 }
 
@@ -1066,18 +1067,26 @@ func (p *Project) failed(key string, events []core.Event, outcome core.Outcome) 
 	p.hub.schedule()
 }
 
-// applyState sets the labels and does the follow-ups for the state a turn ended in.
-func (p *Project) applyState(key string, state core.AgentState) {
+// applyState sets the labels and does the follow-ups for the state a turn ended in, and returns the state it
+// settled on: a building turn with nothing to wake it is taken as help.
+func (p *Project) applyState(key string, state core.AgentState) core.AgentState {
+	building := false
+	if state == core.Building {
+		// The checks may already have landed while the agent was finishing up.
+		if open, ok := p.refreshPRs(key); ok && !open && !p.tasksRunning(key) {
+			state = p.nothingToWake(key)
+		} else {
+			building = true
+		}
+	}
 	p.setStatus(key, string(state))
 	p.transition(key, string(state))
-	switch state {
-	case core.Building:
-		// The checks may already have landed while the agent was finishing up.
-		p.refreshPRs(key)
+	switch {
+	case building:
 		if r := p.Store.Get(key); r != nil && r.HeadSHA != "" {
 			p.evaluateChecks(r.HeadSHA)
 		}
-	case core.Finished:
+	case state == core.Finished:
 		path := p.WorktreePath(key)
 		if tasks := TasksWithin(p.StateDir, path); len(tasks) > 0 {
 			p.logf("%s: keeping the worktree until the tasks running from it end (%s)", p.ref(key), TaskNames(tasks))
@@ -1089,6 +1098,41 @@ func (p *Project) applyState(key string, state core.AgentState) {
 			}
 		}
 	}
+	return state
+}
+
+// nothingToWakeText is what the supervisor says on an issue whose turn ended building with nothing to wake it.
+const nothingToWakeText = "The last turn ended as building, but the issue has no open PR, no running `agent task` and " +
+	"no wait, so nothing would wake it: any subagents or background commands it left running were stopped " +
+	"when the turn ended. It is waiting for you as help: comment, or message the agent, to start it again."
+
+// nothingToWake takes a building turn with no open PR, task or wait as help, since no checks will come to resume
+// it, and says why on the issue.
+func (p *Project) nothingToWake(key string) core.AgentState {
+	p.Store.Update(key, func(x *store.Record) { x.State = store.Help })
+	p.logf("%s: ended building with no open PR, task or wait to wake it; taken as help", p.ref(key))
+	if !p.hub.settings().DryRun {
+		ctx, cancel := ctxTimeout(30 * time.Second)
+		defer cancel()
+		if _, err := p.Tracker.Comment(ctx, key, nothingToWakeText, core.AgentMark{From: key}); err != nil {
+			p.callFailed(err, "%s: couldn't say nothing would wake it", p.ref(key))
+		}
+	}
+	return core.Help
+}
+
+// tasksRunning reports whether one of the issue's tasks is going, or was just saved and is about to start: its
+// end wakes the issue.
+func (p *Project) tasksRunning(key string) bool {
+	for _, t := range Tasks(p.StateDir) {
+		if t.Issue != key || t.EndedAt != nil {
+			continue
+		}
+		if t.Running() || t.PID == 0 && time.Since(t.StartedAt) < time.Minute {
+			return true
+		}
+	}
+	return false
 }
 
 // report sends one telemetry event per turn, then asks for a fresh read of the usage windows.
@@ -1231,18 +1275,19 @@ func (p *Project) requiredChecks(ctx context.Context, id int) ([]string, error) 
 	return rc.RequiredChecks(ctx, pr.Base)
 }
 
-// refreshPRs learns an issue's PRs and the head of its open one.
-func (p *Project) refreshPRs(key string) {
+// refreshPRs learns an issue's PRs and the head of its open one. It reports whether the issue has an open PR, and
+// ok is false when the PRs couldn't be read.
+func (p *Project) refreshPRs(key string) (open, ok bool) {
 	r := p.Store.Get(key)
 	if r == nil {
-		return
+		return false, false
 	}
 	ctx, cancel := ctxTimeout(2 * time.Minute)
 	defer cancel()
 	found, err := p.Repo.PRsFor(ctx, p.BranchFor(key), p.Tracker.RefFor(key, true))
 	if err != nil {
 		p.callFailed(err, "%s: couldn't read its PRs", p.ref(key))
-		return
+		return false, false
 	}
 	views := map[int]core.PR{}
 	for _, pr := range found {
@@ -1266,19 +1311,19 @@ func (p *Project) refreshPRs(key string) {
 		ids = append(ids, id)
 	}
 	sort.Ints(ids)
-	var open *core.PR
+	var head *core.PR
 	for _, id := range ids {
 		if pr := views[id]; pr.State == core.PROpen {
-			open = &pr
+			head = &pr
 		}
 	}
 	p.Store.Update(key, func(x *store.Record) {
 		for _, id := range ids {
 			x.AddPR(id)
 		}
-		if open != nil && x.HeadSHA != open.HeadSHA {
+		if head != nil && x.HeadSHA != head.HeadSHA {
 			now := time.Now().UTC()
-			x.HeadSHA = open.HeadSHA
+			x.HeadSHA = head.HeadSHA
 			x.HeadAt = &now
 			x.ChecksReported = ""
 		}
@@ -1288,6 +1333,7 @@ func (p *Project) refreshPRs(key string) {
 			p.reportPRClosed(key, id, pr.State == core.PRMerged)
 		}
 	}
+	return head != nil, true
 }
 
 func containsKey(keys []string, key string) bool {

@@ -801,3 +801,45 @@ func TestResumedTurnHearsItsWorktreeIsGone(t *testing.T) {
 		t.Fatalf("second turn body lacks the note:\n%s", body)
 	}
 }
+
+func TestBuildingWithNothingToWakeIsHelp(t *testing.T) {
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		return core.Outcome{OK: true, Status: &core.Status{State: core.Building, Summary: "handed the rerun to subagents"}}
+	})
+	host.issues["4"] = &core.Issue{Key: "4", Title: "Four", Open: true}
+	p.reconcile()
+	waitFor(t, "help", func() bool { return state(p, "4") == store.Help })
+	if !host.hasLabel("4", p.Labels.Status("help")) {
+		t.Fatalf("not labelled help: %v", host.labelOps)
+	}
+	found := false
+	for _, c := range host.comments_() {
+		found = found || strings.Contains(c, "nothing would wake it")
+	}
+	if !found {
+		t.Fatalf("didn't say on the issue why it is help: %q", host.comments_())
+	}
+}
+
+func TestBuildingWithATaskStaysBuilding(t *testing.T) {
+	var p *Project
+	_, p = setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		task := Task{Name: "backfill", Issue: "4", Dir: p.WorktreePath("4"), PID: os.Getpid(), StartedAt: time.Now().UTC(), Outcome: "running"}
+		if err := SaveTask(TaskFile(p.StateDir, "4", "backfill"), task); err != nil {
+			t.Error(err)
+		}
+		return core.Outcome{OK: true, Status: &core.Status{State: core.Building, Summary: "started the backfill"}}
+	})
+	host.issues["4"] = &core.Issue{Key: "4", Title: "Four", Open: true}
+	p.reconcile()
+	waitFor(t, "turn ended", func() bool { r := p.Store.Get("4"); return r != nil && r.Turns == 1 })
+	time.Sleep(100 * time.Millisecond)
+	if s := state(p, "4"); s != store.Building {
+		t.Fatalf("state %s, want building while its task runs", s)
+	}
+	for _, c := range host.comments_() {
+		if strings.Contains(c, "nothing would wake it") {
+			t.Fatalf("said nothing would wake it while its task runs: %q", c)
+		}
+	}
+}
