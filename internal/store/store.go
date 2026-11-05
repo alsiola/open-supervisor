@@ -63,6 +63,8 @@ type Record struct {
 	PRs []int `json:"prs"`
 	// ClosedPRs were already reported merged or closed, so the agent hears each once.
 	ClosedPRs []int `json:"closedPrs"`
+	// PRClosedAt is when each of ClosedPRs was seen closed, so the reconcile stops reading it an hour on.
+	PRClosedAt map[int]time.Time `json:"prClosedAt,omitempty"`
 	// HeadSHA is the open PR's head; HeadAt is when it was first seen, so a repo with no checks at all isn't
 	// waited on for ever; ChecksReported is the head whose checks were last reported.
 	HeadSHA        string     `json:"headSha,omitempty"`
@@ -98,6 +100,9 @@ type Record struct {
 	WaitSince *time.Time  `json:"waitSince,omitempty"`
 	ClaimedAt time.Time   `json:"claimedAt"`
 	UpdatedAt time.Time   `json:"updatedAt"`
+	// ClosedAt is when the reconcile first found the issue closed with all its PRs closed too; an hour on, it
+	// stops reading the issue. Nil while the issue or any of its PRs is open.
+	ClosedAt *time.Time `json:"closedAt,omitempty"`
 }
 
 // HasPR reports whether the PR belongs to the issue.
@@ -108,6 +113,25 @@ func (r *Record) AddPR(id int) {
 	if id > 0 && !r.HasPR(id) {
 		r.PRs = append(r.PRs, id)
 	}
+}
+
+// PRSettled reports whether the PR closed before cutoff. One reported closed before its time was kept counts.
+func (r *Record) PRSettled(id int, cutoff time.Time) bool {
+	if !contains(r.ClosedPRs, id) {
+		return false
+	}
+	at, ok := r.PRClosedAt[id]
+	return !ok || at.Before(cutoff)
+}
+
+// PRsClosed reports whether every PR of the issue has been reported merged or closed.
+func (r *Record) PRsClosed() bool {
+	for _, id := range r.PRs {
+		if !contains(r.ClosedPRs, id) {
+			return false
+		}
+	}
+	return true
 }
 
 // HasSeen reports whether the comment was already handed over.
