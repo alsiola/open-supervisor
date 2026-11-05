@@ -63,13 +63,13 @@ When follow-up work shouldn't start yet (wave 2 once wave 1 merges, a check once
 
 ## Long tasks
 
-Anything that could run longer than a few minutes, or past the turn (a backfill, a cache fill, a long import), goes through `$OPEN_SUPERVISOR agent task start <name> -- <command>`, not `nohup`, `&` or a background command, which are stopped when they hit the agent's time limit or the turn or issue ends. It runs the command from the current directory (or `--dir`), returns at once and prints the log's path. The task carries on past the turn and the issue, and the worktree it runs from stays until it ends. When it ends, the supervisor says how on the issue and wakes you with the same note, so end the turn rather than wait for it.
+Anything that could run longer than a few minutes, or past the turn (a backfill, a cache fill, a long import), goes through `$OPEN_SUPERVISOR agent task start <name> -- <command>`, not `nohup`, `&`, a background command or a subagent, which are stopped when they hit the agent's time limit or the turn or issue ends. Work you hand to a subagent has to finish before the turn does: run it in the foreground, or through `agent task`. It runs the command from the current directory (or `--dir`), returns at once and prints the log's path. The task carries on past the turn and the issue, and the worktree it runs from stays until it ends. When it ends, the supervisor says how on the issue and wakes you with the same note, so end the turn rather than wait for it.
 
 
 Every turn ends with a status (the structured result the supervisor asks for):
 
 - `state`: one of
-  - `building`: you pushed and the checks or the preview haven't landed. The supervisor resumes you when they do.
+  - `building`: you pushed and the checks or the preview haven't landed. The supervisor resumes you when they do. With no open PR, no running `agent task` and no wait, nothing would resume you, so the supervisor takes it as `help`.
   - `review`: something is up for the owner: the PR with its preview, findings, or changes pushed and reported after feedback.
   - `help`: you asked the owner something you can't go on without (a decision, access, money, an ask you can't read). Carry on with anything the question doesn't block before ending the turn.
   - `done`: everything the thread asked for is handled and only a merge or close is left.
@@ -225,7 +225,7 @@ Once every PR for the issue is merged or closed and nothing is left to do on it,
 ## Don't
 
 - Don't wait or poll for checks, previews or replies: end the turn and let the supervisor resume you.
-- Don't start a long command with `nohup`, `&` or a background command: use `agent task start` (see Long tasks).
+- Don't start a long command with `nohup`, `&`, a background command or a subagent left running: use `agent task start` (see Long tasks).
 - Don't push to the base branch, merge the PR or close the issue. The one exception is a scheduled task whose routine says when it may.
 - Don't change the supervisor's labels or the issue's workflow status; the supervisor sets them from your status.
 - Don't edit other agents' worktrees.
