@@ -260,6 +260,13 @@ func (p *Project) recoverInterrupted() {
 // ref is how the log names an issue: #12 for numbered trackers, PROJ-12 for keyed ones.
 func (p *Project) ref(key string) string { return refOf(key) }
 
+// reconcileTimeout bounds a reconcile's read of the open issues and its pass over them; issueTimeout bounds the
+// upkeep of each held issue after it. Variables so tests can shorten them.
+var (
+	reconcileTimeout = 5 * time.Minute
+	issueTimeout     = time.Minute
+)
+
 func ctxTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), d)
 }
@@ -1338,31 +1345,13 @@ func (p *Project) reconcileHeld(ctx context.Context, issue core.Issue) {
 // maintain reads, for every issue the project holds, what the webhooks might have missed: PRs, comments, closes
 // and checks. openKeys are the tracker's open issues; routed is how many of them are the project's, and before
 // how many issues the project held before the reconcile claimed any.
-func (p *Project) maintain(ctx context.Context, openKeys map[string]bool, routed, before int) {
+func (p *Project) maintain(openKeys map[string]bool, routed, before int) {
 	recent := time.Now().Add(-3 * 24 * time.Hour)
 	for _, r := range p.Store.All() {
 		if r.State == store.Finished && r.UpdatedAt.Before(recent) {
 			continue
 		}
-		p.refreshPRs(r.Key)
-		fresh := p.Store.Get(r.Key)
-		if fresh == nil {
-			continue
-		}
-		if fresh.State == store.Scheduled && fresh.Turns == 0 && !openKeys[r.Key] && p.closed(ctx, r.Key) {
-			p.Store.Remove(r.Key)
-			p.logf("%s: closed before its scheduled start; forgotten", p.ref(r.Key))
-			continue
-		}
-		p.readComments(ctx, fresh)
-		p.checkWaits(r.Key)
-		if fresh.State != store.Finished && !fresh.IssueClosedReported && !openKeys[r.Key] && p.closed(ctx, r.Key) {
-			p.Store.Update(r.Key, func(x *store.Record) { x.IssueClosedReported = true })
-			p.enqueue(r.Key, core.Event{Type: core.EvIssue, Action: "closed", At: time.Now().UTC()})
-		}
-		if fresh.State == store.Building && fresh.HeadSHA != "" {
-			p.evaluateChecks(fresh.HeadSHA)
-		}
+		p.maintainOne(r, openKeys)
 	}
 	p.mu.Lock()
 	p.lastReconcile = time.Now()
@@ -1373,6 +1362,33 @@ func (p *Project) maintain(ctx context.Context, openKeys map[string]bool, routed
 		msg += fmt.Sprintf(", %d claimed", claimed)
 	}
 	p.logf("%s", msg)
+}
+
+// maintainOne brings one held issue up to date: its PRs, its comments, its waits, whether it has closed. Each
+// issue gets a time budget of its own, so the issues the loop reaches last (the most recently claimed) aren't
+// left with whatever the ones before them didn't use, and one slow issue can't stop the rest being read.
+func (p *Project) maintainOne(r *store.Record, openKeys map[string]bool) {
+	ctx, cancel := ctxTimeout(issueTimeout)
+	defer cancel()
+	p.refreshPRs(r.Key)
+	fresh := p.Store.Get(r.Key)
+	if fresh == nil {
+		return
+	}
+	if fresh.State == store.Scheduled && fresh.Turns == 0 && !openKeys[r.Key] && p.closed(ctx, r.Key) {
+		p.Store.Remove(r.Key)
+		p.logf("%s: closed before its scheduled start; forgotten", p.ref(r.Key))
+		return
+	}
+	p.readComments(ctx, fresh)
+	p.checkWaits(r.Key)
+	if fresh.State != store.Finished && !fresh.IssueClosedReported && !openKeys[r.Key] && p.closed(ctx, r.Key) {
+		p.Store.Update(r.Key, func(x *store.Record) { x.IssueClosedReported = true })
+		p.enqueue(r.Key, core.Event{Type: core.EvIssue, Action: "closed", At: time.Now().UTC()})
+	}
+	if fresh.State == store.Building && fresh.HeadSHA != "" {
+		p.evaluateChecks(fresh.HeadSHA)
+	}
 }
 
 // closed confirms that an issue missing from the tracker's open issues is closed, not just outside the

@@ -29,7 +29,9 @@ type fakeHost struct {
 	required []string
 	labelOps []string
 	reads    int
-	posted   []string
+	// stall holds the issues whose comment reads hang until the caller gives up.
+	stall  map[string]bool
+	posted []string
 	// postedTo and marks are, for each comment posted, the issue it went on and the mark it carried.
 	postedTo []string
 	marks    []core.AgentMark
@@ -68,7 +70,16 @@ func (h *fakeHost) Issue(_ context.Context, key string) (core.Issue, error) {
 	}
 	return core.Issue{}, fmt.Errorf("no issue %s", key)
 }
-func (h *fakeHost) Comments(_ context.Context, key string, since time.Time) ([]core.Comment, error) {
+func (h *fakeHost) Comments(ctx context.Context, key string, since time.Time) ([]core.Comment, error) {
+	h.mu.Lock()
+	stall := h.stall[key]
+	h.mu.Unlock()
+	if stall {
+		<-ctx.Done()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var out []core.Comment
@@ -369,6 +380,31 @@ func TestClaimRunAndLabel(t *testing.T) {
 		if !strings.Contains(env, want) {
 			t.Fatalf("session env lacks %s", want)
 		}
+	}
+}
+
+// A slow comment read on one issue mustn't use up the time the issues after it have, so their comments are
+// still read in the same reconcile.
+func TestSlowIssueDoesNotStarveTheOthersComments(t *testing.T) {
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") })
+	defer func(r, i time.Duration) { reconcileTimeout, issueTimeout = r, i }(reconcileTimeout, issueTimeout)
+	host.issues["1"] = &core.Issue{Key: "1", Title: "One", Open: true}
+	p.reconcile()
+	waitFor(t, "issue 1's turn", func() bool { return state(p, "1") == store.Review })
+	host.issues["2"] = &core.Issue{Key: "2", Title: "Two", Open: true}
+	p.reconcile()
+	waitFor(t, "issue 2's turn", func() bool { return state(p, "2") == store.Review })
+	time.Sleep(50 * time.Millisecond) // let the turns finish settling
+
+	reconcileTimeout, issueTimeout = 100*time.Millisecond, 300*time.Millisecond
+	host.mu.Lock()
+	host.stall = map[string]bool{"1": true}
+	host.comments["2"] = []core.Comment{{ID: "c1", Kind: core.OnIssue, Author: "owner", Body: "one more thing", At: time.Now().UTC().Add(time.Second)}}
+	host.mu.Unlock()
+	p.reconcile()
+	waitFor(t, "issue 2's comment turn", func() bool { return len(agent.turns()) == 3 })
+	if body := agent.turns()[2].Body; agent.turns()[2].Args != "2 events" || !strings.Contains(body, "one more thing") {
+		t.Fatalf("third turn %q:\n%s", agent.turns()[2].Args, body)
 	}
 }
 
