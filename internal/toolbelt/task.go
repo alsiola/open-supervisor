@@ -45,6 +45,8 @@ func taskCmd(f *flags) *cobra.Command {
 			file := engine.TaskFile(s.b.StateDir, s.key, name)
 			if old, ok := engine.ReadTask(file); ok && old.Running() {
 				return fmt.Errorf("the task %s is still running (pid %d, %s so far); stop it with agent task stop %s, or pick another name", name, old.PID, old.Took(), name)
+			} else if ok && old.Queued() {
+				return fmt.Errorf("the task %s is already waiting for the host to have room (%s so far); stop it with agent task stop %s, or pick another name", name, old.Took(), name)
 			}
 			if s.dryRun {
 				fmt.Fprintf(cmd.OutOrStdout(), "dry run: would start %s in %s\n", strings.Join(args[1:], " "), dir)
@@ -54,8 +56,20 @@ func taskCmd(f *flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			now := time.Now().UTC()
 			t := engine.Task{Name: name, Issue: s.key, Command: args[1:], Dir: dir, Log: strings.TrimSuffix(file, ".json") + ".log",
-				StartedAt: time.Now().UTC(), Outcome: "running"}
+				StartedAt: now, Outcome: "running"}
+			out := cmd.OutOrStdout()
+			if busy := engine.HostBusy(s.cfg.Settings.Host); busy != "" {
+				t.Outcome, t.QueuedAt, t.CheckedAt, t.Busy = "queued", &now, &now, busy
+				if err := engine.SaveTask(file, t); err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "registered the task %s, but the host is too busy to start it now (%s)\n", name, busy)
+				fmt.Fprintf(out, "the supervisor looks again every %s and starts it once there is room, then says on the issue when it ends, as for any task\n", span(engine.TaskRetryEvery))
+				fmt.Fprintf(out, "if it still can't start after %s, the supervisor says so on the issue and wakes you. End the turn as you would with the task running; its log will be\n%s\n", span(engine.TaskHoldFor), t.Log)
+				return nil
+			}
 			if err := engine.SaveTask(file, t); err != nil {
 				return err
 			}
@@ -63,7 +77,6 @@ func taskCmd(f *flags) *cobra.Command {
 				_ = os.Remove(file)
 				return fmt.Errorf("couldn't start the task: %w", err)
 			}
-			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "started the task %s (pid %d) in %s\n", name, t.PID, dir)
 			fmt.Fprintf(out, "the supervisor says on the issue when it ends; its log is\n%s\n", t.Log)
 			return nil
@@ -88,7 +101,7 @@ func taskCmd(f *flags) *cobra.Command {
 					continue
 				}
 				state := t.Outcome
-				if t.EndedAt == nil && !t.Running() {
+				if t.EndedAt == nil && !t.Live() {
 					state = "lost"
 				}
 				if t.Exit != nil && state == "failed" {
@@ -108,7 +121,7 @@ func taskCmd(f *flags) *cobra.Command {
 	list.Flags().BoolVar(&all, "all", false, "every issue's tasks in the project")
 	stop := &cobra.Command{
 		Use:   "stop <name>",
-		Short: "Stop a running task and everything it started",
+		Short: "Stop a running task and everything it started, or drop one waiting for the host",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := open(f, true)
@@ -122,6 +135,10 @@ func taskCmd(f *flags) *cobra.Command {
 			t, err := engine.StopTask(file)
 			if err != nil {
 				return err
+			}
+			if t.PID == 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "dropped the task %s before it started\n", t.Name)
+				return nil
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "stopping the task %s (pid %d)\n", t.Name, t.PID)
 			return nil
@@ -138,4 +155,16 @@ func taskCmd(f *flags) *cobra.Command {
 	}
 	cmd.AddCommand(start, list, stop, exec)
 	return cmd
+}
+
+// span says a whole number of hours or minutes in words: "2 hours", "15 minutes".
+func span(d time.Duration) string {
+	n, unit := int(d/time.Minute), "minute"
+	if d >= time.Hour && d%time.Hour == 0 {
+		n, unit = int(d/time.Hour), "hour"
+	}
+	if n != 1 {
+		unit += "s"
+	}
+	return fmt.Sprintf("%d %s", n, unit)
 }
