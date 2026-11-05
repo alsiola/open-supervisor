@@ -267,6 +267,10 @@ var (
 	issueTimeout     = time.Minute
 )
 
+// settleAfter is how long the reconcile keeps reading a closed PR, or a closed issue whose PRs are all closed.
+// Webhooks still bring what happens after.
+const settleAfter = time.Hour
+
 func ctxTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), d)
 }
@@ -375,6 +379,9 @@ func (p *Project) issueOfPR(pr core.PR) string {
 }
 
 func (p *Project) reportPRClosed(key string, pr int, merged bool) {
+	if r := p.Store.Get(key); r == nil || slices.Contains(r.ClosedPRs, pr) {
+		return
+	}
 	already := false
 	p.Store.Update(key, func(x *store.Record) {
 		for _, c := range x.ClosedPRs {
@@ -384,6 +391,10 @@ func (p *Project) reportPRClosed(key string, pr int, merged bool) {
 			}
 		}
 		x.ClosedPRs = append(x.ClosedPRs, pr)
+		if x.PRClosedAt == nil {
+			x.PRClosedAt = map[int]time.Time{}
+		}
+		x.PRClosedAt[pr] = time.Now().UTC()
 	})
 	if already {
 		return
@@ -1302,8 +1313,9 @@ func (p *Project) refreshPRs(key string) (open, ok bool) {
 			views[pr.ID] = pr
 		}
 	}
+	settled := time.Now().Add(-settleAfter)
 	for _, id := range r.PRs {
-		if _, ok := views[id]; ok {
+		if _, ok := views[id]; ok || r.PRSettled(id, settled) {
 			continue
 		}
 		pr, err := p.Repo.PR(ctx, id)
@@ -1324,17 +1336,25 @@ func (p *Project) refreshPRs(key string) (open, ok bool) {
 			head = &pr
 		}
 	}
-	p.Store.Update(key, func(x *store.Record) {
-		for _, id := range ids {
-			x.AddPR(id)
-		}
-		if head != nil && x.HeadSHA != head.HeadSHA {
-			now := time.Now().UTC()
-			x.HeadSHA = head.HeadSHA
-			x.HeadAt = &now
-			x.ChecksReported = ""
-		}
-	})
+	// Write only when something changed: every write moves UpdatedAt, and a finished record whose UpdatedAt
+	// keeps moving is never left out of the reconcile or pruned.
+	changed := head != nil && r.HeadSHA != head.HeadSHA
+	for _, id := range ids {
+		changed = changed || !r.HasPR(id)
+	}
+	if changed {
+		p.Store.Update(key, func(x *store.Record) {
+			for _, id := range ids {
+				x.AddPR(id)
+			}
+			if head != nil && x.HeadSHA != head.HeadSHA {
+				now := time.Now().UTC()
+				x.HeadSHA = head.HeadSHA
+				x.HeadAt = &now
+				x.ChecksReported = ""
+			}
+		})
+	}
 	for _, id := range ids {
 		if pr := views[id]; pr.State != core.PROpen {
 			p.reportPRClosed(key, id, pr.State == core.PRMerged)
@@ -1393,8 +1413,14 @@ func (p *Project) reconcileHeld(ctx context.Context, issue core.Issue) {
 // how many issues the project held before the reconcile claimed any.
 func (p *Project) maintain(openKeys map[string]bool, routed, before int) {
 	recent := time.Now().Add(-3 * 24 * time.Hour)
+	settled := time.Now().Add(-settleAfter)
 	for _, r := range p.Store.All() {
 		if r.State == store.Finished && r.UpdatedAt.Before(recent) {
+			continue
+		}
+		// Closed with all its PRs for over an hour: a webhook still brings a reopen or a late comment, and a
+		// reopened issue is among the open ones again.
+		if !openKeys[r.Key] && r.ClosedAt != nil && r.ClosedAt.Before(settled) {
 			continue
 		}
 		p.maintainOne(r, openKeys)
@@ -1435,6 +1461,27 @@ func (p *Project) maintainOne(r *store.Record, openKeys map[string]bool) {
 	if fresh.State == store.Building && fresh.HeadSHA != "" {
 		p.evaluateChecks(fresh.HeadSHA)
 	}
+	p.markClosed(r.Key, openKeys[r.Key])
+}
+
+// markClosed notes when the issue was first found closed, by the tracker and with all its PRs, so the
+// reconcile can stop reading it an hour on; open, or with a PR open, the note goes.
+func (p *Project) markClosed(key string, open bool) {
+	r := p.Store.Get(key)
+	if r == nil {
+		return
+	}
+	closed := !open && (r.State == store.Finished || r.IssueClosedReported) && r.PRsClosed()
+	if closed == (r.ClosedAt != nil) {
+		return
+	}
+	p.Store.Update(key, func(x *store.Record) {
+		x.ClosedAt = nil
+		if closed {
+			now := time.Now().UTC()
+			x.ClosedAt = &now
+		}
+	})
 }
 
 // closed confirms that an issue missing from the tracker's open issues is closed, not just outside the
@@ -1455,7 +1502,11 @@ func (p *Project) readComments(ctx context.Context, r *store.Record) {
 		p.callFailed(err, "%s: couldn't read its comments", p.ref(r.Key))
 		return
 	}
+	settled := time.Now().Add(-settleAfter)
 	for _, id := range r.PRs {
+		if r.PRSettled(id, settled) {
+			continue
+		}
 		more, err := p.Repo.PRComments(ctx, id, r.Since)
 		if err != nil {
 			p.callFailed(err, "%s: couldn't read the comments on PR #%d", p.ref(r.Key), id)

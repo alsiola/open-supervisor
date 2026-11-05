@@ -29,6 +29,9 @@ type fakeHost struct {
 	required []string
 	labelOps []string
 	reads    int
+	// commentReads and prCommentReads count the comment reads on each issue and PR.
+	commentReads   map[string]int
+	prCommentReads map[int]int
 	// stall holds the issues whose comment reads hang until the caller gives up.
 	stall  map[string]bool
 	posted []string
@@ -73,6 +76,10 @@ func (h *fakeHost) Issue(_ context.Context, key string) (core.Issue, error) {
 func (h *fakeHost) Comments(ctx context.Context, key string, since time.Time) ([]core.Comment, error) {
 	h.mu.Lock()
 	stall := h.stall[key]
+	if h.commentReads == nil {
+		h.commentReads = map[string]int{}
+	}
+	h.commentReads[key]++
 	h.mu.Unlock()
 	if stall {
 		<-ctx.Done()
@@ -171,7 +178,13 @@ func (h *fakeHost) PR(_ context.Context, id int) (core.PR, error) {
 	defer h.mu.Unlock()
 	return h.prs[id], nil
 }
-func (h *fakeHost) PRComments(context.Context, int, time.Time) ([]core.Comment, error) {
+func (h *fakeHost) PRComments(_ context.Context, id int, _ time.Time) ([]core.Comment, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.prCommentReads == nil {
+		h.prCommentReads = map[int]int{}
+	}
+	h.prCommentReads[id]++
 	return nil, nil
 }
 func (h *fakeHost) Checks(_ context.Context, sha string) (core.Checks, error) {
@@ -405,6 +418,87 @@ func TestSlowIssueDoesNotStarveTheOthersComments(t *testing.T) {
 	waitFor(t, "issue 2's comment turn", func() bool { return len(agent.turns()) == 3 })
 	if body := agent.turns()[2].Body; agent.turns()[2].Args != "2 events" || !strings.Contains(body, "one more thing") {
 		t.Fatalf("third turn %q:\n%s", agent.turns()[2].Args, body)
+	}
+}
+
+// The reconcile reads open issues and PRs, and closed ones for an hour after they close, not every one the
+// project ever held: those reads are what spends the code host's rate limit.
+func TestReconcileLeavesWhatClosedOverAnHourAgo(t *testing.T) {
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") })
+	host.issues["7"] = &core.Issue{Key: "7", Title: "Seven", Open: true}
+	host.issues["8"] = &core.Issue{Key: "8", Title: "Eight", Open: true}
+	host.mu.Lock()
+	host.prs[70] = core.PR{ID: 70, State: core.PRMerged, Branch: "agent/issue-7"}
+	host.prs[80] = core.PR{ID: 80, State: core.PRClosed, Branch: "agent/issue-8"}
+	host.prs[81] = core.PR{ID: 81, State: core.PROpen, Branch: "agent/issue-8", HeadSHA: "h81"}
+	host.mu.Unlock()
+	p.reconcile()
+	waitFor(t, "both turns", func() bool { return state(p, "7") == store.Review && state(p, "8") == store.Review })
+	host.mu.Lock()
+	host.issues["7"].Open = false
+	host.mu.Unlock()
+	p.reconcile()
+	waitFor(t, "issue 7 noted closed", func() bool { r := p.Store.Get("7"); return r != nil && r.ClosedAt != nil })
+	waitFor(t, "the turns to end", func() bool {
+		r := p.Store.Get("7")
+		return p.RunningCount() == 0 && len(r.Queue) == 0 && len(p.Store.Get("8").Queue) == 0
+	})
+	time.Sleep(50 * time.Millisecond) // let the turns finish settling
+
+	// Within the hour, both are still read.
+	reads := func() (int, int, int) {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		n7, n70, n80 := host.commentReads["7"], host.prCommentReads[70], host.prCommentReads[80]
+		host.commentReads, host.prCommentReads = nil, nil
+		return n7, n70, n80
+	}
+	reads()
+	updated := p.Store.Get("7").UpdatedAt
+	p.reconcile()
+	if n7, n70, n80 := reads(); n7 != 1 || n70 != 1 || n80 != 1 {
+		t.Fatalf("within the hour: %d reads of issue 7, %d of PR 70, %d of PR 80", n7, n70, n80)
+	}
+	// A reconcile that finds nothing new doesn't touch the record: a finished one ages out of it, and the
+	// store's prune, by when it was last updated.
+	if at := p.Store.Get("7").UpdatedAt; !at.Equal(updated) {
+		t.Fatalf("a quiet reconcile moved UpdatedAt from %s to %s", updated, at)
+	}
+
+	// An hour on, the closed issue and the closed PRs are left alone; the open issue and its open PR aren't.
+	ago := time.Now().UTC().Add(-2 * time.Hour)
+	for _, key := range []string{"7", "8"} {
+		p.Store.Update(key, func(x *store.Record) {
+			if x.ClosedAt != nil {
+				x.ClosedAt = &ago
+			}
+			for id := range x.PRClosedAt {
+				x.PRClosedAt[id] = ago
+			}
+		})
+	}
+	p.reconcile()
+	host.mu.Lock()
+	n8, n81 := host.commentReads["8"], host.prCommentReads[81]
+	host.mu.Unlock()
+	n7, n70, n80 := reads()
+	if n7 != 0 || n70 != 0 || n80 != 0 {
+		t.Fatalf("an hour on: %d reads of issue 7, %d of PR 70, %d of PR 80", n7, n70, n80)
+	}
+	if n8 != 1 || n81 != 1 {
+		t.Fatalf("open issue 8 read %d times, its open PR 81 %d", n8, n81)
+	}
+
+	// Reopened, the issue is among the open ones again and is read.
+	host.mu.Lock()
+	host.issues["7"].Open = true
+	host.mu.Unlock()
+	p.reconcile()
+	if n7, _, _ := reads(); n7 != 1 {
+		t.Fatalf("reopened issue 7 read %d times", n7)
+	}
+	if r := p.Store.Get("7"); r.ClosedAt != nil {
+		t.Fatal("a reopened issue kept its closed time")
 	}
 }
 
