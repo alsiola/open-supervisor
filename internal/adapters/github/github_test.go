@@ -273,6 +273,26 @@ func TestDetectRepo(t *testing.T) {
 	}
 }
 
+func TestHTTPSForAnSSHRemote(t *testing.T) {
+	r := &Repo{&binding{c: &conn{host: "github.com", web: "https://github.com", read: staticToken("tok")}, repo: "Oddsworth/supervisor"}}
+	for remote, want := range map[string]string{
+		"git@github.com:Oddsworth/supervisor.git":       "https://github.com/Oddsworth/supervisor.git",
+		"git@github.com:oddsworth/supervisor":           "https://github.com/Oddsworth/supervisor.git",
+		"ssh://git@github.com/Oddsworth/supervisor.git": "https://github.com/Oddsworth/supervisor.git",
+		"https://github.com/Oddsworth/supervisor.git":   "",
+		"git@github.com:Oddsworth/other.git":            "",
+		"git@gitlab.com:Oddsworth/supervisor.git":       "",
+		"":                                              "",
+	} {
+		if got, ok := r.HTTPSFor(remote); got != want || ok != (want != "") {
+			t.Errorf("HTTPSFor(%q) = %q %v", remote, got, ok)
+		}
+	}
+	if user, pass, err := r.GitCredential(context.Background()); err != nil || user != "x-access-token" || pass != "tok" {
+		t.Errorf("GitCredential = %q %q %v", user, pass, err)
+	}
+}
+
 func deliver(t *testing.T, h adapter.Hooked, event, body string) []core.Signal {
 	t.Helper()
 	hdr := http.Header{}

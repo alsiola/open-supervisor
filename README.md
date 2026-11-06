@@ -268,7 +268,7 @@ agent correction | problem | inflight
 
 Rules particular to a project (what must pass, how to run its dev server, whether to take screenshots and where they go) belong in its own `CLAUDE.md` or `AGENTS.md`. A project can also add to a playbook in its checkout, in `.open-supervisor/playbooks/<name>.md` (`work-issue`, `sweep`, `triage`). Each turn hands the file over after the message, under "This project's additions to the playbook". Additions only ever add to the playbook; nothing replaces it.
 
-The supervisor sets `OPEN_SUPERVISOR_REMOTE` for every turn. Unless `git.sign` is on, it also turns off commit and tag signing through `GIT_CONFIG_*`. `open-supervisor playbooks` writes the plugin out and prints its path, for `claude --plugin-dir <path>` by hand.
+The supervisor sets `OPEN_SUPERVISOR_REMOTE` for every turn. Unless `git.sign` is on, it also turns off commit and tag signing through `GIT_CONFIG_*`. When the remote is an SSH URL on GitHub, pushes to it go over HTTPS instead, signed in with the repo connection's own login (the gh login, the token or the app, not the bot), so agents push without an SSH key; fetches stay on SSH. An app or token needs to be able to write contents, and workflows for a push that changes `.github/workflows`. `open-supervisor playbooks` writes the plugin out and prints its path, for `claude --plugin-dir <path>` by hand.
 
 ## The TUI
 

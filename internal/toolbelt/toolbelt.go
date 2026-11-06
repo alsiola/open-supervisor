@@ -245,7 +245,7 @@ func Command() *cobra.Command {
 	root.PersistentFlags().StringVar(&f.config, "config", "", "config file (default $OPEN_SUPERVISOR_CONFIG or ~/.config/open-supervisor/config.yaml)")
 	root.PersistentFlags().StringVar(&f.project, "project", "", "project name (default $OPEN_SUPERVISOR_PROJECT or the current checkout's)")
 	root.PersistentFlags().StringVar(&f.issue, "issue", "", "issue key (default $OPEN_SUPERVISOR_ISSUE or the current branch's)")
-	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), attachmentCmd(f), worktreeCmd(f), taskCmd(f), waitCmd(f), scheduleCmd(f), correctionCmd(f), problemCmd(f), inflightCmd(f))
+	root.AddCommand(contextCmd(f), issueCmd(f), prCmd(f), checksCmd(f), attachmentCmd(f), worktreeCmd(f), taskCmd(f), waitCmd(f), scheduleCmd(f), correctionCmd(f), problemCmd(f), inflightCmd(f), gitCredentialCmd(f))
 	return root
 }
 

@@ -175,6 +175,15 @@ type Attacher interface {
 	Fetch(ctx context.Context, url string) (body io.ReadCloser, ok bool, err error)
 }
 
+// GitSigner is a repo whose connection can sign git in over HTTPS, so an agent pushes to an SSH remote without
+// needing an SSH key of its own.
+type GitSigner interface {
+	// HTTPSFor is the repository's HTTPS URL when remote is an SSH URL for it; ok is false for any other remote.
+	HTTPSFor(remote string) (url string, ok bool)
+	// GitCredential is the username and password git signs in with over HTTPS.
+	GitCredential(ctx context.Context) (username, password string, err error)
+}
+
 // Transitioner is a tracker with workflow statuses of its own (Jira), moved as the agent's state changes.
 // state is "claimed" or one of the agent states.
 type Transitioner interface {
