@@ -131,6 +131,7 @@ func (s *Supervisor) readHost() {
 		}
 		s.capture("host_alert", props)
 	}
+	go s.relieveDisks(false)
 	s.changed()
 }
 

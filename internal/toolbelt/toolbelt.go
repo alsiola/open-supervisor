@@ -24,6 +24,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/engine"
+	"github.com/alsiola/open-supervisor/internal/host"
 	"github.com/alsiola/open-supervisor/internal/problems"
 	"github.com/alsiola/open-supervisor/internal/store"
 	"github.com/alsiola/open-supervisor/internal/worktree"
@@ -989,24 +990,54 @@ func (s *session) spare() (all []string, spare []engine.SpareWorktree) {
 	return engine.IssueWorktrees(config.DataDir(), s.b.StateDir, s.b.Spec.Name, st)
 }
 
-// makeRoom removes the spare worktrees that can go without losing work, for a disk too full for another. It
-// reports whether it removed any.
-func (s *session) makeRoom(log io.Writer) bool {
+// makeRoom removes the spare worktrees that can go without losing work, for a disk too full for another, then
+// the parked ones (issues up for review, asking for help, done or waiting, with everything pushed) least
+// recently used first while the disk is still too full for this one. It reports whether it removed any.
+func (s *session) makeRoom(noRoom *worktree.NoRoom, log io.Writer) bool {
+	logf := func(format string, args ...any) { fmt.Fprintf(log, format+"\n", args...) }
 	_, spare := s.spare()
-	return engine.RemoveSpare(s.b.Root, s.b.Git.RemoteName(), spare, func(format string, args ...any) {
-		fmt.Fprintf(log, format+"\n", args...)
-	}) > 0
+	removed := engine.RemoveSpare(s.b.Root, s.b.Git.RemoteName(), spare, logf)
+	full := func() bool {
+		d, err := host.DiskAt(noRoom.Path)
+		return err == nil && d.Free < noRoom.Need+noRoom.Keep
+	}
+	if !full() {
+		return removed > 0
+	}
+	st := store.New(s.b.StateDir, nil)
+	_ = st.Load()
+	parked := engine.ParkedWorktrees(config.DataDir(), s.b.StateDir, s.b.Spec.Name, st)
+	// The store is read again before each removal, so an issue whose turn has started since keeps its worktree.
+	still := func(key string) bool {
+		fresh := store.New(s.b.StateDir, nil)
+		if fresh.Load() != nil {
+			return false
+		}
+		r := fresh.Get(key)
+		return r != nil && key != s.key && engine.Parked(r.State)
+	}
+	evicted := engine.EvictParked(s.b.Root, s.b.Git.RemoteName(), parked, still, full, logf)
+	if len(evicted) > 0 {
+		logf("removed the worktrees of %d parked issue(s) to make room (their branches stay): %s", len(evicted), strings.Join(evicted, ", "))
+	}
+	return removed > 0 || len(evicted) > 0
 }
 
-// crowd says how many issue worktrees the project has and which of them could go, for a disk too full for another.
+// crowd says how many issue worktrees the project has and which of them could go, for a disk too full for another,
+// and names the scratch folders holding the most.
 func (s *session) crowd() string {
 	all, spare := s.spare()
 	msg := fmt.Sprintf("The project has %d issue worktrees", len(all))
 	if len(spare) == 0 {
-		return msg + ", all for issues still in progress; free space elsewhere, or ask the owner, then run setup again"
+		msg += ", all for issues still in progress or with work on them that isn't pushed"
+	} else {
+		msg = fmt.Sprintf("%s; %d are for issues finished, landed or no longer held, but have work on them that isn't pushed or were touched in the last day: %s",
+			msg, len(spare), engine.SpareNames(spare))
 	}
-	return fmt.Sprintf("%s; %d are for issues finished, landed or no longer held, but have work on them that isn't pushed or were touched in the last day: %s. Free space, then run setup again",
-		msg, len(spare), engine.SpareNames(spare))
+	if big := engine.BigScratches(all); len(big) > 0 {
+		msg += fmt.Sprintf(". These hold over %s each in %s/, which is never removed for space: %s", worktree.Bytes(engine.BigScratch), worktree.Scratch, strings.Join(big, ", "))
+	}
+	return msg + ". Free space elsewhere, or ask the owner, then run setup again"
 }
 
 func worktreeCmd(f *flags) *cobra.Command {
@@ -1023,7 +1054,7 @@ func worktreeCmd(f *flags) *cobra.Command {
 			spec := s.worktreeSpec(cmd.ErrOrStderr())
 			path, err := worktree.Setup(spec)
 			// A full disk: clear the worktrees no issue needs any more, and try once more before giving up.
-			if noRoom := (*worktree.NoRoom)(nil); errors.As(err, &noRoom) && s.makeRoom(cmd.ErrOrStderr()) {
+			if noRoom := (*worktree.NoRoom)(nil); errors.As(err, &noRoom) && s.makeRoom(noRoom, cmd.ErrOrStderr()) {
 				path, err = worktree.Setup(spec)
 			}
 			if noRoom := (*worktree.NoRoom)(nil); errors.As(err, &noRoom) {

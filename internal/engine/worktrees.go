@@ -85,10 +85,12 @@ func SpareNames(spare []SpareWorktree) string {
 	return strings.Join(names, ", ")
 }
 
-// sweepWorktrees removes the project's spare worktrees (see RemoveSpare). The branches stay.
+// sweepWorktrees removes the project's spare worktrees (see RemoveSpare), and stops the processes left running from
+// worktrees that are gone. The branches stay.
 func (p *Project) sweepWorktrees() {
 	_, spare := IssueWorktrees(p.hub.dataDir(), p.StateDir, p.Name, p.Store)
 	RemoveSpare(p.Root, p.git.RemoteName(), spare, p.logf)
+	p.killOrphans()
 }
 
 // RemoveSpare removes the spare worktrees that can go without losing work: those of finished issues, which

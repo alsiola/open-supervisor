@@ -74,6 +74,8 @@ type Supervisor struct {
 	// host is the watch on the machine's load, memory and disks, and hostSample its last reading.
 	host       hostWatch
 	hostSample *hostinfo.Sample
+	// relief is the pass at freeing a disk over its threshold by removing parked worktrees.
+	relief diskRelief
 
 	// amb is the ambient sharing for the settings it was made for (see sharer), ambOn when this run of the
 	// supervisor switched it on (zero while off), ambErr why it last couldn't start, and ledger what it has
@@ -578,9 +580,17 @@ func (s *Supervisor) loop(ctx context.Context) {
 			if time.Since(lastPrune) >= 6*time.Hour {
 				lastPrune = time.Now()
 				for _, p := range s.Projects() {
-					go p.sweepWorktrees()
 					p.Store.Prune()
 				}
+				go func() {
+					var wg sync.WaitGroup
+					for _, p := range s.Projects() {
+						wg.Add(1)
+						go func() { defer wg.Done(); p.sweepWorktrees() }()
+					}
+					wg.Wait()
+					s.relieveDisks(true)
+				}()
 			}
 			go s.wakeDue()
 			go s.sweepIfDue()
