@@ -1515,11 +1515,22 @@ func (p *Project) readComments(ctx context.Context, r *store.Record) {
 		comments = append(comments, more...)
 	}
 	sort.SliceStable(comments, func(i, j int) bool { return comments[i].At.Before(comments[j].At) })
+	// The agent's own comments don't move Since on, so every read sees the hold markers it has posted since the
+	// last comment from anyone else. Only the latest says what the issue waits for now: replaying an older one
+	// would put back a condition the agent has since dropped, and one already met would wake it again.
+	latest := ""
+	for _, c := range comments {
+		if c.Kind == core.OnIssue && c.At.After(r.Since) {
+			if _, ok := core.HoldIn(c.Body); ok {
+				latest = c.ID
+			}
+		}
+	}
 	for _, c := range comments {
 		if !c.At.After(r.Since) {
 			continue
 		}
-		if c.Kind == core.OnIssue {
+		if c.Kind == core.OnIssue && c.ID == latest {
 			p.noteHold(r.Key, c.ID, c.Body)
 		}
 		p.ingestOpt(r, c, false)

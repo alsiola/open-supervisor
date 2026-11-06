@@ -2,6 +2,7 @@ package engine
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -154,5 +155,39 @@ func TestFinishedIssueDropsItsWait(t *testing.T) {
 	waitFor(t, "finished", func() bool { return state(p, "44") == store.Finished })
 	if r := p.Store.Get("44"); r.Waits != nil {
 		t.Fatalf("a finished issue still waits: %+v", r.Waits)
+	}
+}
+
+// The agent's own comments are read again at every reconcile. An older wait it has since replaced mustn't come
+// back from them: here it waited on #46 closing (which has) and then on a job alone.
+func TestReconcileDoesNotReplayAReplacedWait(t *testing.T) {
+	var p *Project
+	_, p = setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		now := time.Now().UTC()
+		mark := &core.AgentMark{From: "45"}
+		c1 := core.Comment{ID: "c1", Kind: core.OnIssue, Body: "<!-- waitFor: issue:46:closed job:refresh -->", At: now, Agent: mark}
+		c2 := core.Comment{ID: "c2", Kind: core.OnIssue, Body: "<!-- waitFor: job:refresh; until 2099-01-01T00:00Z -->", At: now.Add(time.Second), Agent: mark}
+		host.mu.Lock()
+		host.comments["45"] = []core.Comment{c1, c2}
+		host.mu.Unlock()
+		p.noteHold("45", c2.ID, c2.Body)
+		return review("ok")
+	})
+	host.issues["45"] = &core.Issue{Key: "45", Title: "After the refresh", Open: true}
+	host.issues["46"] = &core.Issue{Key: "46", Title: "Closed already", Open: false}
+	p.reconcile()
+	waitFor(t, "held", func() bool { r := p.Store.Get("45"); return r.Turns == 1 && r.State == store.Scheduled })
+	p.reconcile()
+	p.reconcile()
+	time.Sleep(100 * time.Millisecond)
+	if n := len(agent.turns()); n != 1 {
+		t.Fatalf("the replaced wait on #46 woke the agent again (%d turns):\n%s", n, agent.turns()[n-1].Body)
+	}
+	// Even put back for a moment, it would wake the agent if the check on it ran first.
+	if log, _ := os.ReadFile(filepath.Join(p.StateDir, "log")); strings.Contains(string(log), "#46 to close") {
+		t.Fatalf("the reconcile put the replaced wait back:\n%s", log)
+	}
+	if r := p.Store.Get("45"); len(r.Waits) != 1 || r.Waits[0].Kind != core.CondJob || r.ScheduledBy != "c2" {
+		t.Fatalf("wait after the reconcile: %+v (by %s)", r.Waits, r.ScheduledBy)
 	}
 }
