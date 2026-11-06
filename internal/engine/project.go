@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -87,6 +88,8 @@ type Project struct {
 	lastReconcile time.Time
 	reconciling   bool
 	stopped       bool
+	// noRoom is the disk's last refusal of a new worktree, kept while new issues are held for it.
+	noRoom *worktree.NoRoom
 	// begun: start has run (a reload starts only the projects it built).
 	begun bool
 	// stopTasks ends the following of the agents' tasks; tasksMu keeps two looks at them from telling an end twice.
@@ -586,6 +589,9 @@ func (p *Project) maybeClaim(issue core.Issue, reopened bool) {
 		p.logf("%s: holding; %d issues already claimed", p.ref(issue.Key), p.hub.settings().MaxOpen)
 		return
 	}
+	if !p.roomForIssue(issue.Key) {
+		return
+	}
 	note := ""
 	if marker != nil && marker.hold.Until != nil {
 		note = fmt.Sprintf("This issue was scheduled to start at %s, and that time has come.", marker.hold.Until.Format(time.RFC3339))
@@ -594,6 +600,55 @@ func (p *Project) maybeClaim(issue core.Issue, reopened bool) {
 	if labelled {
 		p.editLabels(issue.Key, nil, []string{p.Labels.Scheduled})
 	}
+}
+
+// roomForIssue reports whether the disk has room for a new issue's worktree, as its setup would check, so an
+// issue isn't claimed only for its agent to fail at the first step. It stays unclaimed, and a later reconcile
+// claims it once space frees. The hold is logged when it starts and when it ends, not on every issue.
+func (p *Project) roomForIssue(key string) bool {
+	path := p.WorktreePath(key)
+	if _, err := os.Stat(path); err == nil {
+		return true
+	}
+	_, _, disk := p.hub.settings().Host.Thresholds()
+	spec := worktree.Spec{Root: p.Root, Remote: p.git.RemoteName(), Path: path, Disk: disk}
+	ref := p.checkoutRef()
+	var full *worktree.NoRoom
+	errors.As(spec.RoomFor(ref), &full)
+	p.mu.Lock()
+	was := p.noRoom
+	p.mu.Unlock()
+	// On the first refusal, clear the worktrees no issue needs any more, as setup would, and look again.
+	if full != nil && was == nil {
+		_, spare := IssueWorktrees(p.hub.dataDir(), p.StateDir, p.Name, p.Store)
+		if RemoveSpare(p.Root, p.git.RemoteName(), spare, p.logf) > 0 {
+			full = nil
+			errors.As(spec.RoomFor(ref), &full)
+		}
+	}
+	p.mu.Lock()
+	p.noRoom = full
+	p.mu.Unlock()
+	switch {
+	case full != nil && was == nil:
+		p.logf("holding new issues: the disk has %s free, and a worktree needs about %s on top of the %s kept free (settings.host.disk)",
+			worktree.Bytes(full.Free), worktree.Bytes(full.Need), worktree.Bytes(full.Keep))
+	case full == nil && was != nil:
+		p.logf("the disk has room for new worktrees again; claiming new issues")
+	}
+	return full == nil
+}
+
+// checkoutRef is what a new worktree would check out, for sizing it: the base branch on the remote, else the
+// main checkout's HEAD.
+func (p *Project) checkoutRef() string {
+	if p.base != "" {
+		ref := p.git.RemoteName() + "/" + p.base
+		if err := exec.Command("git", "-C", p.Root, "rev-parse", "-q", "--verify", ref).Run(); err == nil {
+			return ref
+		}
+	}
+	return "HEAD"
 }
 
 // claimLocked claims an issue; the caller holds claimMu.

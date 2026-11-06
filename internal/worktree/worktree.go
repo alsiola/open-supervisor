@@ -111,7 +111,7 @@ func Setup(s Spec) (string, error) {
 			}
 			args = []string{"--no-track", "-b", s.Branch, s.Path, start}
 		}
-		if err := s.roomFor(start); err != nil {
+		if err := s.RoomFor(start); err != nil {
 			return "", err
 		}
 		if _, err := git(s.Root, append([]string{"worktree", "add", "-q"}, args...)...); err != nil {
@@ -206,8 +206,8 @@ func (e *NoRoom) Error() string {
 		e.Path, Bytes(e.Free), Bytes(e.Need), Bytes(e.Keep))
 }
 
-// roomFor checks the worktree's disk has room for a checkout of ref. A disk it can't read doesn't stop it.
-func (s Spec) roomFor(ref string) error {
+// RoomFor checks the worktree's disk has room for a checkout of ref. A disk it can't read doesn't stop it.
+func (s Spec) RoomFor(ref string) error {
 	if s.Disk <= 0 || s.Disk >= 100 {
 		return nil
 	}
@@ -288,7 +288,7 @@ func Fresh(s Spec) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
 		return "", err
 	}
-	if err := s.roomFor(s.remote() + "/" + base); err != nil {
+	if err := s.RoomFor(s.remote() + "/" + base); err != nil {
 		return "", err
 	}
 	if _, err := git(s.Root, "worktree", "add", "-q", "--detach", s.Path, s.remote()+"/"+base); err != nil {

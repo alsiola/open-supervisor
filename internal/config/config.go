@@ -128,7 +128,8 @@ type Host struct {
 	// Load is the 1-minute load average per CPU above which the host is overloaded: 1 is every core busy.
 	Load float64 `yaml:"load,omitempty"`
 	// Memory and Disk are the percentages in use above which they are running out. A new worktree isn't made
-	// when its checkout would leave its disk less free than Disk keeps, counting at most 10 GB.
+	// when its checkout would leave its disk less free than Disk keeps, counting at most 10 GB, and new issues
+	// aren't claimed until there is room for theirs.
 	Memory float64 `yaml:"memory,omitempty"`
 	Disk   float64 `yaml:"disk,omitempty"`
 	// Disks are more paths whose filesystems are watched, besides the worktrees', the state folder's and the
