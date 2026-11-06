@@ -2,7 +2,10 @@
 // the supervisor, so it outlives it, and asking whether a pid is still alive.
 package proc
 
-import "os/exec"
+import (
+	"os"
+	"os/exec"
+)
 
 // Detach makes cmd start in its own session, so quitting the supervisor leaves it running.
 func Detach(cmd *exec.Cmd) { detach(cmd) }
@@ -23,3 +26,12 @@ func Kill(pid int) error { return kill(pid) }
 
 // TerminateGroup asks a process started with Detach, and everything it started, to stop.
 func TerminateGroup(pid int) error { return terminateGroup(pid) }
+
+// Signal names the signal that ended a process ("SIGKILL"), or is "" when it exited by itself or the system
+// has no signals (Windows).
+func Signal(ps *os.ProcessState) string {
+	if ps == nil {
+		return ""
+	}
+	return signal(ps)
+}
