@@ -203,7 +203,8 @@ func StartTask(self, file string, t Task) (Task, error) {
 	cmd.Dir = t.Dir
 	cmd.Stdout, cmd.Stderr = log, log
 	proc.Detach(cmd)
-	if err := cmd.Start(); err != nil {
+	// At a lower priority, which the command inherits: a long task shouldn't slow the machine for everyone else.
+	if err := proc.StartBackground(cmd); err != nil {
 		return t, err
 	}
 	t.PID = cmd.Process.Pid
@@ -262,7 +263,10 @@ func ExecTask(file string) error {
 		case <-ctx.Done():
 		}
 	}()
+	// StartTask lowered the wrapper's priority already; this covers a wrapper started some other way.
+	_ = proc.Lower(0)
 	cmd := exec.CommandContext(ctx, t.Command[0], t.Command[1:]...)
+	proc.Background(cmd)
 	cmd.Dir = t.Dir
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	cmd.Cancel = func() error { return proc.Terminate(cmd.Process.Pid) }

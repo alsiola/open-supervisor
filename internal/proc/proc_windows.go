@@ -10,6 +10,7 @@ import (
 
 const createNewProcessGroup = 0x00000200
 const detachedProcess = 0x00000008
+const belowNormalPriorityClass = 0x00004000
 
 func detach(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
@@ -44,3 +45,13 @@ func kill(pid int) error {
 }
 
 func signal(*os.ProcessState) string { return "" }
+
+func background(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= belowNormalPriorityClass
+}
+
+// lower does nothing on Windows: background sets the priority class as the process is created.
+func lower(int) error { return nil }

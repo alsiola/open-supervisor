@@ -742,7 +742,7 @@ func (j *Jobs) execute(job config.Job, req *jobReq) {
 	proc.Detach(cmd)
 	cmd.Cancel = func() error { return proc.TerminateGroup(cmd.Process.Pid) }
 	cmd.WaitDelay = 10 * time.Second
-	err := cmd.Run()
+	err := proc.RunBackground(cmd)
 	if cmd.ProcessState != nil {
 		code := cmd.ProcessState.ExitCode()
 		run.Exit = &code
@@ -1105,7 +1105,7 @@ func (j *Jobs) startDetached(job config.Job, label, trigger string, extra []stri
 		cmd.Stdout, cmd.Stderr = file, file
 	}
 	proc.Detach(cmd)
-	err := cmd.Start()
+	err := proc.StartBackground(cmd)
 	if file != nil {
 		_ = file.Close()
 	}

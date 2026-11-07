@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/alsiola/open-supervisor/internal/host"
+	"github.com/alsiola/open-supervisor/internal/proc"
 )
 
 // Spec is one issue's worktree.
@@ -416,7 +417,7 @@ func runSetup(s Spec) error {
 	cmd.Dir = s.Path
 	cmd.Stdout = s.Log
 	cmd.Stderr = s.Log
-	if err := cmd.Run(); err != nil {
+	if err := proc.RunBackground(cmd); err != nil {
 		return fmt.Errorf("setup (%s): %w", s.Setup, err)
 	}
 	return os.WriteFile(stamp, []byte(sum+"\n"), 0o644)
