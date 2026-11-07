@@ -98,3 +98,39 @@ func TestKillWithinFindsProcessesByWorkingDirectory(t *testing.T) {
 		t.Error("a process outside the worktree was killed")
 	}
 }
+
+// A process left running from a worktree that was removed without stopping it (by hand, or by an older
+// version) goes on the next sweep; one running from a worktree still there stays.
+func TestKillOrphansStopsProcessesFromWorktreesThatAreGone(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "worktrees", "web")
+	gone, kept := filepath.Join(base, "issue-1"), filepath.Join(base, "issue-2")
+	for _, dir := range []string{filepath.Join(gone, "sub"), kept} {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	start := func(dir string) *exec.Cmd {
+		c := exec.Command("sleep", "60")
+		c.Dir = dir
+		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		go func() { _ = c.Wait() }()
+		t.Cleanup(func() { _ = c.Process.Kill() })
+		return c
+	}
+	orphan, live := start(filepath.Join(gone, "sub")), start(kept)
+	time.Sleep(100 * time.Millisecond)
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+	if n := KillOrphans(base); n != 1 {
+		t.Errorf("stopped %d, want the one orphan", n)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if proc.Alive(orphan.Process.Pid) {
+		t.Error("the process from the removed worktree survived")
+	}
+	if !proc.Alive(live.Process.Pid) {
+		t.Error("the process from the worktree still there was stopped")
+	}
+}

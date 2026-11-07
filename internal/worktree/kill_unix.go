@@ -30,11 +30,42 @@ func killWithin(path string) {
 	for _, pid := range pgrep(path + string(filepath.Separator)) {
 		roots[pid] = true
 	}
-	for _, pid := range cwdWithin(path) {
+	for pid := range cwds(path) {
 		roots[pid] = true
 	}
+	killTrees(roots)
+}
+
+// KillOrphans stops the processes left running from worktrees that are gone (removed by hand, by an older
+// version, or by a remove that failed part-way), with everything they started: those whose working directory
+// is in a folder under dir, the project's worktrees folder, that no longer exists. killWithin can't find them
+// once the folder has gone. It returns how many processes it stopped.
+func KillOrphans(dir string) int {
+	roots := map[int]bool{}
+	base := filepath.Clean(dir)
+	real, _ := filepath.EvalSymlinks(base)
+	for pid, cwd := range cwds(dir) {
+		cwd = strings.TrimSuffix(cwd, " (deleted)") // Linux marks a removed folder so
+		rest, ok := strings.CutPrefix(cwd, base+string(filepath.Separator))
+		if !ok && real != "" {
+			rest, ok = strings.CutPrefix(cwd, real+string(filepath.Separator))
+		}
+		if !ok {
+			continue
+		}
+		top, _, _ := strings.Cut(rest, string(filepath.Separator))
+		if _, err := os.Stat(filepath.Join(base, top)); os.IsNotExist(err) {
+			roots[pid] = true
+		}
+	}
+	return killTrees(roots)
+}
+
+// killTrees stops the roots and everything they started, SIGTERM first and SIGKILL after killGrace. The caller,
+// its ancestors and its process group are spared. It returns how many it stopped.
+func killTrees(roots map[int]bool) int {
 	if len(roots) == 0 {
-		return
+		return 0
 	}
 	parents, groups := processTable()
 	spared := map[int]bool{}
@@ -65,6 +96,7 @@ func killWithin(path string) {
 			_ = proc.Kill(pid)
 		}
 	}
+	return len(pids)
 }
 
 func pgrep(pattern string) []int {
@@ -72,14 +104,15 @@ func pgrep(pattern string) []int {
 	return pidList(strings.Fields(string(out)))
 }
 
-// cwdWithin lists the processes whose working directory is the path or under it, from /proc where there is
-// one (Linux) and from lsof otherwise (macOS).
-func cwdWithin(path string) []int {
+// cwds maps the processes whose working directory is the path or under it to that directory, from /proc where
+// there is one (Linux) and from lsof otherwise (macOS, which still names a folder removed since).
+func cwds(path string) map[int]string {
 	prefixes := []string{filepath.Clean(path)}
 	if real, err := filepath.EvalSymlinks(path); err == nil && real != prefixes[0] {
 		prefixes = append(prefixes, real)
 	}
 	within := func(dir string) bool {
+		dir = strings.TrimSuffix(dir, " (deleted)")
 		for _, p := range prefixes {
 			if dir == p || strings.HasPrefix(dir, p+string(filepath.Separator)) {
 				return true
@@ -87,7 +120,7 @@ func cwdWithin(path string) []int {
 		}
 		return false
 	}
-	var pids []int
+	found := map[int]string{}
 	if entries, err := os.ReadDir("/proc"); err == nil && len(entries) > 0 {
 		if _, err := os.Readlink("/proc/self/cwd"); err == nil {
 			for _, e := range entries {
@@ -96,10 +129,10 @@ func cwdWithin(path string) []int {
 					continue
 				}
 				if dir, err := os.Readlink(filepath.Join("/proc", e.Name(), "cwd")); err == nil && within(dir) {
-					pids = append(pids, pid)
+					found[pid] = dir
 				}
 			}
-			return pids
+			return found
 		}
 	}
 	// -Fpn prints a "p<pid>" line, then "fcwd" and "n<dir>" for each process.
@@ -110,10 +143,10 @@ func cwdWithin(path string) []int {
 		case strings.HasPrefix(line, "p"):
 			pid, _ = strconv.Atoi(line[1:])
 		case strings.HasPrefix(line, "n") && pid > 0 && within(line[1:]):
-			pids = append(pids, pid)
+			found[pid] = line[1:]
 		}
 	}
-	return pids
+	return found
 }
 
 // processTable maps every running process to its parent and to its process group.

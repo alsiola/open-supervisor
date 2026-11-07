@@ -498,3 +498,20 @@ func copyFile(from, to string) error {
 	}
 	return os.WriteFile(to, data, info.Mode().Perm())
 }
+
+// Size is how many bytes the files under path take, symlinks not followed; 0 when there is nothing there.
+func Size(path string) uint64 {
+	var total uint64
+	_ = filepath.WalkDir(path, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.Type().IsRegular() {
+			if info, err := d.Info(); err == nil {
+				total += uint64(info.Size())
+			}
+		}
+		return nil
+	})
+	return total
+}
