@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.7.0](https://github.com/alsiola/open-supervisor/compare/v1.6.1...v1.7.0) (2026-11-07)
+
+### Features
+
+* run jobs, agent tasks and worktree setup at a lower priority ([#108](https://github.com/alsiola/open-supervisor/issues/108)) ([3a5a702](https://github.com/alsiola/open-supervisor/commit/3a5a70262ee62ac7dac243bff0ce7fc3df7c3347))
+* **tasks:** hold agent tasks while the host is busy ([#96](https://github.com/alsiola/open-supervisor/issues/96)) ([cc70cab](https://github.com/alsiola/open-supervisor/commit/cc70cab9ab5a9d5ab1b116acd577a5225b306901))
+* **worktree:** free disk by evicting parked worktrees and stopping orphaned processes ([#106](https://github.com/alsiola/open-supervisor/issues/106)) ([304ef2f](https://github.com/alsiola/open-supervisor/commit/304ef2f0d22c90b413dc67c7e713c3e090d0eb33)), closes [#105](https://github.com/alsiola/open-supervisor/issues/105)
+
+### Bug Fixes
+
+* **engine:** hold new issues while the disk has no room for their worktrees ([#102](https://github.com/alsiola/open-supervisor/issues/102)) ([90772d1](https://github.com/alsiola/open-supervisor/commit/90772d13765d42a87698a8a01fef721a5a67ae9e))
+* **engine:** push agents' branches over HTTPS when the remote is SSH on GitHub ([#101](https://github.com/alsiola/open-supervisor/issues/101)) ([a7d1afd](https://github.com/alsiola/open-supervisor/commit/a7d1afd6ec0d181bd5ba1c1fceb8bf566fb95c88))
+* **engine:** stop the reconcile replaying a wait the agent has replaced ([#104](https://github.com/alsiola/open-supervisor/issues/104)) ([fbbdede](https://github.com/alsiola/open-supervisor/commit/fbbdede93428d014c3eeb50bdc4b5d4a8d95a9dd))
+* **tasks:** say which signal killed a task instead of exit -1 ([#103](https://github.com/alsiola/open-supervisor/issues/103)) ([fff8d8a](https://github.com/alsiola/open-supervisor/commit/fff8d8a7558ceee9c957299d5b36c76c6d80ea7b))
+
 ## [1.6.1](https://github.com/alsiola/open-supervisor/compare/v1.6.0...v1.6.1) (2026-11-05)
 
 ### Bug Fixes
