@@ -15,7 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/core"
+	hostinfo "github.com/alsiola/open-supervisor/internal/host"
 	"github.com/alsiola/open-supervisor/internal/logx"
 	"github.com/alsiola/open-supervisor/internal/proc"
 	"github.com/alsiola/open-supervisor/internal/store"
@@ -38,11 +40,17 @@ type Task struct {
 	PID       int        `json:"pid,omitempty"`
 	StartedAt time.Time  `json:"startedAt"`
 	EndedAt   *time.Time `json:"endedAt,omitempty"`
-	// Outcome is "running", "ok", "failed", "stopped", "couldn't start" or "lost" (the wrapper went without
-	// saying how the command ended: the machine restarted, or it was killed).
+	// Outcome is "queued" (held until the host has room), "running", "ok", "failed", "stopped", "couldn't
+	// start", "lost" (the wrapper went without saying how the command ended: the machine restarted, or it was
+	// killed) or "held" (the host stayed busy for TaskHoldFor, so it never started).
 	Outcome string `json:"outcome"`
-	Exit    *int   `json:"exit,omitempty"`
-	Error   string `json:"error,omitempty"`
+	// QueuedAt is when a task the host was too busy for was registered; CheckedAt when the host was last
+	// looked at for it, and Busy why it was busy then.
+	QueuedAt  *time.Time `json:"queuedAt,omitempty"`
+	CheckedAt *time.Time `json:"checkedAt,omitempty"`
+	Busy      string     `json:"busy,omitempty"`
+	Exit      *int       `json:"exit,omitempty"`
+	Error     string     `json:"error,omitempty"`
 	// Stop is set by `agent task stop` before it signals the task, so the wrapper records it as stopped
 	// however the command takes the signal.
 	Stop bool `json:"stop,omitempty"`
@@ -56,6 +64,44 @@ const keepTasks = 7 * 24 * time.Hour
 // tasksEvery is how often the supervisor looks at the project's tasks; tests shorten it.
 var tasksEvery = time.Minute
 
+// A task registered while the host is busy waits: the supervisor looks at the host again every TaskRetryEvery
+// and starts it once there is room, and gives up on it after TaskHoldFor. Tests shorten them.
+var (
+	TaskRetryEvery = 15 * time.Minute
+	TaskHoldFor    = 2 * time.Hour
+)
+
+// hostBusy says why the host has no room for a new task now, or "" when it has; tests replace it.
+var hostBusy = HostBusy
+
+// HostBusy says why the host has no room for a new task now, or "" when it has (or can't be read): the 1 or
+// 5-minute load per CPU or the memory in use over the host thresholds, or the OS saying memory pressure is
+// critical.
+func HostBusy(h config.Host) string {
+	s, err := hostinfo.Read(nil)
+	if err != nil {
+		return ""
+	}
+	return busyReason(s, h)
+}
+
+func busyReason(s hostinfo.Sample, h config.Host) string {
+	load, memory, _ := h.Thresholds()
+	var why []string
+	if s.HasLoad && s.CPUs > 0 {
+		if per := max(s.Load[0], s.Load[1]) / float64(s.CPUs); per > load {
+			why = append(why, fmt.Sprintf("load %.1f per CPU, over %.1f", per, load))
+		}
+	}
+	switch {
+	case s.MemTotal > 0 && s.MemoryUsedPct() > memory:
+		why = append(why, fmt.Sprintf("memory %.0f%% in use, over %.0f%%", s.MemoryUsedPct(), memory))
+	case s.MemoryCritical:
+		why = append(why, "memory pressure critical")
+	}
+	return strings.Join(why, "; ")
+}
+
 // TasksDir is where a project's tasks are kept, under its state directory.
 func TasksDir(stateDir string) string { return filepath.Join(stateDir, "tasks") }
 
@@ -66,6 +112,12 @@ func TaskFile(stateDir, issue, name string) string {
 
 // Running reports whether the task is still going.
 func (t Task) Running() bool { return t.EndedAt == nil && t.Outcome == "running" && proc.Alive(t.PID) }
+
+// Queued reports whether the task is registered and waiting for the host to have room.
+func (t Task) Queued() bool { return t.EndedAt == nil && t.Outcome == "queued" }
+
+// Live reports whether the task is going or waiting to start.
+func (t Task) Live() bool { return t.Running() || t.Queued() }
 
 // Took is how long the task ran, or has run so far.
 func (t Task) Took() time.Duration {
@@ -112,11 +164,11 @@ func Tasks(stateDir string) []Task {
 	return out
 }
 
-// TasksWithin are the tasks going now from the directory or under it.
+// TasksWithin are the tasks going now, or waiting to start, from the directory or under it.
 func TasksWithin(stateDir, dir string) []Task {
 	var out []Task
 	for _, t := range Tasks(stateDir) {
-		if t.Running() && within(t.Dir, dir) {
+		if t.Live() && within(t.Dir, dir) {
 			out = append(out, t)
 		}
 	}
@@ -167,6 +219,11 @@ func StopTask(file string) (Task, error) {
 	t, ok := ReadTask(file)
 	if !ok {
 		return t, fmt.Errorf("no task at %s", file)
+	}
+	if t.Queued() {
+		now := time.Now().UTC()
+		t.Stop, t.EndedAt, t.Outcome = true, &now, "stopped"
+		return t, SaveTask(file, t)
 	}
 	if !t.Running() {
 		return t, fmt.Errorf("the task %s isn't running (%s)", t.Name, t.Outcome)
@@ -253,10 +310,25 @@ func (p *Project) checkTasks() {
 	p.tasksMu.Lock()
 	defer p.tasksMu.Unlock()
 	files, _ := filepath.Glob(filepath.Join(TasksDir(p.StateDir), "*.json"))
+	sort.Strings(files)
+	busy, looked := "", false
 	for _, file := range files {
 		t, ok := ReadTask(file)
 		if !ok {
 			continue
+		}
+		if t.Queued() {
+			if t.CheckedAt != nil && time.Since(*t.CheckedAt) < TaskRetryEvery {
+				continue
+			}
+			if !looked {
+				busy, looked = hostBusy(p.hub.settings().Host), true
+			}
+			var started bool
+			if t, started = p.startQueued(file, t, busy); !started {
+				continue
+			}
+			// It couldn't start, or the host stayed busy too long: say so below.
 		}
 		if t.Reported {
 			if t.EndedAt != nil && time.Since(*t.EndedAt) > keepTasks {
@@ -289,11 +361,56 @@ func (p *Project) checkTasks() {
 	}
 }
 
+// startQueued looks again at a task waiting for the host: it starts it when the host has room (busy is ""),
+// and gives up on it once it has waited TaskHoldFor. It reports whether the task has ended without starting,
+// to be told on the issue.
+func (p *Project) startQueued(file string, t Task, busy string) (Task, bool) {
+	now := time.Now().UTC()
+	queued := now.Sub(t.StartedAt)
+	if t.QueuedAt != nil {
+		queued = now.Sub(*t.QueuedAt)
+	}
+	t.CheckedAt = &now
+	if busy != "" {
+		t.Busy = busy
+		if queued >= TaskHoldFor {
+			t.EndedAt, t.Outcome = &now, "held"
+			return t, true
+		}
+		if err := SaveTask(file, t); err != nil {
+			p.logf("%s: couldn't keep the %s task's record: %v", p.ref(t.Issue), t.Name, err)
+		}
+		return t, false
+	}
+	// agent task stop may have ended it since the read.
+	if again, ok := ReadTask(file); !ok || !again.Queued() {
+		return t, false
+	}
+	self, err := os.Executable()
+	if err == nil {
+		t.StartedAt, t.Outcome, t.Busy = now, "running", ""
+		if err = SaveTask(file, t); err == nil {
+			t, err = StartTask(self, file, t)
+		}
+	}
+	if err != nil {
+		t.EndedAt, t.Outcome, t.Error = &now, "couldn't start", logx.ErrText(err)
+		return t, true
+	}
+	p.logf("%s: started the %s task, held %s for the host to have room", p.ref(t.Issue), t.Name, queued.Round(time.Minute))
+	return t, false
+}
+
 // taskEnded says on the issue how a task ended, and tells its agent at the next turn unless the issue is
 // finished. A finished issue's worktree the task kept is removed once nothing else runs from it.
 func (p *Project) taskEnded(t Task) {
 	text := TaskEndText(t)
 	p.logf("%s: %s", p.ref(t.Issue), text)
+	follow := " See how it went in the log, and carry on with what was waiting for it."
+	if t.Outcome == "held" {
+		follow = " Pause the work that needs it for now and end your turn with help: a person has to step in " +
+			"(free up the host, or say to go on) before it is started again."
+	}
 	r := p.Store.Get(t.Issue)
 	if !p.hub.settings().DryRun {
 		ctx, cancel := ctxTimeout(30 * time.Second)
@@ -303,7 +420,7 @@ func (p *Project) taskEnded(t Task) {
 		cancel()
 	}
 	if r != nil && r.State != store.Finished {
-		p.enqueue(t.Issue, core.Event{Type: core.EvNote, Text: text + " See how it went in the log, and carry on with what was waiting for it.", At: time.Now().UTC()})
+		p.enqueue(t.Issue, core.Event{Type: core.EvNote, Text: text + follow, At: time.Now().UTC()})
 		return
 	}
 	path := p.WorktreePath(t.Issue)
@@ -335,6 +452,13 @@ func TaskEndText(t Task) string {
 		how = "stopped without saying how (the machine restarted, or it was killed)"
 	case "couldn't start":
 		how = "couldn't start: " + t.Error
+	case "held":
+		waited := t.Took()
+		if t.QueuedAt != nil && t.EndedAt != nil {
+			waited = t.EndedAt.Sub(*t.QueuedAt).Round(time.Minute)
+		}
+		return fmt.Sprintf("The task `%s` (`%s`) never started: the host stayed too busy for it for %s (%s).",
+			t.Name, strings.Join(t.Command, " "), waited, t.Busy)
 	}
 	s := fmt.Sprintf("The task `%s` (`%s`) %s after %s.", t.Name, strings.Join(t.Command, " "), how, t.Took())
 	if last := lastLine(t.Log); last != "" {

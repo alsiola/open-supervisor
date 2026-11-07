@@ -53,6 +53,13 @@ func memory() (total, avail uint64, err error) {
 	return total, min(pages*page, total), nil
 }
 
+// memoryCritical is kern.memorystatus_vm_pressure_level at 4, the level macOS calls critical (1 is normal,
+// 2 warn). It's then that processes log "MallocStackLogging: can't turn off malloc stack logging".
+func memoryCritical() bool {
+	level, err := sysctlUint("kern.memorystatus_vm_pressure_level")
+	return err == nil && level >= 4
+}
+
 // sysctlUint reads an unsigned sysctl of either width: some of these are 32 bits on one macOS and 64 on another.
 func sysctlUint(name string) (uint64, error) {
 	raw, err := unix.SysctlRaw(name)

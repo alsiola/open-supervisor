@@ -5,11 +5,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/alsiola/open-supervisor/internal/adapter"
+	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/core"
+	hostinfo "github.com/alsiola/open-supervisor/internal/host"
 	"github.com/alsiola/open-supervisor/internal/proc"
 	"github.com/alsiola/open-supervisor/internal/store"
 )
@@ -143,5 +146,131 @@ func TestTaskKeepsAFinishedIssuesWorktreeUntilItEnds(t *testing.T) {
 	p.checkTasks()
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {
 		t.Fatalf("the worktree is still there once the task ended: %v", err)
+	}
+}
+
+// busyHost makes the host read as busy for why (or not, for "") to the tasks waiting for it, until the test
+// ends; the setter changes why.
+func busyHost(t *testing.T, why string) func(string) {
+	t.Helper()
+	var now atomic.Value
+	now.Store(why)
+	was := hostBusy
+	hostBusy = func(config.Host) string { return now.Load().(string) }
+	t.Cleanup(func() { hostBusy = was })
+	return func(why string) { now.Store(why) }
+}
+
+func queueTask(t *testing.T, stateDir, dir, name string, queuedAgo time.Duration, command ...string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("tasks run sh here")
+	}
+	file := TaskFile(stateDir, "7", name)
+	at := time.Now().UTC().Add(-queuedAgo)
+	checked := at
+	task := Task{Name: name, Issue: "7", Command: command, Dir: dir, Log: strings.TrimSuffix(file, ".json") + ".log",
+		StartedAt: at, Outcome: "queued", QueuedAt: &at, CheckedAt: &checked, Busy: "load 3.0 per CPU, over 1.5"}
+	if err := SaveTask(file, task); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+func TestQueuedTaskStartsOnceTheHostHasRoom(t *testing.T) {
+	why := "load 3.0 per CPU, over 1.5"
+	set := busyHost(t, why)
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("done") })
+	p.Store.Create("7", "Backfill", "https://fake/issues/7", "s-1")
+	p.Store.Update("7", func(r *store.Record) { r.State = store.Review })
+	dir := t.TempDir()
+	file := queueTask(t, p.StateDir, dir, "fill", time.Minute, "sh", "-c", "echo filled")
+	if !p.tasksRunning("7") || len(TasksWithin(p.StateDir, dir)) != 1 {
+		t.Fatal("a queued task doesn't count as live")
+	}
+	p.checkTasks()
+	if got, _ := ReadTask(file); !got.Queued() || got.CheckedAt.Before(time.Now().Add(-2*time.Minute)) {
+		t.Fatalf("looked again before it was due, or started: %+v", got)
+	}
+	due := func() {
+		got, _ := ReadTask(file)
+		back := time.Now().UTC().Add(-TaskRetryEvery - time.Minute)
+		got.CheckedAt = &back
+		if err := SaveTask(file, got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	due()
+	p.checkTasks()
+	if got, _ := ReadTask(file); !got.Queued() || got.Busy != why {
+		t.Fatalf("started while the host was busy: %+v", got)
+	}
+	set("")
+	due()
+	p.checkTasks()
+	got := ended(t, file)
+	if got.Outcome != "ok" || got.PID == 0 {
+		t.Fatalf("got %+v", got)
+	}
+	p.checkTasks()
+	host.mu.Lock()
+	posted := strings.Join(host.posted, "\n")
+	host.mu.Unlock()
+	if !strings.Contains(posted, "The task `fill`") || !strings.Contains(posted, "filled") {
+		t.Fatalf("posted %q", posted)
+	}
+}
+
+func TestQueuedTaskIsGivenUpAfterTheHoldAndTheAgentPauses(t *testing.T) {
+	busyHost(t, "memory pressure critical")
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("paused") })
+	p.Store.Create("7", "Backfill", "https://fake/issues/7", "s-1")
+	p.Store.Update("7", func(r *store.Record) { r.State = store.Review })
+	file := queueTask(t, p.StateDir, t.TempDir(), "fill", TaskHoldFor+time.Minute, "sh", "-c", "echo filled")
+	p.checkTasks()
+	got, _ := ReadTask(file)
+	if got.Outcome != "held" || got.EndedAt == nil || got.PID != 0 || !got.Reported {
+		t.Fatalf("got %+v", got)
+	}
+	host.mu.Lock()
+	posted := strings.Join(host.posted, "\n")
+	host.mu.Unlock()
+	if !strings.Contains(posted, "never started") || !strings.Contains(posted, "memory pressure critical") {
+		t.Fatalf("posted %q", posted)
+	}
+	waitFor(t, "a turn told to pause", func() bool {
+		for _, s := range agent.turns() {
+			if strings.Contains(s.Body, "never started") && strings.Contains(s.Body, "Pause the work") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func TestStoppingAQueuedTaskDropsIt(t *testing.T) {
+	file := queueTask(t, t.TempDir(), t.TempDir(), "fill", time.Minute, "sh", "-c", "echo filled")
+	got, err := StopTask(file)
+	if err != nil || got.Outcome != "stopped" || got.EndedAt == nil {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if again, _ := ReadTask(file); again.Live() {
+		t.Fatal("still live")
+	}
+}
+
+func TestBusyReason(t *testing.T) {
+	h := config.Host{}
+	if got := busyReason(hostinfo.Sample{CPUs: 4, Load: [3]float64{2, 2, 2}, HasLoad: true, MemTotal: 100, MemAvailable: 50}, h); got != "" {
+		t.Errorf("a quiet host: %q", got)
+	}
+	if got := busyReason(hostinfo.Sample{CPUs: 4, Load: [3]float64{2, 8, 8}, HasLoad: true}, h); !strings.Contains(got, "load 2.0 per CPU") {
+		t.Errorf("a high 5-minute load: %q", got)
+	}
+	if got := busyReason(hostinfo.Sample{CPUs: 4, MemTotal: 100, MemAvailable: 5}, h); !strings.Contains(got, "memory 95%") {
+		t.Errorf("memory: %q", got)
+	}
+	if got := busyReason(hostinfo.Sample{CPUs: 4, MemTotal: 100, MemAvailable: 20, MemoryCritical: true}, h); got != "memory pressure critical" {
+		t.Errorf("critical pressure: %q", got)
 	}
 }

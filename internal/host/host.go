@@ -22,7 +22,10 @@ type Sample struct {
 	HasLoad bool
 	// MemTotal and MemAvailable are bytes; available counts the cache the OS can give back.
 	MemTotal, MemAvailable uint64
-	Disks                  []Disk
+	// MemoryCritical is the OS saying memory pressure is critical (macOS's own reading): it is swapping hard
+	// and asking processes to give memory back, even when MemoryUsedPct looks under a threshold.
+	MemoryCritical bool
+	Disks          []Disk
 }
 
 // Disk is the filesystem a path is on.
@@ -71,6 +74,7 @@ func Read(paths []string) (Sample, error) {
 	} else {
 		errs = append(errs, err)
 	}
+	s.MemoryCritical = memoryCritical()
 	seen := map[string]bool{}
 	for _, p := range paths {
 		total, free, id, err := diskSpace(existing(p))

@@ -69,3 +69,6 @@ func parseMeminfo(sc *bufio.Scanner) (total, avail uint64, err error) {
 	}
 	return kb["MemTotal"] * 1024, a * 1024, nil
 }
+
+// memoryCritical has no reading of its own here: memory over its threshold covers it.
+func memoryCritical() bool { return false }

@@ -1139,14 +1139,14 @@ func (p *Project) nothingToWake(key string) core.AgentState {
 	return core.Help
 }
 
-// tasksRunning reports whether one of the issue's tasks is going, or was just saved and is about to start: its
-// end wakes the issue.
+// tasksRunning reports whether one of the issue's tasks is going, waiting for the host, or was just saved and is
+// about to start: its end wakes the issue.
 func (p *Project) tasksRunning(key string) bool {
 	for _, t := range Tasks(p.StateDir) {
 		if t.Issue != key || t.EndedAt != nil {
 			continue
 		}
-		if t.Running() || t.PID == 0 && time.Since(t.StartedAt) < time.Minute {
+		if t.Live() || t.PID == 0 && time.Since(t.StartedAt) < time.Minute {
 			return true
 		}
 	}
