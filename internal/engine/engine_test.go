@@ -16,6 +16,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/playbooks"
 	"github.com/alsiola/open-supervisor/internal/store"
+	"github.com/alsiola/open-supervisor/internal/worktree"
 )
 
 // ---- fakes ------------------------------------------------------------------------------------------------
@@ -320,6 +321,8 @@ func setup(t *testing.T, script func(spec adapter.TurnSpec, t *fakeTurn) core.Ou
 	cfg.Settings.Agent = "agent"
 	cfg.Settings.Port = 0
 	cfg.Settings.ChecksDebounceSeconds = 0
+	// No disk floor, so a test doesn't hold its issues because the machine running it is short of space.
+	cfg.Settings.Host.Disk = 100
 	cfg.Connections["agent"] = &config.Connection{Type: "fake-agent", Values: adapter.Values{}}
 	cfg.Connections["host"] = &config.Connection{Type: "fake-host", Values: adapter.Values{}}
 	cfg.Projects = []*config.Project{{Name: "demo", Root: root, Repo: &config.Binding{Connection: "host", Values: adapter.Values{}}, Tracker: &config.Binding{Connection: "host", Values: adapter.Values{}}}}
@@ -869,6 +872,24 @@ func TestColdSessionHandsOffToAFreshOne(t *testing.T) {
 	if after := turn(4, "and the header"); after.Session != fresh.Session || !after.Resume {
 		t.Fatalf("a turn after attaching didn't resume: %s %v", after.Session, after.Resume)
 	}
+}
+
+func TestHoldsNewIssuesWhileTheDiskHasNoRoom(t *testing.T) {
+	old := worktree.MaxReserve
+	worktree.MaxReserve = 1 << 62
+	t.Cleanup(func() { worktree.MaxReserve = old }) // after the projects stop, which setup's cleanup does
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("did it") },
+		func(s *config.Settings) { s.Host.Disk = 0.001 })
+	host.issues["1"] = &core.Issue{Key: "1", Title: "First", Open: true}
+	p.reconcile()
+	time.Sleep(100 * time.Millisecond)
+	if p.Store.Get("1") != nil || host.hasLabel("1", "agent-in-progress") {
+		t.Fatal("claimed an issue its worktree has no room for")
+	}
+
+	worktree.MaxReserve = 0
+	p.reconcile()
+	waitFor(t, "issue 1 claimed once the disk has room", func() bool { return state(p, "1") == store.Review })
 }
 
 func TestOptInClaimingAndTheTurnsGitAndAdditions(t *testing.T) {
