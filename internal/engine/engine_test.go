@@ -912,6 +912,41 @@ func TestSigningKeptWhenAskedFor(t *testing.T) {
 	}
 }
 
+// signingRepo is a repo whose connection can sign git in over HTTPS.
+type signingRepo struct{ adapter.Repo }
+
+func (signingRepo) HTTPSFor(remote string) (string, bool) {
+	return "https://example.com/demo.git", remote == "git@example.com:demo.git"
+}
+func (signingRepo) GitCredential(context.Context) (string, string, error) { return "u", "p", nil }
+
+func TestPushesToAnSSHRemoteGoOverHTTPS(t *testing.T) {
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "GIT_CONFIG_") {
+			t.Setenv(k, "")
+		}
+	}
+	s, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") })
+	p.Repo = signingRepo{p.Repo}
+	if env := strings.Join(s.sessionEnv(p, "1"), "\n"); strings.Contains(env, "pushInsteadOf") {
+		t.Fatalf("rewrote pushes with no SSH remote: %s", env)
+	}
+	if out, err := exec.Command("git", "-C", p.Root, "remote", "add", "origin", "git@example.com:demo.git").CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v %s", err, out)
+	}
+	env := strings.Join(s.sessionEnv(p, "1"), "\n")
+	for _, want := range []string{
+		"GIT_CONFIG_KEY_2=url.https://example.com/demo.git.pushInsteadOf\nGIT_CONFIG_VALUE_2=git@example.com:demo.git",
+		"GIT_CONFIG_KEY_3=credential.https://example.com/demo.git.helper\nGIT_CONFIG_VALUE_3=\n",
+		"GIT_CONFIG_KEY_4=credential.https://example.com/demo.git.helper\nGIT_CONFIG_VALUE_4=!'" + s.exe + "' agent git-credential",
+		"GIT_CONFIG_COUNT=5",
+	} {
+		if !strings.Contains(env, want) {
+			t.Fatalf("session env lacks %q:\n%s", want, env)
+		}
+	}
+}
+
 func TestResumedTurnHearsItsWorktreeIsGone(t *testing.T) {
 	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") })
 	host.issues["7"] = &core.Issue{Key: "7", Title: "Seven", Open: true}

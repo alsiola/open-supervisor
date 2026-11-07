@@ -335,14 +335,29 @@ func (s *Supervisor) sessionEnv(p *Project, key string) []string {
 		set("OPEN_SUPERVISOR_WORKTREE", p.WorktreePath(key))
 	}
 	set("OPEN_SUPERVISOR_REMOTE", p.git.RemoteName())
+	// GIT_CONFIG_COUNT adds config to every git the session runs, after any the environment already adds.
+	n, _ := strconv.Atoi(env["GIT_CONFIG_COUNT"])
+	gitConfig := func(k, v string) {
+		set(fmt.Sprintf("GIT_CONFIG_KEY_%d", n), k)
+		set(fmt.Sprintf("GIT_CONFIG_VALUE_%d", n), v)
+		n++
+		set("GIT_CONFIG_COUNT", strconv.Itoa(n))
+	}
 	if !p.git.Sign {
-		// GIT_CONFIG_COUNT adds config to every git the session runs, after any the environment already adds.
-		n, _ := strconv.Atoi(env["GIT_CONFIG_COUNT"])
-		set(fmt.Sprintf("GIT_CONFIG_KEY_%d", n), "commit.gpgsign")
-		set(fmt.Sprintf("GIT_CONFIG_VALUE_%d", n), "false")
-		set(fmt.Sprintf("GIT_CONFIG_KEY_%d", n+1), "tag.gpgsign")
-		set(fmt.Sprintf("GIT_CONFIG_VALUE_%d", n+1), "false")
-		set("GIT_CONFIG_COUNT", strconv.Itoa(n+2))
+		gitConfig("commit.gpgsign", "false")
+		gitConfig("tag.gpgsign", "false")
+	}
+	// An SSH remote needs a key the session may not have (or one behind an agent that waits on a person), so
+	// pushes to it go over HTTPS instead, signed in by the supervisor with the repo's own connection. Fetches
+	// stay on SSH.
+	if signer, ok := p.Repo.(adapter.GitSigner); ok {
+		remote := gitRemote(p.Root, p.git.RemoteName())
+		if https, ok := signer.HTTPSFor(remote); ok {
+			gitConfig("url."+https+".pushInsteadOf", remote)
+			// An empty helper drops any other helper for the URL, so none answers with another account first.
+			gitConfig("credential."+https+".helper", "")
+			gitConfig("credential."+https+".helper", "!"+shellQuote(s.exe)+" agent git-credential")
+		}
 	}
 	out := make([]string, 0, len(order))
 	for _, k := range order {
@@ -1390,6 +1405,9 @@ func gitRemote(root, remote string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// shellQuote quotes s for sh, which git runs a "!" credential helper with.
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // readDotEnv reads KEY=value lines, ignoring comments, `export` and quotes.
 func readDotEnv(file string) map[string]string {

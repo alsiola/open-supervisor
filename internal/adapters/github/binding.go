@@ -43,6 +43,7 @@ var (
 	_ adapter.Reactor     = (*Repo)(nil)
 	_ adapter.Hooked      = (*Tracker)(nil)
 	_ adapter.Hooked      = (*Repo)(nil)
+	_ adapter.GitSigner   = (*Repo)(nil)
 
 	_ adapter.EventHooked = (*Tracker)(nil)
 	_ adapter.EventHooked = (*Repo)(nil)
@@ -464,6 +465,29 @@ func (t *Tracker) HoldMarker(h core.Hold) string {
 // ---- repo -----------------------------------------------------------------------------------------------
 
 func (r *Repo) WebURL() string { return r.c.web + "/" + r.repo }
+
+// HTTPSFor is the repository's HTTPS URL when remote is an SSH URL for it on this connection's host.
+func (r *Repo) HTTPSFor(remote string) (string, bool) {
+	remote = strings.TrimSpace(remote)
+	if !strings.HasPrefix(remote, "git@") && !strings.HasPrefix(remote, "ssh://") {
+		return "", false
+	}
+	v, ok := r.c.DetectRepo(remote)
+	if !ok || !strings.EqualFold(v["repo"], r.repo) {
+		return "", false
+	}
+	return r.c.web + "/" + r.repo + ".git", true
+}
+
+// GitCredential signs git in with the token the connection reads the repository with: the gh login, the token or
+// the app, not the bot, so pushes come from the same account an SSH key would push as.
+func (r *Repo) GitCredential(ctx context.Context) (string, string, error) {
+	tok, err := r.c.read.token(ctx, r.repo)
+	if err != nil {
+		return "", "", err
+	}
+	return "x-access-token", tok, nil
+}
 
 func (r *Repo) DefaultBranch(ctx context.Context) (string, error) {
 	var out struct {
