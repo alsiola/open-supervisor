@@ -50,7 +50,9 @@ type Task struct {
 	CheckedAt *time.Time `json:"checkedAt,omitempty"`
 	Busy      string     `json:"busy,omitempty"`
 	Exit      *int       `json:"exit,omitempty"`
-	Error     string     `json:"error,omitempty"`
+	// Signal names the signal that ended the command ("SIGKILL") when one did; Exit is then -1.
+	Signal string `json:"signal,omitempty"`
+	Error  string `json:"error,omitempty"`
 	// Stop is set by `agent task stop` before it signals the task, so the wrapper records it as stopped
 	// however the command takes the signal.
 	Stop bool `json:"stop,omitempty"`
@@ -276,6 +278,7 @@ func ExecTask(file string) error {
 	if cmd.ProcessState != nil {
 		code := cmd.ProcessState.ExitCode()
 		t.Exit = &code
+		t.Signal = proc.Signal(cmd.ProcessState)
 	}
 	switch {
 	case t.Stop || stopped.Load():
@@ -444,10 +447,7 @@ func TaskEndText(t Task) string {
 	case "ok":
 		how = "finished"
 	case "failed":
-		how = "failed"
-		if t.Exit != nil {
-			how = fmt.Sprintf("failed (exit %d)", *t.Exit)
-		}
+		how = TaskFailure(t)
 	case "lost":
 		how = "stopped without saying how (the machine restarted, or it was killed)"
 	case "couldn't start":
@@ -461,8 +461,38 @@ func TaskEndText(t Task) string {
 			t.Name, strings.Join(t.Command, " "), waited, t.Busy)
 	}
 	s := fmt.Sprintf("The task `%s` (`%s`) %s after %s.", t.Name, strings.Join(t.Command, " "), how, t.Took())
+	if t.Outcome == "failed" && t.Signal != "" {
+		s += " " + signalWhy(t.Signal)
+	}
 	if last := lastLine(t.Log); last != "" {
 		s += fmt.Sprintf(" Its last line: `%s`.", last)
 	}
 	return s + fmt.Sprintf(" Log: `%s`.", t.Log)
+}
+
+// TaskFailure says how a failed task ended in a few words: its exit code, or the signal that killed it.
+func TaskFailure(t Task) string {
+	switch {
+	case t.Signal != "":
+		return fmt.Sprintf("was killed by %s", t.Signal)
+	case t.Exit != nil:
+		return fmt.Sprintf("failed (exit %d)", *t.Exit)
+	}
+	return "failed"
+}
+
+// signalWhy says what most often sends a signal nobody asked for with agent task stop. A task's command runs in
+// its own session, so neither the agent's session ending nor the supervisor restarting signals it.
+func signalWhy(sig string) string {
+	switch sig {
+	case "SIGKILL":
+		return "Nothing can catch SIGKILL, so the log stops without an error. When nobody killed it by hand, it's " +
+			"most often the system freeing memory: macOS ends the largest processes when memory and swap run out, " +
+			"and Linux's OOM killer does the same. Running fewer or smaller tasks at once avoids it."
+	case "SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGTRAP":
+		return "The command crashed itself (Node does this on running out of its heap): look for the reason near the end of the log."
+	case "SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT":
+		return "Something other than agent task stop asked it to stop: a person, another process, or the machine shutting down."
+	}
+	return ""
 }

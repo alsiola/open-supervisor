@@ -3,8 +3,12 @@
 package proc
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 func detach(cmd *exec.Cmd) {
@@ -22,3 +26,14 @@ func terminate(pid int) error { return syscall.Kill(pid, syscall.SIGTERM) }
 func terminateGroup(pid int) error { return syscall.Kill(-pid, syscall.SIGTERM) }
 
 func kill(pid int) error { return syscall.Kill(pid, syscall.SIGKILL) }
+
+func signal(ps *os.ProcessState) string {
+	ws, ok := ps.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		return ""
+	}
+	if name := unix.SignalName(ws.Signal()); name != "" {
+		return name
+	}
+	return fmt.Sprintf("signal %d", int(ws.Signal()))
+}

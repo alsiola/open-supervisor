@@ -75,6 +75,23 @@ func TestTaskRecordsHowItEnded(t *testing.T) {
 	}
 }
 
+func TestTaskKilledBySignalSaysWhich(t *testing.T) {
+	state, dir := t.TempDir(), t.TempDir()
+	// What macOS or Linux does to a task when memory runs out: a SIGKILL nothing can catch, with nothing logged.
+	file, _ := startTask(t, state, dir, "big", "sh", "-c", "echo scored 12 items; kill -KILL $$")
+	got := ended(t, file)
+	if got.Outcome != "failed" || got.Signal != "SIGKILL" {
+		t.Fatalf("ended %+v", got)
+	}
+	text := TaskEndText(got)
+	if !strings.Contains(text, "was killed by SIGKILL") || strings.Contains(text, "exit -1") || !strings.Contains(text, "memory") {
+		t.Fatalf("end text %q", text)
+	}
+	if got := TaskFailure(Task{Outcome: "failed", Exit: new(int), Signal: "SIGTERM"}); got != "was killed by SIGTERM" {
+		t.Fatalf("failure %q", got)
+	}
+}
+
 func TestStoppedTaskStopsWhatItStarted(t *testing.T) {
 	state, dir := t.TempDir(), t.TempDir()
 	file, _ := startTask(t, state, dir, "backfill", "sh", "-c", "echo $$ > child.pid; sleep 60")

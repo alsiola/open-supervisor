@@ -19,8 +19,10 @@ func taskCmd(f *flags) *cobra.Command {
 		Use:   "task",
 		Short: "Run a long command that outlives the turn and the issue (a backfill, a cache fill), and see or stop it",
 		Long: "A task is a command the supervisor runs detached for the issue: it isn't stopped when the turn ends, when the agent's own limit on " +
-			"background commands comes, when the supervisor restarts or when the issue finishes. Its output goes to a log; when it ends, the supervisor " +
-			"says how on the issue and tells the agent at its next turn. A worktree a task runs from stays until the task ends.",
+			"background commands comes, when the agent's session ends or restarts, when the supervisor restarts or when the issue finishes, and it has no time " +
+			"limit. Its output goes to a log; when it ends, the supervisor says how on the issue (the exit code, or the signal that killed " +
+			"it) and tells the agent at its next turn. A task killed by SIGKILL with nothing in its log was most often ended by the system " +
+			"for memory: run fewer or smaller tasks at once. A worktree a task runs from stays until the task ends.",
 	}
 	var dir string
 	start := &cobra.Command{
@@ -104,8 +106,8 @@ func taskCmd(f *flags) *cobra.Command {
 				if t.EndedAt == nil && !t.Live() {
 					state = "lost"
 				}
-				if t.Exit != nil && state == "failed" {
-					state = fmt.Sprintf("failed (exit %d)", *t.Exit)
+				if state == "failed" {
+					state = engine.TaskFailure(t)
 				}
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", t.Issue, t.Name, state, t.Took(), strings.Join(t.Command, " "), t.Log)
 				n++

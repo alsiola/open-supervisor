@@ -42,3 +42,5 @@ func kill(pid int) error {
 	}
 	return p.Kill()
 }
+
+func signal(*os.ProcessState) string { return "" }
