@@ -8,7 +8,7 @@ Write every commit message as a [Conventional Commit](https://www.conventionalco
 - `feat!: …` (a `!` after the type), or a `BREAKING CHANGE: …` footer, makes a major one. Use it when config, the `agent` commands or the playbooks change in a way existing setups have to adapt to.
 - `docs`, `test`, `ci`, `build`, `refactor`, `perf` and `chore` don't release anything on their own.
 
-Add a scope when the change sits in one area: `feat(jobs): …`, `fix(linear): …`. Keep the subject in the imperative, lower case and without a full stop: it becomes the changelog line, so write it for someone reading the release notes.
+Add a scope when the change sits in one area: `feat(jobs): …`, `fix(linear): …`. Keep the subject in the imperative, lower case and without a full stop: it becomes the changelog line, so write it for someone reading the release notes. Keep the whole header (type, scope and subject) under 100 characters, and the PR title with it: name the headline outcome and leave the other parts of the change to the body, not `fix(engine): hold agents at usage limits, retry 5xx, clear worktrees and reword the toolbelt help`.
 
 When a commit both fixes and adds, use the type of the bigger change, or split it into two commits.
 
