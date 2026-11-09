@@ -59,7 +59,7 @@ Write `<project>/` before the number, key or name for another project under the 
 
 The supervisor wakes you with what happened (or that the time came first). Comments and check results still reach you in the meantime, and the wait carries on after those turns. A new `wait` replaces the last one, and `agent wait --cancel <file>` drops it. End the turn with the state the work is in (`review` if the owner has something to look at, else `done`). Don't use this to wait for your own PR's checks, its preview, its merge or a reply: the supervisor already resumes you for those.
 
-When follow-up work shouldn't start yet (wave 2 once wave 1 merges, a check once a job has run), open it now with the same conditions: `agent issue create --title <t> --wait pr:1257:merged <file>`. The supervisor holds it and starts it when the condition is met, so nobody has to remember to open it later.
+When follow-up work shouldn't start yet (wave 2 once wave 1 merges, a check once a job has run), open it now with the same conditions: `agent issue create --title <t> --wait pr:1257:merged <file>`. The supervisor holds it and starts it when the condition is met, so nobody has to remember to open it later. It prints the new issue's key first, so a later step can wait on that one in turn (`--wait issue:<key>:closed`).
 
 ## Long tasks
 

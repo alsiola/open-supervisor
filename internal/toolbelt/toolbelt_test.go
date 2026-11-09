@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/alsiola/open-supervisor/internal/config"
+	"github.com/alsiola/open-supervisor/internal/core"
 	"github.com/alsiola/open-supervisor/internal/engine"
 )
 
@@ -42,6 +43,22 @@ func TestUpstreamIssueIsNeverHeld(t *testing.T) {
 	cmd.SetErr(new(strings.Builder))
 	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "can't hold the issue") {
 		t.Fatalf("err: %v", err)
+	}
+}
+
+// A held issue's key shares the line with its hold, so `| tail -1` or `| head -1` keeps it for the next --wait.
+func TestOpenedLineLeadsWithTheKey(t *testing.T) {
+	issue := core.Issue{Key: "2204", URL: "https://github.com/o/r/issues/2204"}
+	if got := openedLine(issue, false, core.Hold{}); got != "2204 https://github.com/o/r/issues/2204" {
+		t.Errorf("not held: %q", got)
+	}
+	c, err := core.ParseCond("issue:2193:closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := openedLine(issue, true, core.Hold{Conds: []core.Cond{c}})
+	if strings.Contains(got, "\n") || !strings.HasPrefix(got, "2204 https://github.com/o/r/issues/2204 (held: it starts once ") {
+		t.Errorf("held: %q", got)
 	}
 }
 
