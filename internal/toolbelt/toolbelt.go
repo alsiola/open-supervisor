@@ -454,10 +454,7 @@ func issueCmd(f *flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", issue.Key, issue.URL)
-			if held {
-				fmt.Fprintf(cmd.OutOrStdout(), "held: it starts once %s\n", h.Describe())
-			}
+			fmt.Fprintln(cmd.OutOrStdout(), openedLine(issue, held, h))
 			return nil
 		},
 	}
@@ -467,6 +464,17 @@ func issueCmd(f *flags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&upstream, "upstream", false, "act on open-supervisor's own tracker; create prints a link that opens the issue when no project here is open-supervisor")
 	cmd.AddCommand(view, comment, list, create)
 	return cmd
+}
+
+// openedLine is what issue create prints: one line that starts with the new issue's key, so a script that keeps
+// only the first or last line, or the first field, still has the key to name in another issue's --wait. A held
+// issue is opened at once, so it has a key like any other.
+func openedLine(issue core.Issue, held bool, h core.Hold) string {
+	line := issue.Key + " " + issue.URL
+	if held {
+		line += " (held: it starts once " + h.Describe() + ")"
+	}
+	return line
 }
 
 // upstreamIssueURL opens a new open-supervisor issue with the title and body filled in. It is a link for the
