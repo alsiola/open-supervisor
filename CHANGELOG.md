@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.8.0](https://github.com/alsiola/open-supervisor/compare/v1.7.0...v1.8.0) (2026-11-09)
+
+### Features
+
+* **tasks:** start a held task with agent task start --now and drop it with agent task stop ([#113](https://github.com/alsiola/open-supervisor/issues/113)) ([8eb6b48](https://github.com/alsiola/open-supervisor/commit/8eb6b48a54f761692f87e42d9d044278b84d7f80))
+
+### Bug Fixes
+
+* **toolbelt:** print a held issue's key on the same line as its hold ([#112](https://github.com/alsiola/open-supervisor/issues/112)) ([89b27e8](https://github.com/alsiola/open-supervisor/commit/89b27e85782f289bca6f4973f568be399ed8c03c))
+
 ## [1.7.0](https://github.com/alsiola/open-supervisor/compare/v1.6.1...v1.7.0) (2026-11-07)
 
 ### Features
