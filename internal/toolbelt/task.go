@@ -25,12 +25,18 @@ func taskCmd(f *flags) *cobra.Command {
 			"for memory: run fewer or smaller tasks at once. A worktree a task runs from stays until the task ends.",
 	}
 	var dir string
+	var now bool
 	start := &cobra.Command{
-		Use:   "start <name> [--dir <dir>] -- <command> [args...]",
-		Short: "Start a task: runs the command detached from the current directory (or --dir); prints its log",
-		Args:  cobra.MinimumNArgs(2),
+		Use: "start <name> [--dir <dir>] [--now] -- <command> [args...]",
+		Short: "Start a task: runs the command detached from the current directory (or --dir); prints its log. " +
+			"--now starts it even while the host is busy, once a person has said to go on (alone with the name, it starts a waiting or held task)",
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.ArgsLenAtDash() != 1 {
+			again := len(args) == 1 && cmd.ArgsLenAtDash() == -1
+			if again && !now {
+				return errors.New("put the command after --: agent task start backfill -- node backfill.ts (or add --now to start a waiting or held task by its name)")
+			}
+			if !again && cmd.ArgsLenAtDash() != 1 {
 				return errors.New("name the task, then put the command after --: agent task start backfill -- node backfill.ts")
 			}
 			s, err := open(f, true)
@@ -38,40 +44,57 @@ func taskCmd(f *flags) *cobra.Command {
 				return err
 			}
 			name := args[0]
+			file := engine.TaskFile(s.b.StateDir, s.key, name)
+			command := args[1:]
+			if again {
+				old, ok := engine.Waiting(file)
+				if !ok {
+					return fmt.Errorf("%s has no task called %s waiting for the host or held; give its command after --", s.key, name)
+				}
+				command = old.Command
+				if dir == "" {
+					dir = old.Dir
+				}
+			}
 			if dir == "" {
 				dir, _ = os.Getwd()
 			}
 			if dir, err = filepath.Abs(dir); err != nil {
 				return err
 			}
-			file := engine.TaskFile(s.b.StateDir, s.key, name)
 			if old, ok := engine.ReadTask(file); ok && old.Running() {
 				return fmt.Errorf("the task %s is still running (pid %d, %s so far); stop it with agent task stop %s, or pick another name", name, old.PID, old.Took(), name)
-			} else if ok && old.Queued() {
+			} else if ok && old.Queued() && !now {
 				return fmt.Errorf("the task %s is already waiting for the host to have room (%s so far); stop it with agent task stop %s, or pick another name", name, old.Took(), name)
 			}
 			if s.dryRun {
-				fmt.Fprintf(cmd.OutOrStdout(), "dry run: would start %s in %s\n", strings.Join(args[1:], " "), dir)
+				fmt.Fprintf(cmd.OutOrStdout(), "dry run: would start %s in %s\n", strings.Join(command, " "), dir)
 				return nil
 			}
 			self, err := os.Executable()
 			if err != nil {
 				return err
 			}
-			now := time.Now().UTC()
-			t := engine.Task{Name: name, Issue: s.key, Command: args[1:], Dir: dir, Log: strings.TrimSuffix(file, ".json") + ".log",
-				StartedAt: now, Outcome: "running"}
+			at := time.Now().UTC()
+			t := engine.Task{Name: name, Issue: s.key, Command: command, Dir: dir, Log: strings.TrimSuffix(file, ".json") + ".log",
+				StartedAt: at, Outcome: "running"}
 			out := cmd.OutOrStdout()
-			if busy := engine.HostBusy(s.cfg.Settings.Host); busy != "" {
-				t.Outcome, t.QueuedAt, t.CheckedAt, t.Busy = "queued", &now, &now, busy
+			busy := ""
+			if !now {
+				busy = engine.HostBusy(s.cfg.Settings.Host)
+			}
+			if busy != "" {
+				t.Outcome, t.QueuedAt, t.CheckedAt, t.Busy = "queued", &at, &at, busy
 				if err := engine.SaveTask(file, t); err != nil {
 					return err
 				}
 				fmt.Fprintf(out, "registered the task %s, but the host is too busy to start it now (%s)\n", name, busy)
 				fmt.Fprintf(out, "the supervisor looks again every %s and starts it once there is room, then says on the issue when it ends, as for any task\n", span(engine.TaskRetryEvery))
+				fmt.Fprintf(out, "if a person says to go on anyway, agent task start --now %s starts it at once\n", name)
 				fmt.Fprintf(out, "if it still can't start after %s, the supervisor says so on the issue and wakes you. End the turn as you would with the task running; its log will be\n%s\n", span(engine.TaskHoldFor), t.Log)
 				return nil
 			}
+			// Saved as running first, so the supervisor no longer takes a task that was waiting as queued.
 			if err := engine.SaveTask(file, t); err != nil {
 				return err
 			}
@@ -85,6 +108,7 @@ func taskCmd(f *flags) *cobra.Command {
 		},
 	}
 	start.Flags().StringVar(&dir, "dir", "", "where to run it (default the current directory)")
+	start.Flags().BoolVar(&now, "now", false, "start it even while the host is busy: only once a person has said to go on")
 	var all bool
 	list := &cobra.Command{
 		Use:   "list",
@@ -123,7 +147,7 @@ func taskCmd(f *flags) *cobra.Command {
 	list.Flags().BoolVar(&all, "all", false, "every issue's tasks in the project")
 	stop := &cobra.Command{
 		Use:   "stop <name>",
-		Short: "Stop a running task and everything it started, or drop one waiting for the host",
+		Short: "Stop a running task and everything it started, or drop one waiting for the host or held",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := open(f, true)
@@ -137,6 +161,10 @@ func taskCmd(f *flags) *cobra.Command {
 			t, err := engine.StopTask(file)
 			if err != nil {
 				return err
+			}
+			if t.Held() {
+				fmt.Fprintf(cmd.OutOrStdout(), "dropped the held task %s, which never started\n", t.Name)
+				return nil
 			}
 			if t.PID == 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "dropped the task %s before it started\n", t.Name)

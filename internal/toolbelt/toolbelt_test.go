@@ -122,3 +122,13 @@ func TestPREditNeedsAChange(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 }
+
+func TestTaskStartByNameNeedsNow(t *testing.T) {
+	cmd := Command()
+	cmd.SetArgs([]string{"task", "start", "fill"})
+	cmd.SetOut(new(strings.Builder))
+	cmd.SetErr(new(strings.Builder))
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--now") {
+		t.Fatalf("err: %v", err)
+	}
+}

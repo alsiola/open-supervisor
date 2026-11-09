@@ -257,7 +257,8 @@ func TestQueuedTaskIsGivenUpAfterTheHoldAndTheAgentPauses(t *testing.T) {
 	}
 	waitFor(t, "a turn told to pause", func() bool {
 		for _, s := range agent.turns() {
-			if strings.Contains(s.Body, "never started") && strings.Contains(s.Body, "Pause the work") {
+			if strings.Contains(s.Body, "never started") && strings.Contains(s.Body, "Pause the work") &&
+				strings.Contains(s.Body, "agent task start --now fill") && strings.Contains(s.Body, "agent task stop fill") {
 				return true
 			}
 		}
@@ -273,6 +274,41 @@ func TestStoppingAQueuedTaskDropsIt(t *testing.T) {
 	}
 	if again, _ := ReadTask(file); again.Live() {
 		t.Fatal("still live")
+	}
+}
+
+func TestAHeldTaskCanBeStartedAgainOrDropped(t *testing.T) {
+	file := queueTask(t, t.TempDir(), t.TempDir(), "fill", time.Minute, "sh", "-c", "echo filled")
+	if got, ok := Waiting(file); !ok || got.Command[2] != "echo filled" {
+		t.Fatalf("a queued task isn't waiting: %+v", got)
+	}
+	got, _ := ReadTask(file)
+	now := time.Now().UTC()
+	got.Outcome, got.EndedAt, got.Reported = "held", &now, true
+	if err := SaveTask(file, got); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(got.Log, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := Waiting(file); !ok {
+		t.Fatal("a held task can't be started again by its name")
+	}
+	if _, err := StopTask(file); err != nil {
+		t.Fatalf("stopping a held task: %v", err)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatal("the held task's record is still kept")
+	}
+	if _, err := os.Stat(got.Log); !os.IsNotExist(err) {
+		t.Fatal("the held task's log is still kept")
+	}
+	done := TaskFile(t.TempDir(), "7", "done")
+	if err := SaveTask(done, Task{Name: "done", Issue: "7", Outcome: "ok", PID: 12, EndedAt: &now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := Waiting(done); ok {
+		t.Fatal("a task that ran counts as waiting")
 	}
 }
 
