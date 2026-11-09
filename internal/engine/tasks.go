@@ -118,6 +118,16 @@ func (t Task) Running() bool { return t.EndedAt == nil && t.Outcome == "running"
 // Queued reports whether the task is registered and waiting for the host to have room.
 func (t Task) Queued() bool { return t.EndedAt == nil && t.Outcome == "queued" }
 
+// Held reports whether the supervisor gave up on the task because the host stayed too busy to start it.
+func (t Task) Held() bool { return t.Outcome == "held" && t.PID == 0 }
+
+// Waiting is the queued or held task by that name, which `agent task start --now <name>` can start with the
+// command and directory it was registered with.
+func Waiting(file string) (Task, bool) {
+	t, ok := ReadTask(file)
+	return t, ok && (t.Queued() || t.Held())
+}
+
 // Live reports whether the task is going or waiting to start.
 func (t Task) Live() bool { return t.Running() || t.Queued() }
 
@@ -217,11 +227,16 @@ func StartTask(self, file string, t Task) (Task, error) {
 	return t, nil
 }
 
-// StopTask stops a running task and everything it started, marking it stopped first.
+// StopTask stops a running task and everything it started, marking it stopped first. A task waiting for the
+// host is dropped, and so is one the host stayed too busy for (its record and log go, as it never ran).
 func StopTask(file string) (Task, error) {
 	t, ok := ReadTask(file)
 	if !ok {
 		return t, fmt.Errorf("no task at %s", file)
+	}
+	if t.Held() {
+		_ = os.Remove(t.Log)
+		return t, os.Remove(file)
 	}
 	if t.Queued() {
 		now := time.Now().UTC()
@@ -415,8 +430,9 @@ func (p *Project) taskEnded(t Task) {
 	p.logf("%s: %s", p.ref(t.Issue), text)
 	follow := " See how it went in the log, and carry on with what was waiting for it."
 	if t.Outcome == "held" {
-		follow = " Pause the work that needs it for now and end your turn with help: a person has to step in " +
-			"(free up the host, or say to go on) before it is started again."
+		follow = fmt.Sprintf(" Pause the work that needs it for now and end your turn with help: a person has to step in "+
+			"(free up the host, or say to go on) before it is started again. Once they say to go on, start it with "+
+			"`agent task start --now %[1]s`; if they say to leave it, drop it with `agent task stop %[1]s`.", t.Name)
 	}
 	r := p.Store.Get(t.Issue)
 	if !p.hub.settings().DryRun {
