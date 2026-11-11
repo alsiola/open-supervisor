@@ -924,11 +924,25 @@ func (p *Project) runTurn(key string) {
 		p.mu.Unlock()
 		return
 	}
+	// Take the queue only if there is still something to say: the schedule chose the issue from a look at the
+	// store, and a turn that settled in between may have taken what it saw.
 	var events []core.Event
+	idle := false
 	p.Store.Update(key, func(x *store.Record) {
+		// A first turn, a retry and a turn the owner asked for run on an empty queue; nothing else does.
+		if x.State == store.Running || x.State == store.Manual || x.State != store.Queued && x.State != store.Failed && !slices.ContainsFunc(x.Queue, core.Event.Wakes) {
+			idle = true
+			return
+		}
 		events = x.Queue
 		x.Queue = []core.Event{}
 	})
+	if idle {
+		p.mu.Lock()
+		delete(p.running, key)
+		p.mu.Unlock()
+		return
+	}
 	kind := "events"
 	if r.Turns == 0 {
 		kind = "start"
