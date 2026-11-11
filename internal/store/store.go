@@ -94,9 +94,11 @@ type Record struct {
 	// the issue body).
 	RunAt       *time.Time `json:"runAt,omitempty"`
 	ScheduledBy string     `json:"scheduledBy,omitempty"`
-	// Waits, while scheduled: the conditions any one of which wakes the issue, RunAt or not. WaitSince is when
-	// the wait began, so a job run or a turn that ended before it doesn't meet it.
+	// Waits, while scheduled: the conditions any one of which wakes the issue, RunAt or not. With WaitAll it
+	// wakes once every one has been met: each is dropped from Waits as it is, and the last wakes it. WaitSince
+	// is when the wait began, so a job run or a turn that ended before it doesn't meet it.
 	Waits     []core.Cond `json:"waits,omitempty"`
+	WaitAll   bool        `json:"waitAll,omitempty"`
 	WaitSince *time.Time  `json:"waitSince,omitempty"`
 	ClaimedAt time.Time   `json:"claimedAt"`
 	UpdatedAt time.Time   `json:"updatedAt"`

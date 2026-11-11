@@ -400,11 +400,12 @@ func issueCmd(f *flags) *cobra.Command {
 	}
 	var title, until string
 	var waits []string
+	var all bool
 	create := &cobra.Command{
-		Use:   "create --title <title> [--wait <condition>]... [--until <time>] <file|->",
+		Use:   "create --title <title> [--wait <condition>]... [--all] [--until <time>] <file|->",
 		Short: "Open an issue in the project's tracker; --wait and --until hold it until then (with --upstream, open it on open-supervisor's, or print a link that does)",
-		Long: "Open an issue in the project's tracker. With --wait or --until it is held, not worked, until any one of the conditions is met or the time comes; " +
-			"see `agent wait --help` for the conditions.",
+		Long: "Open an issue in the project's tracker. With --wait or --until it is held, not worked, until any one of the conditions is met or the time comes. " +
+			"Several --wait are any of them: add --all to hold it until every one is met. See `agent wait --help` for the conditions.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if strings.TrimSpace(title) == "" {
@@ -413,6 +414,9 @@ func issueCmd(f *flags) *cobra.Command {
 			body, err := readBody(args[0])
 			if err != nil {
 				return err
+			}
+			if all && len(waits) == 0 {
+				return errors.New("--all needs the --wait conditions it applies to")
 			}
 			if upstream && (len(waits) > 0 || until != "") {
 				return errors.New("--upstream can't hold the issue: leave out --wait and --until")
@@ -440,7 +444,7 @@ func issueCmd(f *flags) *cobra.Command {
 			held := len(waits) > 0 || until != ""
 			var h core.Hold
 			if held {
-				if h, err = s.holdFor(ctx, waits, until); err != nil {
+				if h, err = s.holdFor(ctx, waits, all, until); err != nil {
 					return err
 				}
 				body += "\n\n" + s.b.Tracker.HoldMarker(h)
@@ -459,7 +463,8 @@ func issueCmd(f *flags) *cobra.Command {
 		},
 	}
 	create.Flags().StringVar(&title, "title", "", "the issue's title")
-	create.Flags().StringArrayVar(&waits, "wait", nil, "hold the issue until this happens (repeat for any of several)")
+	create.Flags().StringArrayVar(&waits, "wait", nil, "hold the issue until this happens (repeat for any of several; add --all for every one)")
+	create.Flags().BoolVar(&all, "all", false, "hold the issue until every --wait condition is met, not just the first")
 	create.Flags().StringVar(&until, "until", "", "hold the issue until this time (an ISO instant), or at most until then with --wait")
 	cmd.PersistentFlags().BoolVar(&upstream, "upstream", false, "act on open-supervisor's own tracker; create prints a link that opens the issue when no project here is open-supervisor")
 	cmd.AddCommand(view, comment, list, create)

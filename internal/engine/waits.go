@@ -3,8 +3,8 @@ package engine
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/alsiola/open-supervisor/internal/core"
@@ -56,7 +56,7 @@ func waiting(h core.Hold) bool {
 	return len(h.Conds) > 0 || h.Until != nil && h.Until.After(time.Now())
 }
 
-// setHold puts a hold on the record.
+// setHold puts a hold on the record. Reading the same all-of hold again keeps what has been met of it.
 func setHold(x *store.Record, h core.Hold, commentID string) {
 	now := time.Now().UTC()
 	x.RunAt = nil
@@ -64,7 +64,18 @@ func setHold(x *store.Record, h core.Hold, commentID string) {
 		t := *h.Until
 		x.RunAt = &t
 	}
+	if h.All && x.WaitAll && x.ScheduledBy == commentID && x.WaitSince != nil {
+		var left []core.Cond
+		for _, c := range h.Conds {
+			if slices.Contains(x.Waits, c) {
+				left = append(left, c)
+			}
+		}
+		x.Waits = left
+		return
+	}
 	x.Waits = append([]core.Cond(nil), h.Conds...)
+	x.WaitAll = h.All && len(h.Conds) > 1
 	x.WaitSince = &now
 	x.ScheduledBy = commentID
 }
@@ -91,7 +102,9 @@ func (p *Project) noteHold(key, commentID, body string) {
 			return
 		}
 		// The agent dropped its own wait in its turn: nothing to tell it.
-		p.Store.Update(key, func(x *store.Record) { x.RunAt, x.Waits, x.WaitSince, x.ScheduledBy = nil, nil, nil, commentID })
+		p.Store.Update(key, func(x *store.Record) {
+			x.RunAt, x.Waits, x.WaitAll, x.WaitSince, x.ScheduledBy = nil, nil, false, nil, commentID
+		})
 		p.editLabels(key, nil, []string{p.Labels.Scheduled})
 		return
 	}
@@ -142,7 +155,7 @@ func (p *Project) hold(key string) bool {
 
 // holdText is what a record is held for, for the log.
 func holdText(r *store.Record) string {
-	return core.Hold{Conds: r.Waits, Until: r.RunAt}.Describe()
+	return core.Hold{Conds: r.Waits, All: r.WaitAll, Until: r.RunAt}.Describe()
 }
 
 // wakeDue wakes every scheduled issue whose time has come.
@@ -168,25 +181,23 @@ func (p *Project) wakeDue() {
 		switch {
 		case r.Turns == 0 && len(r.Waits) == 0:
 			why = fmt.Sprintf("This issue was scheduled to start at %s, and that time has come.", at)
+		case r.Turns == 0 && r.WaitAll:
+			why = fmt.Sprintf("This issue was held until several things had all happened, or until %s at the latest. That time has come, and these still haven't: %s.", at, condsText(r.Waits, true))
 		case r.Turns == 0:
-			why = fmt.Sprintf("This issue was held, waiting for %s, or until %s at the latest. That time has come, and none of the rest has happened.", condsText(r.Waits), at)
+			why = fmt.Sprintf("This issue was held, waiting for %s, or until %s at the latest. That time has come, and none of the rest has happened.", condsText(r.Waits, false), at)
 		case len(r.Waits) == 0:
 			why = fmt.Sprintf("It is now past %s, the time this issue was rescheduled for. Pick it up where you left off.", at)
+		case r.WaitAll:
+			why = fmt.Sprintf("It is now past %s, the latest you said to wait until, and not all of what you waited for has happened; still to come: %s. Check where it has got to, and wait again if it still matters.", at, condsText(r.Waits, true))
 		default:
-			why = fmt.Sprintf("It is now past %s, the latest you said to wait until, and none of what you waited for has happened: %s. Check where it has got to, and wait again if it still matters.", at, condsText(r.Waits))
+			why = fmt.Sprintf("It is now past %s, the latest you said to wait until, and none of what you waited for has happened: %s. Check where it has got to, and wait again if it still matters.", at, condsText(r.Waits, false))
 		}
 		p.endHold(r.Key, why, "time", "")
 	}
 	p.hub.schedule()
 }
 
-func condsText(cs []core.Cond) string {
-	var parts []string
-	for _, c := range cs {
-		parts = append(parts, c.Describe())
-	}
-	return strings.Join(parts, ", or ")
-}
+func condsText(cs []core.Cond, all bool) string { return core.CondsText(cs, all) }
 
 // meet ends the waits a fact meets, on every issue of the project.
 func (p *Project) meet(f core.Fact) {
@@ -201,7 +212,8 @@ func (p *Project) meet(f core.Fact) {
 	p.hub.schedule()
 }
 
-// met wakes an issue whose wait on c the fact f has met.
+// met wakes an issue whose wait on c the fact f has met. On an all-of wait it only crosses c off, until the
+// last one is met.
 func (p *Project) met(r *store.Record, c core.Cond, f core.Fact) {
 	what := f.Describe(c)
 	var rest []core.Cond
@@ -211,12 +223,23 @@ func (p *Project) met(r *store.Record, c core.Cond, f core.Fact) {
 		}
 	}
 	var why string
-	if r.Turns == 0 {
+	if r.WaitAll && len(rest) > 0 {
+		p.Store.Update(r.Key, func(x *store.Record) { x.Waits = rest })
+		p.logf("%s: %s; still waiting for %s", p.ref(r.Key), what, condsText(rest, true))
+		p.hub.changed()
+		return
+	}
+	switch {
+	case r.WaitAll && r.Turns == 0:
+		why = fmt.Sprintf("This issue was held until all of what it waited for had happened. It has; the last of it: %s.", what)
+	case r.WaitAll:
+		why = fmt.Sprintf("You were waiting for several things to happen. They all have; the last of them: %s.", what)
+	case r.Turns == 0:
 		why = fmt.Sprintf("This issue was held, waiting for %s. That has happened: %s.", c.Describe(), what)
-	} else {
+	default:
 		why = fmt.Sprintf("You were waiting for %s. That has happened: %s.", c.Describe(), what)
 		if len(rest) > 0 {
-			why += fmt.Sprintf(" You were also waiting for %s, which hasn't happened; wait again if you still need it.", condsText(rest))
+			why += fmt.Sprintf(" You were also waiting for %s, which hasn't happened; wait again if you still need it.", condsText(rest, false))
 		}
 	}
 	p.endHold(r.Key, why, "condition", string(c.Kind))
@@ -243,6 +266,7 @@ func (p *Project) endHold(key, why, by, kind string) {
 		}
 		x.RunAt = nil
 		x.Waits = nil
+		x.WaitAll = false
 		x.WaitSince = nil
 		x.Queue = append(x.Queue, core.Event{Type: core.EvWoke, Text: why, At: time.Now().UTC()})
 	})
@@ -277,7 +301,13 @@ func (p *Project) checkWaits(key string) {
 		if f, ok := p.poll(ctx, r, c); ok {
 			p.met(r, c, f)
 			p.hub.schedule()
-			return
+			if !r.WaitAll {
+				return
+			}
+			// Cross it off and read the rest.
+			if r = p.Store.Get(key); r == nil || len(r.Waits) == 0 {
+				return
+			}
 		}
 	}
 }

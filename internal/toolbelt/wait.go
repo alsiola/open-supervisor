@@ -15,7 +15,7 @@ import (
 	"github.com/alsiola/open-supervisor/internal/engine"
 )
 
-const conditionsHelp = `Conditions (any one of them ends the wait):
+const conditionsHelp = `Conditions (any one of them ends the wait; with --all, only every one of them does):
   pr:<n>[:merged|closed]     the PR merges (the default) or closes; one that ends the other way ends the wait too
   issue:<key>[:closed]       the issue closes
   issue:<key>:<state>        the agent on the issue ends a turn in building, review, help, done or finished
@@ -24,11 +24,12 @@ Put <project>/ before the number, key or name for another project under the same
 
 func waitCmd(f *flags) *cobra.Command {
 	var until string
-	var cancelWait bool
+	var cancelWait, all bool
 	cmd := &cobra.Command{
-		Use:   "wait <condition>... [--until <time>] <file|->",
+		Use:   "wait <condition>... [--all] [--until <time>] <file|->",
 		Short: "Park the issue until something happens (a PR merges, an issue closes, an agent reports, a job runs) or a time comes",
-		Long: "Park the issue until any one of the conditions is met, or the --until time comes, whichever is first. The file says what you're waiting for and why; " +
+		Long: "Park the issue until any one of the conditions is met (every one of them, with --all), or the --until time comes, whichever is first. " +
+			"The file says what you're waiting for and why; " +
 			"the supervisor resumes your session with what happened. Comments still reach you meanwhile. A new wait replaces the last; --cancel drops it.\n\n" + conditionsHelp,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -45,17 +46,18 @@ func waitCmd(f *flags) *cobra.Command {
 			defer cancel()
 			var h core.Hold
 			if cancelWait {
-				if len(conds) > 0 || until != "" {
-					return errors.New("--cancel takes no conditions or time")
+				if len(conds) > 0 || until != "" || all {
+					return errors.New("--cancel takes no conditions, --all or time")
 				}
 				h = core.Hold{Cancel: true}
-			} else if h, err = s.holdFor(ctx, conds, until); err != nil {
+			} else if h, err = s.holdFor(ctx, conds, all, until); err != nil {
 				return err
 			}
 			return s.postHold(ctx, cmd, h, reason)
 		},
 	}
 	cmd.Flags().StringVar(&until, "until", "", "the latest time to wait until (an ISO instant with Z or an offset, e.g. 2026-10-25T09:00Z); alone, park until then")
+	cmd.Flags().BoolVar(&all, "all", false, "wait until every condition is met, not just the first")
 	cmd.Flags().BoolVar(&cancelWait, "cancel", false, "drop the wait the issue has")
 	return cmd
 }
@@ -77,7 +79,7 @@ func scheduleCmd(f *flags) *cobra.Command {
 			}
 			ctx, cancel := timeout()
 			defer cancel()
-			h, err := s.holdFor(ctx, nil, args[0])
+			h, err := s.holdFor(ctx, nil, false, args[0])
 			if err != nil {
 				return err
 			}
@@ -105,9 +107,10 @@ func (s *session) postHold(ctx context.Context, cmd *cobra.Command, h core.Hold,
 }
 
 // holdFor reads conditions and a time into a hold, checking each names something that exists and hasn't
-// happened already.
-func (s *session) holdFor(ctx context.Context, conds []string, until string) (core.Hold, error) {
-	var h core.Hold
+// happened already. With all, a condition that has already happened is left out, unless every one has.
+func (s *session) holdFor(ctx context.Context, conds []string, all bool, until string) (core.Hold, error) {
+	h := core.Hold{All: all}
+	var done []string
 	if until != "" {
 		at, err := core.ParseTime(until)
 		if err != nil {
@@ -127,15 +130,28 @@ func (s *session) holdFor(ctx context.Context, conds []string, until string) (co
 			c.Project = ""
 		}
 		if err := s.checkCond(ctx, c); err != nil {
+			var met alreadyMet
+			if all && errors.As(err, &met) {
+				done = append(done, string(met))
+				continue
+			}
 			return h, err
 		}
 		h.Conds = append(h.Conds, c)
+	}
+	if len(done) > 0 && len(h.Conds) == 0 {
+		return h, fmt.Errorf("all of it has happened already (%s): no need to wait, carry on now", strings.Join(done, "; "))
 	}
 	if len(h.Conds) == 0 && h.Until == nil {
 		return h, errors.New("say what to wait for: a condition, --until <time>, or both")
 	}
 	return h, nil
 }
+
+// alreadyMet is the error for a condition that has already been met.
+type alreadyMet string
+
+func (e alreadyMet) Error() string { return string(e) + ": no need to wait, carry on now" }
 
 // checkCond fails a condition that names nothing, or one already met (so the agent carries on instead).
 func (s *session) checkCond(ctx context.Context, c core.Cond) error {
@@ -159,7 +175,7 @@ func (s *session) checkCond(ctx context.Context, c core.Cond) error {
 			return fmt.Errorf("%s: couldn't read PR #%d: %w", c, id, err)
 		}
 		if pr.State != core.PROpen {
-			return fmt.Errorf("PR #%d is already %s: no need to wait, carry on now", id, pr.State)
+			return alreadyMet(fmt.Sprintf("PR #%d is already %s", id, pr.State))
 		}
 	case core.CondIssue:
 		issue, err := b.Tracker.Issue(ctx, c.Ref)
@@ -167,7 +183,7 @@ func (s *session) checkCond(ctx context.Context, c core.Cond) error {
 			return fmt.Errorf("%s: couldn't read issue %s: %w", c, c.Ref, err)
 		}
 		if !issue.Open && c.On == "closed" {
-			return fmt.Errorf("issue %s is already closed: no need to wait, carry on now", c.Ref)
+			return alreadyMet(fmt.Sprintf("issue %s is already closed", c.Ref))
 		}
 	case core.CondJob:
 		names := engine.JobNames(b.Spec)
