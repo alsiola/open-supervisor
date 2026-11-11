@@ -1286,9 +1286,13 @@ func (p *Project) scheduleChecks(sha string) {
 	})
 }
 
+// evaluateChecks reports a commit's checks to its issue once they have all finished, once per head. A failure is
+// reported whatever state the issue is in, since a PR can go red after the agent ended its turn review or done (a
+// re-run, a push it made on a later turn); a pass, or checks that never reported, only while it is building, so a
+// green re-run doesn't wake an agent for nothing.
 func (p *Project) evaluateChecks(sha string) {
 	r := p.Store.BySHA(sha)
-	if r == nil || store.SameSHA(r.ChecksReported, sha) || r.State != store.Building {
+	if r == nil || store.SameSHA(r.ChecksReported, sha) || r.State == store.Finished {
 		return
 	}
 	ctx, cancel := ctxTimeout(time.Minute)
@@ -1307,7 +1311,7 @@ func (p *Project) evaluateChecks(sha string) {
 			x.HeadAt = &now
 		})
 	}
-	if result.Any && !result.Complete {
+	if result.Any && !result.Complete || r.State != store.Building && len(result.Failed) == 0 {
 		return
 	}
 	pr := 0
@@ -1515,7 +1519,7 @@ func (p *Project) maintainOne(r *store.Record, openKeys map[string]bool) {
 		p.Store.Update(r.Key, func(x *store.Record) { x.IssueClosedReported = true })
 		p.enqueue(r.Key, core.Event{Type: core.EvIssue, Action: "closed", At: time.Now().UTC()})
 	}
-	if fresh.State == store.Building && fresh.HeadSHA != "" {
+	if fresh.HeadSHA != "" {
 		p.evaluateChecks(fresh.HeadSHA)
 	}
 	p.markClosed(r.Key, openKeys[r.Key])
