@@ -15,6 +15,7 @@ const (
 	SigPRClosed      SignalType = "pr_closed"      // PR (State says merged or closed)
 	SigPRComment     SignalType = "pr_comment"     // PR, Comment
 	SigChecks        SignalType = "checks"         // SHA: something about the commit's checks changed
+	SigPushed        SignalType = "pushed"         // Key is the branch, SHA its new head: a PR into it may now conflict
 	SigEvent         SignalType = "event"          // Event: the delivery as it came, for jobs run on events
 	SigPing          SignalType = "ping"
 	// SigDeferred: what the delivery means needs the API, which a webhook handler mustn't wait on; the engine

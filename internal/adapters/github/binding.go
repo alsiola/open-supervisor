@@ -180,7 +180,11 @@ type rawPull struct {
 	} `json:"head"`
 	Base struct {
 		Ref string `json:"ref"`
+		SHA string `json:"sha"`
 	} `json:"base"`
+	// Mergeable is null until GitHub has worked it out, and a list of PRs never carries it.
+	Mergeable      *bool  `json:"mergeable"`
+	MergeableState string `json:"mergeable_state"`
 }
 
 func (p rawPull) pr() core.PR {
@@ -191,7 +195,15 @@ func (p rawPull) pr() core.PR {
 	case p.State == "closed":
 		state = core.PRClosed
 	}
-	return core.PR{ID: p.Number, Title: p.Title, State: state, Branch: p.Head.Ref, Base: p.Base.Ref, HeadSHA: p.Head.SHA, Body: p.Body, URL: p.HTMLURL}
+	merge := core.MergeUnknown
+	switch {
+	case state != core.PROpen || p.Mergeable == nil:
+	case p.MergeableState == "dirty" || !*p.Mergeable:
+		merge = core.MergeConflicting
+	default:
+		merge = core.MergeClean
+	}
+	return core.PR{ID: p.Number, Title: p.Title, State: state, Branch: p.Head.Ref, Base: p.Base.Ref, HeadSHA: p.Head.SHA, BaseSHA: p.Base.SHA, Body: p.Body, URL: p.HTMLURL, Mergeable: merge}
 }
 
 // ---- markers --------------------------------------------------------------------------------------------

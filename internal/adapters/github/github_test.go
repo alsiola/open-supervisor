@@ -345,6 +345,7 @@ func TestWebhookSignals(t *testing.T) {
 		{rp, "check_suite", `{"action":"completed",` + repo + `,"check_suite":{"head_sha":"abc"}}`, core.SigChecks, "", "abc", 0, "", ""},
 		{rp, "check_run", `{"action":"completed",` + repo + `,"check_run":{"head_sha":"def"}}`, core.SigChecks, "", "def", 0, "", ""},
 		{rp, "status", `{"sha":"ghi","state":"success",` + repo + `}`, core.SigChecks, "", "ghi", 0, "", ""},
+		{rp, "push", `{"ref":"refs/heads/main","after":"bbb",` + repo + `}`, core.SigPushed, "main", "bbb", 0, "", ""},
 	}
 	for i, c := range cases {
 		sigs := withoutEvents(deliver(t, c.h, c.event, c.body))
@@ -375,6 +376,9 @@ func TestWebhookSignals(t *testing.T) {
 		{rp, "issue_comment", `{"action":"created",` + repo + `,` + issue + `,` + comment + `}`},
 		{tr, "issues", `{"action":"opened","repository":{"full_name":"other/repo"},` + issue + `}`},
 		{rp, "status", `{"sha":"ghi","state":"pending",` + repo + `}`},
+		{tr, "push", `{"ref":"refs/heads/main","after":"bbb",` + repo + `}`},
+		{rp, "push", `{"ref":"refs/tags/v1","after":"bbb",` + repo + `}`},
+		{rp, "push", `{"ref":"refs/heads/gone","after":"0000000000000000000000000000000000000000",` + repo + `}`},
 		{rp, "pull_request_review", `{"action":"submitted",` + repo + `,` + pull + `,"review":{"id":2,"user":{"login":"r"},"body":"","state":"APPROVED"}}`},
 	}
 	for i, c := range none {
@@ -447,11 +451,11 @@ func TestWantEventsSubscribes(t *testing.T) {
 		events = body.Events
 		fmt.Fprint(w, `{"id":1}`)
 	}))
-	rp.WantEvents([]string{"push", "issues", "push", "release"})
+	rp.WantEvents([]string{"deployment", "issues", "push", "deployment", "release"})
 	if _, err := rp.EnsureWebhook(context.Background(), "https://h/x", "s", ""); err != nil {
 		t.Fatal(err)
 	}
-	if want := append(append([]string(nil), hookEvents...), "push", "release"); strings.Join(events, ",") != strings.Join(want, ",") {
+	if want := append(append([]string(nil), hookEvents...), "deployment", "release"); strings.Join(events, ",") != strings.Join(want, ",") {
 		t.Errorf("events = %v", events)
 	}
 }
@@ -610,5 +614,28 @@ func TestEditPR(t *testing.T) {
 	}
 	if pr.ID != 7 || pr.URL != "https://github.com/octo/widgets/pull/7" {
 		t.Errorf("pr %+v", pr)
+	}
+}
+
+func TestMergeableFromThePull(t *testing.T) {
+	yes, no := true, false
+	for _, c := range []struct {
+		state     string
+		mergeable *bool
+		mstate    string
+		want      core.Mergeable
+	}{
+		{"open", nil, "unknown", core.MergeUnknown},
+		{"open", &yes, "clean", core.MergeClean},
+		{"open", &yes, "blocked", core.MergeClean},
+		{"open", &no, "dirty", core.MergeConflicting},
+		{"closed", &no, "dirty", core.MergeUnknown},
+	} {
+		p := rawPull{Number: 1, State: c.state, Mergeable: c.mergeable, MergeableState: c.mstate}
+		p.Base.SHA = "ba5e"
+		got := p.pr()
+		if got.Mergeable != c.want || got.BaseSHA != "ba5e" {
+			t.Errorf("%s %v %s: %+v", c.state, c.mergeable, c.mstate, got)
+		}
 	}
 }

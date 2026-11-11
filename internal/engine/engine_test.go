@@ -1080,3 +1080,81 @@ func TestBuildingWithATaskStaysBuilding(t *testing.T) {
 		}
 	}
 }
+
+func TestConflictReachesTheAgentOncePerHeads(t *testing.T) {
+	const sha = "c0ffee1234567890"
+	n := 0
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		n++
+		if n == 1 {
+			host.mu.Lock()
+			host.prs[42] = core.PR{ID: 42, State: core.PROpen, Branch: "agent/issue-4", Base: "main", HeadSHA: sha, BaseSHA: "ba5e000111", Mergeable: core.MergeConflicting}
+			host.mu.Unlock()
+			return core.Outcome{OK: true, Status: &core.Status{State: core.Building, Summary: "pushed", PRs: []int{42}}}
+		}
+		return review("rebased")
+	})
+	host.issues["4"] = &core.Issue{Key: "4", Title: "Four", Open: true}
+	p.reconcile()
+	waitFor(t, "building", func() bool { r := p.Store.Get("4"); return r != nil && r.State == store.Building && r.HeadSHA == sha })
+	p.checkConflict("4", "", 1)
+	waitFor(t, "conflict turn", func() bool { return len(agent.turns()) >= 2 && state(p, "4") == store.Review })
+	if body := agent.turns()[1].Body; !strings.Contains(body, "PR #42 conflicts with main at ba5e000") || !strings.Contains(body, "Rebase the branch onto main") {
+		t.Fatalf("conflict turn:\n%s", body)
+	}
+	p.checkConflict("4", "", 1)
+	p.checkConflict("4", "release", 1) // a push to another branch doesn't touch a PR into main
+	time.Sleep(100 * time.Millisecond)
+	if n := len(agent.turns()); n != 2 {
+		t.Fatalf("%d turns: the same conflict was reported again", n)
+	}
+	// The base moves on and the PR still conflicts: that's news.
+	host.mu.Lock()
+	pr := host.prs[42]
+	pr.BaseSHA = "ba5e000222"
+	host.prs[42] = pr
+	host.mu.Unlock()
+	old := conflictRetry
+	conflictRetry = time.Millisecond
+	t.Cleanup(func() { conflictRetry = old })
+	p.onSignal(core.Signal{Type: core.SigPushed, Key: "main", SHA: "ba5e000222"})
+	waitFor(t, "second conflict turn", func() bool { return len(agent.turns()) >= 3 })
+	if body := agent.turns()[2].Body; !strings.Contains(body, "conflicts with main at ba5e000") {
+		t.Fatalf("second conflict turn:\n%s", body)
+	}
+}
+
+func TestChecksThatNeverRanSayThePRConflicts(t *testing.T) {
+	const sha = "d1e7d1e71234567890"
+	n := 0
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		n++
+		if n == 1 {
+			host.mu.Lock()
+			host.prs[42] = core.PR{ID: 42, State: core.PROpen, Branch: "agent/issue-4", Base: "main", HeadSHA: sha, BaseSHA: "ba5e", Mergeable: core.MergeConflicting}
+			host.required = []string{"test"}
+			host.mu.Unlock()
+			return core.Outcome{OK: true, Status: &core.Status{State: core.Building, Summary: "pushed", PRs: []int{42}}}
+		}
+		return review("rebased")
+	})
+	host.issues["4"] = &core.Issue{Key: "4", Title: "Four", Open: true}
+	p.reconcile()
+	waitFor(t, "building", func() bool { r := p.Store.Get("4"); return r != nil && r.State == store.Building && r.HeadSHA == sha })
+	p.Store.Update("4", func(x *store.Record) {
+		old := time.Now().Add(-time.Hour)
+		x.HeadAt = &old
+	})
+	p.evaluateChecks(sha)
+	waitFor(t, "missing-checks turn", func() bool { return len(agent.turns()) >= 2 && state(p, "4") == store.Review })
+	body := agent.turns()[1].Body
+	if !strings.Contains(body, "Required checks never reported on PR #42") || !strings.Contains(body, "conflicts with its base branch") || strings.Contains(body, "[skip") {
+		t.Fatalf("checks turn:\n%s", body)
+	}
+	// The checks event said it; a conflict event for the same heads would only repeat it.
+	p.checkConflict("4", "", 1)
+	time.Sleep(100 * time.Millisecond)
+	if n := len(agent.turns()); n != 2 {
+		t.Fatalf("%d turns: the conflict was reported twice", n)
+	}
+}

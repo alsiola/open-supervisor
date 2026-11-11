@@ -641,7 +641,7 @@ func prCmd(f *flags) *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "#%d %s\n%s\nstate: %s · %s → %s · head %s\n\n%s\n", pr.ID, pr.Title, pr.URL, pr.State, pr.Branch, pr.Base, pr.HeadSHA, strings.TrimSpace(pr.Body))
+			fmt.Fprintf(out, "#%d %s\n%s\nstate: %s%s · %s → %s · head %s\n\n%s\n", pr.ID, pr.Title, pr.URL, pr.State, mergeNote(pr), pr.Branch, pr.Base, pr.HeadSHA, strings.TrimSpace(pr.Body))
 			comments, err := s.b.Repo.PRComments(ctx, id, time.Time{})
 			if err != nil {
 				return err
@@ -840,6 +840,12 @@ func checksCmd(f *flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if len(args) == 0 {
+				// A list of PRs doesn't say whether one conflicts; the PR itself does.
+				if pr, err = s.b.Repo.PR(ctx, pr.ID); err != nil {
+					return err
+				}
+			}
 			c, err := s.b.Repo.Checks(ctx, pr.HeadSHA)
 			if err != nil {
 				return err
@@ -864,7 +870,13 @@ func checksCmd(f *flags) *cobra.Command {
 			case c.Complete || !c.Any:
 				state = "waiting on required checks"
 			}
+			if pr.Mergeable == core.MergeConflicting && len(c.Failed) == 0 && state != "passed" {
+				state += " (the PR conflicts with its base branch, so its workflows don't run)"
+			}
 			fmt.Fprintf(out, "PR #%d at %s: %s\n", pr.ID, pr.HeadSHA, state)
+			if pr.State == core.PROpen {
+				fmt.Fprintf(out, "merge: %s\n", pr.Mergeable.Describe())
+			}
 			for _, r := range c.Runs {
 				fmt.Fprintf(out, "  %-8s %s %s\n", r.State, r.Name, r.URL)
 			}
@@ -877,6 +889,14 @@ func checksCmd(f *flags) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// mergeNote is whether an open PR conflicts with its base, for the line that gives its state.
+func mergeNote(pr core.PR) string {
+	if pr.State != core.PROpen {
+		return ""
+	}
+	return " (" + pr.Mergeable.Describe() + ")"
 }
 
 // attachers are the project's services that hold files for comments: the tracker first, as comments go there.

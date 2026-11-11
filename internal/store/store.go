@@ -71,6 +71,9 @@ type Record struct {
 	HeadAt         *time.Time `json:"headAt,omitempty"`
 	ChecksReported string     `json:"checksReported,omitempty"`
 	Preview        string     `json:"preview,omitempty"`
+	// ConflictReported is the PR, head and base heads last reported conflicting ("12 <head> <base>"), so the
+	// agent hears about each conflict once.
+	ConflictReported string `json:"conflictReported,omitempty"`
 	// Touches is what the agent says the work changes, for the in-flight list other agents read.
 	Touches string `json:"touches,omitempty"`
 	// Handoff is the last turn's note to a fresh session, for when the next turn would resume a cold one.
