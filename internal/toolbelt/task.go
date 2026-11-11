@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/alsiola/open-supervisor/internal/config"
 	"github.com/alsiola/open-supervisor/internal/engine"
 )
 
@@ -79,9 +80,22 @@ func taskCmd(f *flags) *cobra.Command {
 			t := engine.Task{Name: name, Issue: s.key, Command: command, Dir: dir, Log: strings.TrimSuffix(file, ".json") + ".log",
 				StartedAt: at, Outcome: "running"}
 			out := cmd.OutOrStdout()
-			busy := ""
+			busy, first := "", ""
 			if !now {
-				busy = engine.HostBusy(s.cfg.Settings.Host)
+				if first = engine.JobFirst(config.StateDir()); first == "" {
+					busy = engine.HostBusy(s.cfg.Settings.Host)
+				}
+			}
+			if first != "" {
+				t.Outcome, t.QueuedAt, t.CheckedAt, t.Busy, t.First = "queued", &at, &at, first, true
+				if err := engine.SaveTask(file, t); err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "registered the task %s, but a job that comes first on the host holds new tasks back now (%s)\n", name, first)
+				fmt.Fprintf(out, "the supervisor starts it once that job ends (if the host has room then), then says on the issue when it ends, as for any task\n")
+				fmt.Fprintf(out, "if a person says to go on anyway, agent task start --now %s starts it at once\n", name)
+				fmt.Fprintf(out, "end the turn as you would with the task running; its log will be\n%s\n", t.Log)
+				return nil
 			}
 			if busy != "" {
 				t.Outcome, t.QueuedAt, t.CheckedAt, t.Busy = "queued", &at, &at, busy

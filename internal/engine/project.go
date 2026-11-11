@@ -50,6 +50,8 @@ type hub interface {
 	// jobsChanged rebuilds the hooks after the events or webhooks a project's jobs take changed, and points the
 	// project's again.
 	jobsChanged(p *Project)
+	// JobFirst says why new turns and tasks wait for a job that comes first, or "" when they don't.
+	JobFirst() string
 }
 
 // Project is one project under the supervisor: it claims the issues its source routes to it, gives each a

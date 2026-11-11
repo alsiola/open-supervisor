@@ -26,6 +26,11 @@ import (
 // ({slot, outcome, finishedAt}) when it ends; an outcome of "busy" is tried again in ten minutes, and a
 // delivery while it runs starts nothing.
 //
+// A job with Priority "high" comes first on the host: while it runs, the supervisor starts no new agent turns
+// and no new agent tasks (those going carry on), and it runs at the supervisor's own priority rather than the
+// lower one other jobs and tasks get. A timed one can ask for the host to be quiet already when it starts:
+// LeadMinutes before each of its times, new turns and tasks wait too.
+//
 // Each run's output, start, length, exit code and trigger are kept: the last KeepRuns (30 when left out) under
 // the project's state folder, in job-runs/<job>/, and in the TUI (J).
 type Job struct {
@@ -40,6 +45,8 @@ type Job struct {
 	Checkout       string      `yaml:"checkout,omitempty" json:"checkout,omitempty"`
 	KeepRuns       int         `yaml:"keepRuns,omitempty" json:"keepRuns,omitempty"`
 	On             *JobTrigger `yaml:"on,omitempty" json:"on,omitempty"`
+	Priority       string      `yaml:"priority,omitempty" json:"priority,omitempty"`
+	LeadMinutes    int         `yaml:"leadMinutes,omitempty" json:"leadMinutes,omitempty"`
 }
 
 // JobTrigger runs a job on webhooks, which arrive through the tunnel. Events are the code host's or tracker's
@@ -60,6 +67,12 @@ type JobTrigger struct {
 // CheckoutFresh runs a job in a new worktree for each run.
 const CheckoutFresh = "fresh"
 
+// PriorityHigh is the Priority of a job that comes first on the host.
+const PriorityHigh = "high"
+
+// First reports whether the job comes first on the host: no new turns or tasks start while it runs.
+func (j Job) First() bool { return j.Priority == PriorityHigh }
+
 // Timed reports whether the job runs at set times.
 func (j Job) Timed() bool { return len(j.At) > 0 || j.Cron != "" }
 
@@ -75,6 +88,35 @@ func (j Job) Location() (*time.Location, error) {
 		return time.UTC, nil
 	}
 	return time.LoadLocation(j.TimeZone)
+}
+
+// NextSlot is the first of a timed job's times after from; zero for a job that isn't timed.
+func (j Job) NextSlot(from time.Time) time.Time {
+	if j.Cron != "" {
+		sched, err := j.Schedule()
+		loc, err2 := j.Location()
+		if err != nil || err2 != nil {
+			return time.Time{}
+		}
+		return sched.Next(from.In(loc))
+	}
+	var next time.Time
+	from = from.UTC()
+	for _, at := range j.At {
+		h, m, _ := strings.Cut(at, ":")
+		hh, err1 := strconv.Atoi(h)
+		mm, err2 := strconv.Atoi(m)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		for ahead := 0; ahead <= 1; ahead++ {
+			t := time.Date(from.Year(), from.Month(), from.Day()+ahead, hh, mm, 0, 0, time.UTC)
+			if t.After(from) && (next.IsZero() || t.Before(next)) {
+				next = t
+			}
+		}
+	}
+	return next
 }
 
 // Schedule is the job's Cron, parsed.
@@ -126,6 +168,15 @@ func (j Job) Validate() []string {
 	}
 	if j.Fresh() && j.Detached() {
 		errs = append(errs, name+": a fresh checkout is for runs the supervisor waits for, not ones with status")
+	}
+	if j.Priority != "" && !j.First() {
+		errs = append(errs, fmt.Sprintf("%s: priority %q: high, or leave it out", name, j.Priority))
+	}
+	if j.LeadMinutes < 0 {
+		errs = append(errs, name+": leadMinutes can't be negative")
+	}
+	if j.LeadMinutes > 0 && (!j.First() || !j.Timed()) {
+		errs = append(errs, name+": leadMinutes is for at or cron jobs with priority high")
 	}
 	if j.On != nil {
 		if len(j.On.Events) == 0 && !j.On.Webhook {

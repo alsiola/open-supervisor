@@ -39,6 +39,9 @@ func (m *model) header() []string {
 	} else if n > 1 {
 		parts = append(parts, yellowS.Render(fmt.Sprintf("%d problems", n)))
 	}
+	if why := sup.JobFirst(); why != "" {
+		parts = append(parts, yellowS.Render("new turns wait: "+why))
+	}
 	for _, a := range sup.HostAlerts() {
 		parts = append(parts, redS.Render(a))
 	}

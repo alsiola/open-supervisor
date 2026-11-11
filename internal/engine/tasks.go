@@ -49,7 +49,10 @@ type Task struct {
 	QueuedAt  *time.Time `json:"queuedAt,omitempty"`
 	CheckedAt *time.Time `json:"checkedAt,omitempty"`
 	Busy      string     `json:"busy,omitempty"`
-	Exit      *int       `json:"exit,omitempty"`
+	// First is set while the task waits for a job that comes first (see config.Job) rather than for the host:
+	// it starts as soon as the job ends, and the time it waited doesn't count towards giving up on it.
+	First bool `json:"first,omitempty"`
+	Exit  *int `json:"exit,omitempty"`
 	// Signal names the signal that ended the command ("SIGKILL") when one did; Exit is then -1.
 	Signal string `json:"signal,omitempty"`
 	Error  string `json:"error,omitempty"`
@@ -340,7 +343,11 @@ func (p *Project) checkTasks() {
 			continue
 		}
 		if t.Queued() {
-			if t.CheckedAt != nil && time.Since(*t.CheckedAt) < TaskRetryEvery {
+			if why := p.hub.JobFirst(); why != "" {
+				p.waitFirst(file, t, why)
+				continue
+			}
+			if !t.First && t.CheckedAt != nil && time.Since(*t.CheckedAt) < TaskRetryEvery {
 				continue
 			}
 			if !looked {
@@ -383,6 +390,20 @@ func (p *Project) checkTasks() {
 	}
 }
 
+// waitFirst keeps a task waiting while a job comes first. Its wait for the host starts again once the job
+// ends, so a long priority run doesn't use up the time before the supervisor gives up on it.
+func (p *Project) waitFirst(file string, t Task, why string) {
+	// agent task stop may have ended it since the read.
+	if again, ok := ReadTask(file); !ok || !again.Queued() {
+		return
+	}
+	now := time.Now().UTC()
+	t.QueuedAt, t.CheckedAt, t.Busy, t.First = &now, &now, why, true
+	if err := SaveTask(file, t); err != nil {
+		p.logf("%s: couldn't keep the %s task's record: %v", p.ref(t.Issue), t.Name, err)
+	}
+}
+
 // startQueued looks again at a task waiting for the host: it starts it when the host has room (busy is ""),
 // and gives up on it once it has waited TaskHoldFor. It reports whether the task has ended without starting,
 // to be told on the issue.
@@ -393,6 +414,7 @@ func (p *Project) startQueued(file string, t Task, busy string) (Task, bool) {
 		queued = now.Sub(*t.QueuedAt)
 	}
 	t.CheckedAt = &now
+	t.First = false
 	if busy != "" {
 		t.Busy = busy
 		if queued >= TaskHoldFor {
