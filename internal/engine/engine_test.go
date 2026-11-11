@@ -518,11 +518,19 @@ func TestCommentsBecomeTheNextTurnsEvents(t *testing.T) {
 		{ID: "c3", Kind: core.OnIssue, Author: "ci", Body: "beep", At: now, Bot: true},
 		// Agents post as the bot app when there is one, so another agent's comment is a bot's too.
 		{ID: "c4", Kind: core.OnIssue, Author: "agent-app[bot]", Body: "I'm doing the header", At: now, Bot: true, Agent: &core.AgentMark{From: "9"}},
+		// A reviewer app's review and inline comments count; so does any comment from a bot the repo lists.
+		{ID: "review-c5", Kind: core.OnReview, Author: "reviewer[bot]", Body: "P1: nil map", At: now, Bot: true, ReviewState: "CHANGES_REQUESTED"},
+		{ID: "c6", Kind: core.OnInline, Author: "reviewer[bot]", Body: "this panics", At: now, Bot: true, Path: "a.go", Line: 3},
+		{ID: "c7", Kind: core.OnIssue, Author: "Triage[bot]", Body: "needs a repro", At: now, Bot: true},
+	}
+	if err := os.WriteFile(filepath.Join(p.Root, RepoFile), []byte("bots: [triage]\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	p.reconcile()
 	waitFor(t, "second turn", func() bool { return len(agent.turns()) == 2 && state(p, "5") == store.Review })
 	body := agent.turns()[1].Body
-	if agent.turns()[1].Args != "5 events" || !strings.Contains(body, "please change the colour") || !strings.Contains(body, "I'm doing the header") {
+	if agent.turns()[1].Args != "5 events" || !strings.Contains(body, "please change the colour") || !strings.Contains(body, "I'm doing the header") ||
+		!strings.Contains(body, "P1: nil map") || !strings.Contains(body, "this panics") || !strings.Contains(body, "needs a repro") {
 		t.Fatalf("second turn body:\n%s", body)
 	}
 	if strings.Contains(body, "my own note") || strings.Contains(body, "beep") {
