@@ -407,7 +407,10 @@ func TestSlowIssueDoesNotStarveTheOthersComments(t *testing.T) {
 	host.issues["1"] = &core.Issue{Key: "1", Title: "One", Open: true}
 	p.reconcile()
 	waitFor(t, "issue 1's turn", func() bool { return state(p, "1") == store.Review })
+	// Issue 1's turn may still be settling its labels on the host.
+	host.mu.Lock()
 	host.issues["2"] = &core.Issue{Key: "2", Title: "Two", Open: true}
+	host.mu.Unlock()
 	p.reconcile()
 	waitFor(t, "issue 2's turn", func() bool { return state(p, "2") == store.Review })
 	time.Sleep(50 * time.Millisecond) // let the turns finish settling
@@ -512,6 +515,7 @@ func TestCommentsBecomeTheNextTurnsEvents(t *testing.T) {
 	waitFor(t, "first turn", func() bool { return state(p, "5") == store.Review })
 	time.Sleep(50 * time.Millisecond) // let the first turn finish settling
 	now := time.Now().UTC().Add(time.Second)
+	host.mu.Lock()
 	host.comments["5"] = []core.Comment{
 		{ID: "c1", Kind: core.OnIssue, Author: "owner", Body: "please change the colour", At: now},
 		{ID: "c2", Kind: core.OnIssue, Author: "me", Body: "my own note", At: now, Agent: &core.AgentMark{From: "5"}},
@@ -523,6 +527,7 @@ func TestCommentsBecomeTheNextTurnsEvents(t *testing.T) {
 		{ID: "c6", Kind: core.OnInline, Author: "reviewer[bot]", Body: "this panics", At: now, Bot: true, Path: "a.go", Line: 3},
 		{ID: "c7", Kind: core.OnIssue, Author: "Triage[bot]", Body: "needs a repro", At: now, Bot: true},
 	}
+	host.mu.Unlock()
 	if err := os.WriteFile(filepath.Join(p.Root, RepoFile), []byte("bots: [triage]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
