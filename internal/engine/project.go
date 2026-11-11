@@ -413,8 +413,8 @@ func (p *Project) reportPRClosed(key string, pr int, merged bool) {
 
 // ---- comments -------------------------------------------------------------------------------------------
 
-// ingest hands a comment to the agent unless it is a bot's, the agent's own or already seen, and
-// acknowledges it where the service allows.
+// ingest hands a comment to the agent unless it is a bot's chatter (see botCounts), the agent's own or
+// already seen, and acknowledges it where the service allows.
 func (p *Project) ingest(r *store.Record, c core.Comment) bool {
 	return p.ingestOpt(r, c, true)
 }
@@ -429,7 +429,7 @@ func (p *Project) ingestOpt(r *store.Record, c core.Comment, schedule bool) bool
 		if c.Agent.From == "" || c.Agent.From == r.Key {
 			return false
 		}
-	} else if c.Bot {
+	} else if c.Bot && !p.botCounts(c) {
 		return false
 	}
 	fresh := false
