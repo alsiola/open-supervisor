@@ -787,6 +787,44 @@ func TestMissingRequiredCheckIsNotAPass(t *testing.T) {
 	}
 }
 
+func TestFailedChecksReachAnIssueInReview(t *testing.T) {
+	const sha = "c0ffee1234567890"
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		host.mu.Lock()
+		host.prs[42] = core.PR{ID: 42, State: core.PROpen, Branch: "agent/issue-4", Base: "main", HeadSHA: sha}
+		host.mu.Unlock()
+		return core.Outcome{OK: true, Status: &core.Status{State: core.Review, Summary: "reported", PRs: []int{42}}}
+	})
+	host.issues["4"] = &core.Issue{Key: "4", Title: "Four", Open: true}
+	p.reconcile()
+	waitFor(t, "review", func() bool { return state(p, "4") == store.Review })
+	p.reconcile()
+	waitFor(t, "head", func() bool { r := p.Store.Get("4"); return r != nil && r.HeadSHA == sha })
+
+	// A passing run doesn't wake an agent that isn't building.
+	host.mu.Lock()
+	host.checks[sha] = core.Checks{Complete: true, Any: true, Runs: []core.CheckRun{{Name: "test", State: "success"}}}
+	host.mu.Unlock()
+	p.evaluateChecks(sha)
+	time.Sleep(100 * time.Millisecond)
+	if n := len(agent.turns()); n != 1 {
+		t.Fatalf("%d turns: a pass shouldn't wake an issue in review", n)
+	}
+
+	// A re-run that fails does, and the reconcile finds it without a webhook.
+	host.mu.Lock()
+	host.checks[sha] = core.Checks{Complete: true, Any: true, Failed: []string{"test"}, Runs: []core.CheckRun{{Name: "test", State: "failure"}}}
+	host.mu.Unlock()
+	p.reconcile()
+	waitFor(t, "failed-checks turn", func() bool { return len(agent.turns()) >= 2 })
+	if body := agent.turns()[1].Body; !strings.Contains(body, "PR #42") || strings.Contains(body, "Checks passed") {
+		t.Fatalf("checks turn:\n%s", body)
+	}
+	if r := p.Store.Get("4"); !store.SameSHA(r.ChecksReported, sha) {
+		t.Fatalf("ChecksReported = %q, want the head", r.ChecksReported)
+	}
+}
+
 func TestConcurrencyCap(t *testing.T) {
 	release := make(chan struct{})
 	s, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
