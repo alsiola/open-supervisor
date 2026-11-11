@@ -59,3 +59,18 @@ func TestEventSame(t *testing.T) {
 		t.Fatal("Same on comments")
 	}
 }
+
+func TestRenderConflict(t *testing.T) {
+	got := Render([]Event{
+		{Type: EvConflict, PR: 7, SHA: "abcdef123", Base: "main", BaseSHA: "1234567890"},
+		{Type: EvChecks, PR: 7, SHA: "abcdef123", None: true, Conflicts: true, Base: "main"},
+	})
+	for _, want := range []string{"### PR #7 conflicts with main at 1234567", "Rebase the branch onto main", "### No checks ran on PR #7 at abcdef1\nThe PR conflicts with its base branch"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "The repo has no CI") {
+		t.Errorf("a conflicting PR's missing checks read as a repo with no CI:\n%s", got)
+	}
+}

@@ -135,8 +135,32 @@ type PR struct {
 	Branch  string  `json:"branch"`
 	Base    string  `json:"base,omitempty"`
 	HeadSHA string  `json:"headSha"`
+	BaseSHA string  `json:"baseSha,omitempty"` // the base branch's head the host last merged the PR against
 	Body    string  `json:"body,omitempty"`
 	URL     string  `json:"url,omitempty"`
+	// Mergeable is whether the PR merges cleanly into its base. Hosts work it out lazily, and a list of PRs
+	// doesn't carry it, so it is often unknown.
+	Mergeable Mergeable `json:"mergeable,omitempty"`
+}
+
+// Mergeable is whether a PR merges cleanly into its base branch.
+type Mergeable string
+
+const (
+	MergeUnknown     Mergeable = ""            // not worked out yet, or the host doesn't say
+	MergeClean       Mergeable = "clean"       // merges without conflicts
+	MergeConflicting Mergeable = "conflicting" // conflicts with the base branch
+)
+
+// Describe is the state in a few words, for an agent reading a PR.
+func (m Mergeable) Describe() string {
+	switch m {
+	case MergeClean:
+		return "no conflicts with the base branch"
+	case MergeConflicting:
+		return "conflicts with the base branch: rebase it"
+	}
+	return "conflicts unknown"
 }
 
 // CheckRun is one check or commit status on a commit.

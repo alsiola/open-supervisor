@@ -15,7 +15,8 @@ import (
 )
 
 // hookEvents are what the supervisor's hook subscribes to.
-var hookEvents = []string{"issues", "issue_comment", "pull_request", "pull_request_review", "pull_request_review_comment", "check_suite", "check_run", "status"}
+// A push says the base branch moved, which can leave a PR into it conflicting.
+var hookEvents = []string{"issues", "issue_comment", "pull_request", "pull_request_review", "pull_request_review_comment", "check_suite", "check_run", "status", "push"}
 
 // WantEvents adds events for jobs to the hook's subscription.
 func (b *binding) WantEvents(names []string) {
@@ -249,6 +250,10 @@ func (r *Repo) signals(event string, p *payload) []core.Signal {
 	case "status":
 		if p.SHA != "" && p.State != "pending" {
 			return []core.Signal{{Type: core.SigChecks, SHA: p.SHA}}
+		}
+	case "push":
+		if branch, ok := strings.CutPrefix(p.Ref, "refs/heads/"); ok && p.After != "" && strings.Trim(p.After, "0") != "" {
+			return []core.Signal{{Type: core.SigPushed, Key: branch, SHA: p.After}}
 		}
 	}
 	return nil

@@ -343,6 +343,12 @@ func (p *Project) onSignal(s core.Signal) {
 			})
 			p.scheduleChecks(s.PR.HeadSHA)
 		}
+		key := r.Key
+		go p.checkConflict(key, "", conflictTries)
+	case core.SigPushed:
+		if s.Key != "" {
+			p.basePushed(s.Key)
+		}
 	case core.SigPRClosed:
 		if s.PR == nil {
 			return
@@ -918,11 +924,25 @@ func (p *Project) runTurn(key string) {
 		p.mu.Unlock()
 		return
 	}
+	// Take the queue only if there is still something to say: the schedule chose the issue from a look at the
+	// store, and a turn that settled in between may have taken what it saw.
 	var events []core.Event
+	idle := false
 	p.Store.Update(key, func(x *store.Record) {
+		// A first turn, a retry and a turn the owner asked for run on an empty queue; nothing else does.
+		if x.State == store.Running || x.State == store.Manual || x.State != store.Queued && x.State != store.Failed && !slices.ContainsFunc(x.Queue, core.Event.Wakes) {
+			idle = true
+			return
+		}
 		events = x.Queue
 		x.Queue = []core.Event{}
 	})
+	if idle {
+		p.mu.Lock()
+		delete(p.running, key)
+		p.mu.Unlock()
+		return
+	}
 	kind := "events"
 	if r.Turns == 0 {
 		kind = "start"
@@ -1318,7 +1338,14 @@ func (p *Project) evaluateChecks(sha string) {
 	if len(r.PRs) > 0 {
 		pr = r.PRs[len(r.PRs)-1]
 	}
-	required, err := p.requiredChecks(ctx, pr)
+	var view core.PR
+	if pr != 0 {
+		if view, err = p.Repo.PR(ctx, pr); err != nil {
+			p.callFailed(err, "%s: couldn't read PR #%d", p.ref(r.Key), pr)
+			return
+		}
+	}
+	required, err := p.requiredChecks(ctx, view)
 	if err != nil {
 		p.callFailed(err, "%s: couldn't read the checks PR #%d requires", p.ref(r.Key), pr)
 		return
@@ -1331,6 +1358,13 @@ func (p *Project) evaluateChecks(sha string) {
 		return
 	}
 	none := !result.Any && len(missing) == 0
+	// A PR that can't merge gets no workflows run: say that's why, rather than leave the agent to guess.
+	conflicts := len(result.Failed) == 0 && (none || len(missing) > 0) && view.Mergeable == core.MergeConflicting
+	if conflicts {
+		// This event says it; the conflict event would only repeat it.
+		mark := fmt.Sprintf("%d %s %s", view.ID, view.HeadSHA, view.BaseSHA)
+		p.Store.Update(r.Key, func(x *store.Record) { x.ConflictReported = mark })
+	}
 	sha = r.HeadSHA
 	p.Store.Update(r.Key, func(x *store.Record) {
 		x.ChecksReported = sha
@@ -1338,18 +1372,14 @@ func (p *Project) evaluateChecks(sha string) {
 			x.Preview = result.Preview
 		}
 	})
-	p.enqueue(r.Key, core.Event{Type: core.EvChecks, PR: pr, SHA: sha, Passed: len(result.Failed) == 0 && len(missing) == 0, Failed: result.Failed, Missing: missing, Preview: result.Preview, None: none, At: time.Now().UTC()})
+	p.enqueue(r.Key, core.Event{Type: core.EvChecks, PR: pr, SHA: sha, Passed: len(result.Failed) == 0 && len(missing) == 0 && !conflicts, Failed: result.Failed, Missing: missing, Preview: result.Preview, None: none, Conflicts: conflicts, Base: view.Base, At: time.Now().UTC()})
 }
 
 // requiredChecks are the checks the PR's base branch requires, when the code host has such a thing.
-func (p *Project) requiredChecks(ctx context.Context, id int) ([]string, error) {
+func (p *Project) requiredChecks(ctx context.Context, pr core.PR) ([]string, error) {
 	rc, ok := p.Repo.(adapter.RequiredChecker)
-	if !ok || id == 0 {
+	if !ok || pr.Base == "" {
 		return nil, nil
-	}
-	pr, err := p.Repo.PR(ctx, id)
-	if err != nil || pr.Base == "" {
-		return nil, err
 	}
 	return rc.RequiredChecks(ctx, pr.Base)
 }
@@ -1522,6 +1552,8 @@ func (p *Project) maintainOne(r *store.Record, openKeys map[string]bool) {
 	if fresh.HeadSHA != "" {
 		p.evaluateChecks(fresh.HeadSHA)
 	}
+	// A push to the base branch can leave the PR conflicting, and a webhook may have missed it.
+	p.checkConflict(r.Key, "", conflictTries)
 	p.markClosed(r.Key, openKeys[r.Key])
 }
 
