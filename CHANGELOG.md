@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.9.0](https://github.com/alsiola/open-supervisor/compare/v1.8.0...v1.9.0) (2026-11-11)
+
+### Features
+
+* **engine:** tell an agent when its PR conflicts with the base branch ([#125](https://github.com/alsiola/open-supervisor/issues/125)) ([1880d84](https://github.com/alsiola/open-supervisor/commit/1880d8405fddc243660876b6c20748c7d0dbd6ab))
+* **jobs:** let a priority job come first on the host ([#115](https://github.com/alsiola/open-supervisor/issues/115)) ([ef61e79](https://github.com/alsiola/open-supervisor/commit/ef61e79b57a8118af63f2c497f527dfa247bb352))
+* **wait:** add --all so a wait or held issue starts only once every condition is met ([#119](https://github.com/alsiola/open-supervisor/issues/119)) ([346c8d7](https://github.com/alsiola/open-supervisor/commit/346c8d74980c2ed8aecd8262a8c4f9db1c81f2d9)), closes [#116](https://github.com/alsiola/open-supervisor/issues/116)
+
+### Bug Fixes
+
+* **engine:** hand bots' PR reviews to the agent, and let a project list bots that count ([#124](https://github.com/alsiola/open-supervisor/issues/124)) ([05d0505](https://github.com/alsiola/open-supervisor/commit/05d0505b7c7dfb07e59034eedf994251a64307eb))
+* **engine:** report failed checks whatever state the issue is in ([#123](https://github.com/alsiola/open-supervisor/issues/123)) ([f160b09](https://github.com/alsiola/open-supervisor/commit/f160b093b0c3c4df214d337651bb0324df06d5db))
+* **tasks:** stop reporting a task dropped before it started as having run ([#118](https://github.com/alsiola/open-supervisor/issues/118)) ([a3918f8](https://github.com/alsiola/open-supervisor/commit/a3918f88cd7fb1a01d80a754ff1040ccd33ffda0))
+
 ## [1.8.0](https://github.com/alsiola/open-supervisor/compare/v1.7.0...v1.8.0) (2026-11-09)
 
 ### Features
