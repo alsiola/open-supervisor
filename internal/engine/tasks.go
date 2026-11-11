@@ -231,20 +231,16 @@ func StartTask(self, file string, t Task) (Task, error) {
 }
 
 // StopTask stops a running task and everything it started, marking it stopped first. A task waiting for the
-// host is dropped, and so is one the host stayed too busy for (its record and log go, as it never ran).
+// host is dropped, and so is one the host stayed too busy for: its record and log go, as it never ran, so the
+// supervisor has nothing to report on the issue.
 func StopTask(file string) (Task, error) {
 	t, ok := ReadTask(file)
 	if !ok {
 		return t, fmt.Errorf("no task at %s", file)
 	}
-	if t.Held() {
+	if t.Held() || t.Queued() {
 		_ = os.Remove(t.Log)
 		return t, os.Remove(file)
-	}
-	if t.Queued() {
-		now := time.Now().UTC()
-		t.Stop, t.EndedAt, t.Outcome = true, &now, "stopped"
-		return t, SaveTask(file, t)
 	}
 	if !t.Running() {
 		return t, fmt.Errorf("the task %s isn't running (%s)", t.Name, t.Outcome)
@@ -315,6 +311,9 @@ func ExecTask(file string) error {
 	return SaveTask(file, t)
 }
 
+// neverRan says whether a task was stopped while it waited for the host, so its command never ran.
+func neverRan(t Task) bool { return t.Outcome == "stopped" && t.PID == 0 && t.EndedAt != nil }
+
 // followTasks looks at the project's tasks every so often until ctx ends.
 func (p *Project) followTasks(ctx context.Context) {
 	t := time.NewTicker(tasksEvery)
@@ -366,6 +365,12 @@ func (p *Project) checkTasks() {
 			}
 			continue
 		}
+		if neverRan(t) {
+			// Dropped before it started (a record from before such tasks were removed): there's nothing to tell.
+			_ = os.Remove(file)
+			_ = os.Remove(t.Log)
+			continue
+		}
 		if t.EndedAt == nil {
 			if proc.Alive(t.PID) || t.PID == 0 && time.Since(t.StartedAt) < time.Minute {
 				// Going, or saved by agent task start and not started yet.
@@ -415,6 +420,10 @@ func (p *Project) startQueued(file string, t Task, busy string) (Task, bool) {
 	}
 	t.CheckedAt = &now
 	t.First = false
+	// agent task stop may have dropped it since the read: don't save its record back.
+	if again, ok := ReadTask(file); !ok || !again.Queued() {
+		return t, false
+	}
 	if busy != "" {
 		t.Busy = busy
 		if queued >= TaskHoldFor {
@@ -424,10 +433,6 @@ func (p *Project) startQueued(file string, t Task, busy string) (Task, bool) {
 		if err := SaveTask(file, t); err != nil {
 			p.logf("%s: couldn't keep the %s task's record: %v", p.ref(t.Issue), t.Name, err)
 		}
-		return t, false
-	}
-	// agent task stop may have ended it since the read.
-	if again, ok := ReadTask(file); !ok || !again.Queued() {
 		return t, false
 	}
 	self, err := os.Executable()

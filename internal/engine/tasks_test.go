@@ -266,14 +266,39 @@ func TestQueuedTaskIsGivenUpAfterTheHoldAndTheAgentPauses(t *testing.T) {
 	})
 }
 
-func TestStoppingAQueuedTaskDropsIt(t *testing.T) {
-	file := queueTask(t, t.TempDir(), t.TempDir(), "fill", time.Minute, "sh", "-c", "echo filled")
+func TestStoppingAQueuedTaskDropsItWithoutAReport(t *testing.T) {
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("done") })
+	p.Store.Create("7", "Backfill", "https://fake/issues/7", "s-1")
+	p.Store.Update("7", func(r *store.Record) { r.State = store.Review })
+	file := queueTask(t, p.StateDir, t.TempDir(), "fill", time.Minute, "sh", "-c", "echo filled")
 	got, err := StopTask(file)
-	if err != nil || got.Outcome != "stopped" || got.EndedAt == nil {
+	if err != nil || got.PID != 0 {
 		t.Fatalf("got %+v, %v", got, err)
 	}
-	if again, _ := ReadTask(file); again.Live() {
-		t.Fatal("still live")
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatal("the dropped task's record is still kept")
+	}
+	// A record from before dropped tasks were removed: stopped while queued, never reported.
+	old := TaskFile(p.StateDir, "7", "old")
+	at := time.Now().UTC().Add(-time.Minute)
+	if err := SaveTask(old, Task{Name: "old", Issue: "7", Command: []string{"true"}, Log: strings.TrimSuffix(old, ".json") + ".log",
+		StartedAt: at, QueuedAt: &at, EndedAt: &at, Outcome: "stopped", Stop: true}); err != nil {
+		t.Fatal(err)
+	}
+	p.checkTasks()
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("the old dropped task's record is still kept")
+	}
+	host.mu.Lock()
+	posted := strings.Join(host.posted, "\n")
+	host.mu.Unlock()
+	if strings.Contains(posted, "The task") {
+		t.Fatalf("reported a task that never ran: %q", posted)
+	}
+	for _, s := range agent.turns() {
+		if strings.Contains(s.Body, "The task") {
+			t.Fatalf("woke the issue for a task that never ran: %q", s.Body)
+		}
 	}
 }
 
