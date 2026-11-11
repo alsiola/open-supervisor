@@ -640,7 +640,22 @@ func (j *Jobs) writeEvent(job config.Job, body []byte) (string, error) {
 // request runs a job the supervisor waits for, or keeps the run for after the one going now.
 func (j *Jobs) request(job config.Job, req *jobReq) {
 	if j.begin(job.Name, req) {
+		j.reschedule(job)
 		go j.loop(job, req)
+	}
+}
+
+// reschedule has the supervisor look again at what to start when a job that comes first starts or ends.
+func (j *Jobs) reschedule(job config.Job) {
+	if job.First() && j.p != nil && j.p.hub != nil {
+		go j.p.hub.schedule()
+	}
+}
+
+// captureRun sends telemetry a run starting or, once it has an end, ending.
+func (j *Jobs) captureRun(job config.Job, run JobRun) {
+	if j.p != nil && j.p.hub != nil {
+		go func() { j.p.hub.capture("job_run", runProps(j.p, job, run)) }()
 	}
 }
 
@@ -673,6 +688,7 @@ func (j *Jobs) loop(job config.Job, req *jobReq) {
 		if next == nil {
 			delete(j.busy, job.Name)
 			j.mu.Unlock()
+			j.reschedule(job)
 			return
 		}
 		j.mu.Unlock()
@@ -689,6 +705,7 @@ func (j *Jobs) execute(job config.Job, req *jobReq) {
 		out = file
 	}
 	j.setCurrent(job.Name, run)
+	j.captureRun(job, *run)
 	defer func() {
 		j.endRun(job, run)
 		j.mu.Lock()
@@ -742,7 +759,13 @@ func (j *Jobs) execute(job config.Job, req *jobReq) {
 	proc.Detach(cmd)
 	cmd.Cancel = func() error { return proc.TerminateGroup(cmd.Process.Pid) }
 	cmd.WaitDelay = 10 * time.Second
-	err := proc.RunBackground(cmd)
+	var err error
+	if job.First() {
+		// It comes first: at the supervisor's own priority, ahead of the tasks and jobs it has lowered.
+		err = cmd.Run()
+	} else {
+		err = proc.RunBackground(cmd)
+	}
 	if cmd.ProcessState != nil {
 		code := cmd.ProcessState.ExitCode()
 		run.Exit = &code
@@ -1035,6 +1058,7 @@ func (j *Jobs) followDetached(job config.Job) bool {
 		j.mu.Lock()
 		delete(j.running, job.Name)
 		j.mu.Unlock()
+		j.reschedule(job)
 		j.p.hub.changed()
 	}
 	if isRunning {
@@ -1105,7 +1129,12 @@ func (j *Jobs) startDetached(job config.Job, label, trigger string, extra []stri
 		cmd.Stdout, cmd.Stderr = file, file
 	}
 	proc.Detach(cmd)
-	err := proc.StartBackground(cmd)
+	var err error
+	if job.First() {
+		err = cmd.Start()
+	} else {
+		err = proc.StartBackground(cmd)
+	}
 	if file != nil {
 		_ = file.Close()
 	}
@@ -1120,6 +1149,8 @@ func (j *Jobs) startDetached(job config.Job, label, trigger string, extra []stri
 	j.running[job.Name] = JobRunning{PID: cmd.Process.Pid, Slot: label, StartedAt: time.Now().UTC()}
 	j.detached[job.Name] = run
 	j.mu.Unlock()
+	j.captureRun(job, *run)
+	j.reschedule(job)
 	go func() {
 		_ = cmd.Wait()
 		code := cmd.ProcessState.ExitCode()

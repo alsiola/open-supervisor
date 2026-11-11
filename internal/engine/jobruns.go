@@ -95,6 +95,7 @@ func (j *Jobs) endRun(job config.Job, run *JobRun) {
 	now := time.Now().UTC()
 	run.EndedAt = &now
 	j.saveRun(*run)
+	j.captureRun(job, *run)
 	if j.p != nil && j.p.hub != nil {
 		go j.p.hub.fact(core.Fact{Kind: core.CondJob, Project: j.p.Name, Ref: job.Name, On: run.Outcome})
 	}

@@ -74,6 +74,8 @@ type Supervisor struct {
 	// host is the watch on the machine's load, memory and disks, and hostSample its last reading.
 	host       hostWatch
 	hostSample *hostinfo.Sample
+	// first is why new turns and tasks wait for a job that comes first, as last looked at; "" when they don't.
+	first string
 	// relief is the pass at freeing a disk over its threshold by removing parked worktrees.
 	relief diskRelief
 
@@ -418,6 +420,10 @@ func (s *Supervisor) schedule() {
 	stopping := s.stopping
 	s.mu.RUnlock()
 	if stopping {
+		return
+	}
+	if s.refreshFirst() != "" {
+		s.changed()
 		return
 	}
 	max := s.settings().MaxTurns
