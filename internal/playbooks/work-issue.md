@@ -22,7 +22,7 @@ The project may use GitHub, Bitbucket, Jira or something else; you don't need to
 <!-- ambient -->
 | `$OPEN_SUPERVISOR agent issue comment <file>` | comment on the issue |
 <!-- end -->
-| `$OPEN_SUPERVISOR agent issue create --title <t> [--wait <condition>] [--until <time>] <file>` | open a new issue; with `--wait` or `--until`, it isn't worked until then (see Waiting) |
+| `$OPEN_SUPERVISOR agent issue create --title <t> [--wait <condition>]... [--all] [--until <time>] <file>` | open a new issue; with `--wait` or `--until`, it isn't worked until then (see Waiting) |
 | `$OPEN_SUPERVISOR agent worktree setup` | create or reuse the issue's worktree on its branch; prints the path last |
 | `$OPEN_SUPERVISOR agent worktree remove` | stop anything running from it and remove it (the branch stays) |
 | `$OPEN_SUPERVISOR agent pr list` | the issue's PRs, open or not |
@@ -55,11 +55,11 @@ When the work can't go on until something happens, park the issue and let the su
 - `agent wait job:backup <file>`: until the next run of one of the project's jobs ends.
 - `agent wait --until 2026-10-25T09:00Z <file>`: until a time (a match being played, a date the issue names). Use an ISO time with `Z` or an offset.
 
-Write `<project>/` before the number, key or name for another project under the same supervisor (`pr:club/88:merged`). Give several conditions and any one of them wakes you. Add `--until` to any wait as the latest it should last; use it whenever what you're waiting for might never happen. The file says what you're waiting for and why. If it has already happened, the command says so: carry on instead.
+Write `<project>/` before the number, key or name for another project under the same supervisor (`pr:club/88:merged`). Give several conditions and any one of them wakes you; add `--all` to be woken only once every one of them has happened. Add `--until` to any wait as the latest it should last; use it whenever what you're waiting for might never happen. The file says what you're waiting for and why. If it has already happened, the command says so: carry on instead.
 
 The supervisor wakes you with what happened (or that the time came first). Comments and check results still reach you in the meantime, and the wait carries on after those turns. A new `wait` replaces the last one, and `agent wait --cancel <file>` drops it. End the turn with the state the work is in (`review` if the owner has something to look at, else `done`). Don't use this to wait for your own PR's checks, its preview, its merge or a reply: the supervisor already resumes you for those.
 
-When follow-up work shouldn't start yet (wave 2 once wave 1 merges, a check once a job has run), open it now with the same conditions: `agent issue create --title <t> --wait pr:1257:merged <file>`. The supervisor holds it and starts it when the condition is met, so nobody has to remember to open it later. It prints the new issue's key first, so a later step can wait on that one in turn (`--wait issue:<key>:closed`).
+When follow-up work shouldn't start yet (wave 2 once wave 1 merges, a check once a job has run), open it now with the same conditions: `agent issue create --title <t> --wait pr:1257:merged <file>`. The supervisor holds it and starts it when the condition is met, so nobody has to remember to open it later. Several `--wait` are any of them: for work that needs several things done first, add `--all` (`--wait issue:2307 --wait issue:2308 --all`). It prints the new issue's key first, so a later step can wait on that one in turn (`--wait issue:<key>:closed`).
 
 ## Long tasks
 

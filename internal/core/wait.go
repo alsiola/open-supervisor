@@ -195,16 +195,18 @@ func (f Fact) Describe(c Cond) string {
 	return string(f.Kind) + " " + f.Ref
 }
 
-// Hold is what an issue is held for: any one of its conditions being met, or its time coming, whichever is
-// first. Cancel is a hold that drops the one before it.
+// Hold is what an issue is held for: any one of its conditions being met (every one of them, with All), or
+// its time coming, whichever is first. Cancel is a hold that drops the one before it.
 type Hold struct {
 	Conds  []Cond
+	All    bool
 	Until  *time.Time
 	Cancel bool
 }
 
 // Spec is the hold in the words a marker carries: `runAt: 2026-10-25T09:00Z` for a time alone (as before
-// waits), else `waitFor: pr:1257:merged issue:12:review; until 2026-10-25T09:00Z`, or `waitFor: cancel`.
+// waits), else `waitFor: pr:1257:merged issue:12:review; until 2026-10-25T09:00Z` (`waitFor: all …` for
+// every condition), or `waitFor: cancel`.
 func (h Hold) Spec() string {
 	if h.Cancel {
 		return "waitFor: cancel"
@@ -217,23 +219,43 @@ func (h Hold) Spec() string {
 		conds = append(conds, c.String())
 	}
 	s := "waitFor: " + strings.Join(conds, " ")
+	if h.All && len(conds) > 1 {
+		s = "waitFor: all " + strings.Join(conds, " ")
+	}
 	if h.Until != nil {
 		s += "; until " + h.Until.UTC().Format("2006-01-02T15:04Z")
 	}
 	return s
 }
 
-// Describe is the hold in words, for the log and the agent: "PR #1257 to merge, or 25 Oct 09:00 UTC".
+// Describe is the hold in words, for the log and the agent: "PR #1257 to merge, or 25 Oct 09:00 UTC", or with
+// All "PR #1257 to merge, and #12 to close, or 25 Oct 09:00 UTC at the latest".
 func (h Hold) Describe() string {
 	if h.Cancel {
 		return "nothing (cancelled)"
 	}
+	s := CondsText(h.Conds, h.All)
+	if h.Until == nil {
+		return s
+	}
+	at := h.Until.UTC().Format("2 Jan 2006 15:04 UTC")
+	switch {
+	case s == "":
+		return at
+	case h.All && len(h.Conds) > 1:
+		return s + ", or " + at + " at the latest"
+	}
+	return s + ", or " + at
+}
+
+// CondsText is the conditions in words, joined with "or", or with "and" when every one is waited for.
+func CondsText(cs []Cond, all bool) string {
 	var parts []string
-	for _, c := range h.Conds {
+	for _, c := range cs {
 		parts = append(parts, c.Describe())
 	}
-	if h.Until != nil {
-		parts = append(parts, h.Until.UTC().Format("2 Jan 2006 15:04 UTC"))
+	if all {
+		return strings.Join(parts, ", and ")
 	}
 	return strings.Join(parts, ", or ")
 }
@@ -272,7 +294,11 @@ func parseHold(kind, v string) (Hold, error) {
 	}
 	var h Hold
 	conds, until, _ := strings.Cut(v, ";")
-	for _, f := range strings.Fields(conds) {
+	fields := strings.Fields(conds)
+	if len(fields) > 0 && strings.EqualFold(fields[0], "all") {
+		h.All, fields = true, fields[1:]
+	}
+	for _, f := range fields {
 		c, err := ParseCond(f)
 		if err != nil {
 			return Hold{}, err

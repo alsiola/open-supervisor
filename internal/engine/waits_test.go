@@ -191,3 +191,75 @@ func TestReconcileDoesNotReplayAReplacedWait(t *testing.T) {
 		t.Fatalf("wait after the reconcile: %+v (by %s)", r.Waits, r.ScheduledBy)
 	}
 }
+
+func TestAllOfWaitStartsOnceEveryConditionIsMet(t *testing.T) {
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome { return review("ok") })
+	host.issues["80"] = &core.Issue{Key: "80", Title: "After both", Open: true, Labels: []string{"scheduled"}, Body: "<!-- waitFor: all issue:81 pr:82 issue:83 -->"}
+	host.issues["81"] = &core.Issue{Key: "81", Title: "One", Open: true}
+	host.issues["83"] = &core.Issue{Key: "83", Title: "Three", Open: false} // already closed
+	host.prs[82] = core.PR{ID: 82, State: core.PROpen}
+	p.reconcile()
+	waitFor(t, "held, #83 crossed off", func() bool {
+		r := p.Store.Get("80")
+		return r != nil && r.State == store.Scheduled && r.WaitAll && len(r.Waits) == 2
+	})
+	host.mu.Lock()
+	host.issues["81"].Open = false
+	host.mu.Unlock()
+	p.meet(core.Fact{Kind: core.CondIssue, Project: p.Name, Ref: "81", On: "closed"})
+	waitFor(t, "#81 crossed off", func() bool { return len(p.Store.Get("80").Waits) == 1 })
+	time.Sleep(50 * time.Millisecond)
+	if state(p, "80") != store.Scheduled || len(turnsOn("80")) != 0 {
+		t.Fatalf("an all-of wait started before all of it had happened: %+v", p.Store.Get("80"))
+	}
+	// Read again (the reconcile, a moved time), the hold keeps what has been met.
+	p.reconcile()
+	if r := p.Store.Get("80"); len(r.Waits) != 1 || r.Waits[0].Kind != core.CondPR {
+		t.Fatalf("after the reconcile: %+v", r.Waits)
+	}
+	host.mu.Lock()
+	host.prs[82] = core.PR{ID: 82, State: core.PRMerged}
+	host.mu.Unlock()
+	p.onSignal(core.Signal{Type: core.SigPRClosed, PR: &core.PR{ID: 82, State: core.PRMerged}})
+	waitFor(t, "ran", func() bool { return len(turnsOn("80")) == 1 })
+	if body := turnsOn("80")[0].Body; !strings.Contains(body, "held until all of what it waited for had happened. It has; the last of it: PR #82 was merged") {
+		t.Fatalf("first turn:\n%s", body)
+	}
+	if r := p.Store.Get("80"); r.WaitAll || r.Waits != nil {
+		t.Fatalf("after waking: %+v", r)
+	}
+}
+
+func TestAllOfWaitTimesOutWithWhatIsLeft(t *testing.T) {
+	var p *Project
+	_, p = setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		if len(agent.turns()) == 1 {
+			p.noteHold("84", "c1", "<!-- waitFor: all pr:85 pr:86; until 2099-01-01T00:00Z -->")
+		}
+		return review("ok")
+	})
+	host.prs[85] = core.PR{ID: 85, State: core.PROpen}
+	host.prs[86] = core.PR{ID: 86, State: core.PROpen}
+	host.issues["84"] = &core.Issue{Key: "84", Title: "Waits", Open: true}
+	p.reconcile()
+	waitFor(t, "held", func() bool { r := p.Store.Get("84"); return r.Turns == 1 && r.State == store.Scheduled })
+	p.onSignal(core.Signal{Type: core.SigPRClosed, PR: &core.PR{ID: 85, State: core.PRMerged}})
+	waitFor(t, "#85 crossed off", func() bool { return len(p.Store.Get("84").Waits) == 1 })
+	p.Store.Update("84", func(r *store.Record) { past := time.Now().Add(-time.Minute); r.RunAt = &past })
+	p.wakeDue()
+	waitFor(t, "timed out", func() bool { return len(agent.turns()) == 2 })
+	if body := agent.turns()[1].Body; !strings.Contains(body, "not all of what you waited for has happened; still to come: PR #86 to merge.") {
+		t.Fatalf("timeout turn:\n%s", body)
+	}
+}
+
+// turnsOn is the turns the agent has had on one issue.
+func turnsOn(key string) []adapter.TurnSpec {
+	var on []adapter.TurnSpec
+	for _, s := range agent.turns() {
+		if f := strings.Fields(s.Args); len(f) > 0 && f[0] == key {
+			on = append(on, s)
+		}
+	}
+	return on
+}

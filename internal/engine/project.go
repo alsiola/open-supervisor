@@ -1041,7 +1041,7 @@ func (p *Project) settle(key string, events []core.Event, turn adapter.Turn) {
 		x.State = store.State(s.State)
 		if s.State == core.Finished {
 			// Nothing is left to wait for.
-			x.RunAt, x.Waits, x.WaitSince = nil, nil, nil
+			x.RunAt, x.Waits, x.WaitAll, x.WaitSince = nil, nil, false, nil
 		}
 		x.Turns++
 		x.Attempts = 0

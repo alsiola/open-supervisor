@@ -87,11 +87,11 @@ func TestHoldForChecksBeforeAnyCall(t *testing.T) {
 		{[]string{"job:backup:ok"}, "", "next run to end"},
 		{[]string{"pr:club/12"}, "", "no project here is called club"},
 	} {
-		if _, err := s.holdFor(ctx, c.conds, c.until); err == nil || !strings.Contains(err.Error(), c.want) {
+		if _, err := s.holdFor(ctx, c.conds, false, c.until); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%v %q: got %v, want %q", c.conds, c.until, err, c.want)
 		}
 	}
-	h, err := s.holdFor(ctx, nil, "2099-01-01T09:00Z")
+	h, err := s.holdFor(ctx, nil, false, "2099-01-01T09:00Z")
 	if err != nil || h.Until == nil || len(h.Conds) != 0 {
 		t.Errorf("a time alone: %+v %v", h, err)
 	}

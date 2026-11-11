@@ -174,8 +174,11 @@ func (m *model) info(rw row) string {
 			on = append(on, c.Short())
 		}
 		var parts []string
-		if len(on) > 0 {
-			parts = append(parts, "on "+strings.Join(on, " or "))
+		if join := " or "; len(on) > 0 {
+			if r.WaitAll {
+				join = " and "
+			}
+			parts = append(parts, "on "+strings.Join(on, join))
 		}
 		if r.RunAt != nil {
 			parts = append(parts, "until "+r.RunAt.Local().Format("2 Jan 2006 15:04"))
@@ -356,7 +359,11 @@ func (m *model) detailLines(rw row) []string {
 		lines = append(lines, field("head", h))
 	}
 	for _, c := range r.Waits {
-		lines = append(lines, field("waits for", c.Describe()))
+		label := "waits for"
+		if r.WaitAll {
+			label = "waits for all"
+		}
+		lines = append(lines, field(label, c.Describe()))
 	}
 	if r.RunAt != nil {
 		lines = append(lines, field("runs at", r.RunAt.Local().Format("2006-01-02 15:04:05")))

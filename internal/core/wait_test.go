@@ -54,11 +54,25 @@ func TestHoldIn(t *testing.T) {
 	if got, ok := HoldIn("<!-- waitFor: pr:1 --> <!-- waitFor: nonsense -->"); !ok || len(got.Conds) != 1 {
 		t.Errorf("bad marker: %+v %v", got, ok)
 	}
-	for _, h := range []Hold{{Conds: h.Conds, Until: h.Until}, {Until: h.Until}, {Conds: h.Conds[:1]}, {Cancel: true}} {
+	if got, ok := HoldIn("<!-- waitFor: all issue:2307 issue:2308 -->"); !ok || !got.All || len(got.Conds) != 2 {
+		t.Errorf("all: %+v %v", got, ok)
+	}
+	for _, h := range []Hold{{Conds: h.Conds, Until: h.Until}, {Conds: h.Conds, All: true, Until: h.Until}, {Conds: h.Conds, All: true}, {Until: h.Until}, {Conds: h.Conds[:1]}, {Cancel: true}} {
 		back, ok := HoldIn("<!-- " + h.Spec() + " -->")
 		if !ok || back.Spec() != h.Spec() {
 			t.Errorf("%q doesn't read back: %+v", h.Spec(), back)
 		}
+	}
+}
+
+func TestHoldDescribe(t *testing.T) {
+	at := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
+	cs := []Cond{{Kind: CondIssue, Ref: "2307", On: "closed"}, {Kind: CondIssue, Ref: "2308", On: "closed"}}
+	if got := (Hold{Conds: cs, Until: &at}).Describe(); got != "#2307 to close, or #2308 to close, or 25 Oct 2026 09:00 UTC" {
+		t.Errorf("any: %q", got)
+	}
+	if got := (Hold{Conds: cs, All: true, Until: &at}).Describe(); got != "#2307 to close, and #2308 to close, or 25 Oct 2026 09:00 UTC at the latest" {
+		t.Errorf("all: %q", got)
 	}
 }
 
