@@ -3,7 +3,8 @@
 // the files the project lists (.env) on every run and runs the project's setup command when one of the files it
 // watches (a lockfile) has changed; Refresh copies the files alone, before each turn, so a resumed agent that
 // doesn't run Setup again still sees keys added since. Setup won't make a new worktree on a disk it would leave
-// too full, and clears away one git left half-made. Remove stops anything still running from the worktree,
+// too full, and clears away one git left half-made. Changes to a project's worktrees are made one at a time
+// across processes, so two issues setting up together don't trip over each other's half-written entries. Remove stops anything still running from the worktree,
 // removes it and keeps the branch, so nothing committed is lost.
 package worktree
 
@@ -91,7 +92,7 @@ func Setup(s Spec) (string, error) {
 		s.logf("reusing %s", s.Path)
 	} else {
 		// A worktree registered at a folder that has since gone stops git adding one there again.
-		_, _ = git(s.Root, "worktree", "prune")
+		s.prune()
 		// start is what the checkout is made from; tracking, a remote branch it follows.
 		var start, tracking string
 		var args []string
@@ -115,10 +116,7 @@ func Setup(s Spec) (string, error) {
 		if err := s.RoomFor(start); err != nil {
 			return "", err
 		}
-		if _, err := git(s.Root, append([]string{"worktree", "add", "-q"}, args...)...); err != nil {
-			// A checkout that failed part-way (a full disk) would be reused next time as if it were whole.
-			_ = os.RemoveAll(s.Path)
-			_, _ = git(s.Root, "worktree", "prune")
+		if err := s.addWorktree(args...); err != nil {
 			return "", err
 		}
 		if tracking != "" {
@@ -148,7 +146,9 @@ func (s Spec) checkedOut() (bool, error) {
 		return true, nil
 	}
 	if _, err := os.Lstat(filepath.Join(s.Path, ".git")); err == nil {
+		unlock := s.lockWorktrees()
 		_, _ = git(s.Root, "worktree", "repair", s.Path)
+		unlock()
 		if s.toplevel() {
 			s.logf("repaired the worktree at %s", s.Path)
 			return true, nil
@@ -292,9 +292,7 @@ func Fresh(s Spec) (string, error) {
 	if err := s.RoomFor(s.remote() + "/" + base); err != nil {
 		return "", err
 	}
-	if _, err := git(s.Root, "worktree", "add", "-q", "--detach", s.Path, s.remote()+"/"+base); err != nil {
-		_ = os.RemoveAll(s.Path)
-		_, _ = git(s.Root, "worktree", "prune")
+	if err := s.addWorktree("--detach", s.Path, s.remote()+"/"+base); err != nil {
 		return "", err
 	}
 	if head, err := git(s.Path, "rev-parse", "--short", "HEAD"); err == nil {
@@ -438,6 +436,8 @@ func Remove(s Spec) error {
 		return nil
 	}
 	killWithin(s.Path)
+	unlock := s.lockWorktrees()
+	defer unlock()
 	_, _ = git(s.Root, "worktree", "remove", "--force", s.Path)
 	if err := os.RemoveAll(s.Path); err != nil {
 		return err
