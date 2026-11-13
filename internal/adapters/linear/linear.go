@@ -89,7 +89,8 @@ func open(v adapter.Values, env adapter.Env) (adapter.Connection, error) {
 		c.log = func(string, ...any) {}
 	}
 	c.api = &adapter.JSONClient{
-		HTTP: env.HTTP,
+		HTTP:  env.HTTP,
+		Retry: env.Retry,
 		Auth: func(r *http.Request) error {
 			// OAuth tokens go as bearer tokens; personal API keys bare.
 			if strings.HasPrefix(token, "lin_oauth_") {
