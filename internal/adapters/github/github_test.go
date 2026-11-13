@@ -520,6 +520,50 @@ func TestAppTokens(t *testing.T) {
 	}
 }
 
+func TestInstallationLookupSaysWhyItFailed(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	for _, tc := range []struct {
+		status    int
+		want, not string
+	}{
+		{http.StatusNotFound, "isn't installed", ""},
+		{http.StatusBadGateway, "looking up app 1's installation", "isn't installed"},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.status) }))
+		c, err := newConn(adapter.Values{"auth": "app", "appId": "1", "appPrivateKey": pemText, "apiUrl": srv.URL}, adapter.Env{HTTP: srv.Client()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tr, _ := c.Tracker(adapter.Values{"repo": "octo/widgets"}, adapter.ProjectInfo{})
+		_, err = tr.Comment(context.Background(), "1", "hi", core.AgentMark{})
+		if err == nil || !strings.Contains(err.Error(), tc.want) || tc.not != "" && strings.Contains(err.Error(), tc.not) {
+			t.Errorf("%d: err %v, want %q", tc.status, err, tc.want)
+		}
+		srv.Close()
+	}
+}
+
+func TestAgentCallsRetryA5xx(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) < 3 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		fmt.Fprint(w, `{"number":4,"title":"t","state":"open"}`)
+	}))
+	defer srv.Close()
+	c, err := newConn(adapter.Values{"auth": "token", "token": "tok", "apiUrl": srv.URL}, adapter.Env{HTTP: srv.Client(), Retry: []time.Duration{0, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, _ := c.Tracker(adapter.Values{"repo": "octo/widgets"}, adapter.ProjectInfo{})
+	if i, err := tr.(*Tracker).Issue(context.Background(), "4"); err != nil || i.Title != "t" {
+		t.Fatalf("got %+v %v after %d calls", i, err, calls)
+	}
+}
+
 func TestOpenIssue(t *testing.T) {
 	var got map[string]any
 	tr, _ := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

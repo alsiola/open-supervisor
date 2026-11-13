@@ -162,6 +162,7 @@ func (c *conn) client(authorization string) *adapter.JSONClient {
 	return &adapter.JSONClient{
 		HTTP:    c.http,
 		BaseURL: c.api,
+		Retry:   c.env.Retry,
 		Auth: func(r *http.Request) error {
 			r.Header.Set("Authorization", authorization)
 			return nil

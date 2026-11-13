@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -58,6 +59,36 @@ func MayHaveLanded(err error) bool {
 		errors.As(err, &ne) && ne.Timeout()
 }
 
+// NotSent reports whether err is a call that failed before the request left this machine (the connection
+// couldn't be made), so sending it again can't do anything twice, whatever the method.
+func NotSent(err error) bool {
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return true
+	}
+	var dns *net.DNSError
+	return errors.As(err, &dns)
+}
+
+// Transient reports whether err is a failure that a moment later may not happen again: a 5xx, a timeout, a
+// dropped connection or one that couldn't be made.
+func Transient(err error) bool {
+	if err == nil || IsPaused(err) {
+		return false
+	}
+	return MayHaveLanded(err) || NotSent(err) || errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET)
+}
+
+// resendable reports whether a call that failed with err can go again without risking doing it twice: a read
+// or an idempotent write that failed transiently, or any call that was never sent.
+func resendable(method string, err error) bool {
+	switch method {
+	case http.MethodPost, http.MethodConnect:
+		return NotSent(err)
+	}
+	return Transient(err)
+}
+
 // PausedError is a call an adapter refused without making it, because the service asked it to wait (a rate
 // limit). The adapter logs the pause once; callers can skip the work quietly.
 type PausedError struct {
@@ -83,11 +114,31 @@ type JSONClient struct {
 	Auth func(r *http.Request) error
 	// Header is added to every request.
 	Header http.Header
+	// Retry is the pause before each retry of a call that failed transiently (a 5xx, a timeout, a dropped
+	// connection), for those calls it is safe to send again: every read and idempotent write, and a POST only
+	// when it was never sent. None means no retries. A retry never outlasts the call's context.
+	Retry []time.Duration
 }
 
 // Do sends body (as JSON, unless it is nil) and decodes the answer into out (unless it is nil). It returns the
 // response so callers can read headers, such as the next page's link.
 func (c *JSONClient) Do(ctx context.Context, method, path string, body, out any) (*http.Response, error) {
+	res, err := c.do(ctx, method, path, body, out)
+	for _, pause := range c.Retry {
+		if err == nil || !resendable(method, err) || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-time.After(pause):
+		case <-ctx.Done():
+			return res, err
+		}
+		res, err = c.do(ctx, method, path, body, out)
+	}
+	return res, err
+}
+
+func (c *JSONClient) do(ctx context.Context, method, path string, body, out any) (*http.Response, error) {
 	url := path
 	if !strings.HasPrefix(path, "http://") && !strings.HasPrefix(path, "https://") {
 		url = strings.TrimRight(c.BaseURL, "/") + "/" + strings.TrimLeft(path, "/")

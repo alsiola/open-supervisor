@@ -75,6 +75,7 @@ func open(v adapter.Values, env adapter.Env) (adapter.Connection, error) {
 	}
 	c.api = &adapter.JSONClient{
 		HTTP:    env.HTTP,
+		Retry:   env.Retry,
 		BaseURL: v.Get("apiUrl", "https://api.bitbucket.org/2.0"),
 		Auth: func(r *http.Request) error {
 			if auth == "bearer" {

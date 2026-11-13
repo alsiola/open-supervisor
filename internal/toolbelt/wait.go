@@ -94,7 +94,12 @@ func (s *session) postHold(ctx context.Context, cmd *cobra.Command, h core.Hold,
 		fmt.Fprintln(cmd.OutOrStdout(), "dry run: would wait for", h.Describe())
 		return nil
 	}
-	url, err := s.b.Tracker.Comment(ctx, s.key, reason+"\n\n"+s.b.Tracker.HoldMarker(h), s.mark())
+	body := reason + "\n\n" + s.b.Tracker.HoldMarker(h)
+	url, err := postComment(ctx, body,
+		func(ctx context.Context) (string, error) { return s.b.Tracker.Comment(ctx, s.key, body, s.mark()) },
+		func(ctx context.Context, since time.Time) ([]core.Comment, error) {
+			return s.b.Tracker.Comments(ctx, s.key, since)
+		}, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
