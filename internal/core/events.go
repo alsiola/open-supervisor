@@ -122,7 +122,7 @@ func conflictChecks(base string) string {
 	return "The PR conflicts with its base branch, and the code host doesn't run its workflows on a PR that can't merge: that's why. " + conflictAdvice(base) + " The checks start on the new head."
 }
 
-const missingAdvice = "The PR can't merge without them. Find out why they didn't start (a `[skip …]` in the PR title or a commit message stops some deploys) and start them, often with a new push; if they shouldn't run on this PR, say so in your report."
+const missingAdvice = "The PR can't merge without them. A deploy service can queue a build behind an earlier one without reporting anything on the commit, so first look at its deploy list for this commit: another push would only queue another build. If it is queued or building, end the turn with `building`: you'll hear when it reports. If it never started, find out why (a `[skip …]` in the PR title or a commit message stops some deploys) and start it, often with a new push; if it shouldn't run on this PR, say so in your report."
 
 // Render is the events block an agent reads at the start of a turn. Replies go through the supervisor's own
 // agent commands, so the instructions are the same whatever tracker or code host the project uses.
@@ -177,11 +177,11 @@ func Render(events []Event) string {
 				}
 				parts = append(parts, s)
 			case len(e.Failed) == 0:
-				parts = append(parts, fmt.Sprintf("### Required checks never reported on PR #%d at %s: %s\n%s", e.PR, short(e.SHA), strings.Join(e.Missing, ", "), missingAdvice))
+				parts = append(parts, fmt.Sprintf("### Required checks haven't reported on PR #%d at %s: %s\n%s", e.PR, short(e.SHA), strings.Join(e.Missing, ", "), missingAdvice))
 			default:
 				s := fmt.Sprintf("### Checks failed on PR #%d at %s: %s\nSee `$OPEN_SUPERVISOR agent checks %d` for links to each.", e.PR, short(e.SHA), strings.Join(e.Failed, ", "), e.PR)
 				if len(e.Missing) > 0 {
-					s += fmt.Sprintf("\nThese required checks never reported either: %s. %s", strings.Join(e.Missing, ", "), missingAdvice)
+					s += fmt.Sprintf("\nThese required checks haven't reported either: %s. %s", strings.Join(e.Missing, ", "), missingAdvice)
 				}
 				parts = append(parts, s)
 			}

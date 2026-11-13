@@ -339,6 +339,7 @@ func (p *Project) onSignal(s core.Signal) {
 					x.HeadSHA = s.PR.HeadSHA
 					x.HeadAt = &now
 					x.ChecksReported = ""
+					x.ChecksMissing = nil
 				}
 			})
 			p.scheduleChecks(s.PR.HeadSHA)
@@ -1312,7 +1313,13 @@ func (p *Project) scheduleChecks(sha string) {
 // green re-run doesn't wake an agent for nothing.
 func (p *Project) evaluateChecks(sha string) {
 	r := p.Store.BySHA(sha)
-	if r == nil || store.SameSHA(r.ChecksReported, sha) || r.State == store.Finished {
+	if r == nil || r.State == store.Finished {
+		return
+	}
+	// A head already reported is judged again only while required checks hadn't reported on it: a deploy
+	// queued behind an earlier build reports late, and the agent told it was missing hears when it lands.
+	late := store.SameSHA(r.ChecksReported, sha)
+	if late && len(r.ChecksMissing) == 0 {
 		return
 	}
 	ctx, cancel := ctxTimeout(time.Minute)
@@ -1334,6 +1341,9 @@ func (p *Project) evaluateChecks(sha string) {
 	if result.Any && !result.Complete || r.State != store.Building && len(result.Failed) == 0 {
 		return
 	}
+	if late && len(result.Missing(r.ChecksMissing)) > 0 {
+		return
+	}
 	pr := 0
 	if len(r.PRs) > 0 {
 		pr = r.PRs[len(r.PRs)-1]
@@ -1351,6 +1361,9 @@ func (p *Project) evaluateChecks(sha string) {
 		return
 	}
 	missing := result.Missing(required)
+	if late && len(missing) > 0 {
+		return
+	}
 	// A repo with no CI never reports anything, and a required check can be skipped (a deploy's "[skip …]"):
 	// after a while, say so rather than wait, or count what never ran as a pass.
 	waited := time.Since(headAt) > time.Duration(p.hub.settings().NoChecksMinutes)*time.Minute
@@ -1368,6 +1381,11 @@ func (p *Project) evaluateChecks(sha string) {
 	sha = r.HeadSHA
 	p.Store.Update(r.Key, func(x *store.Record) {
 		x.ChecksReported = sha
+		// After a failure the agent pushes a fix, a new head; only checks that were all it was told about are watched.
+		x.ChecksMissing = nil
+		if len(result.Failed) == 0 && !conflicts {
+			x.ChecksMissing = missing
+		}
 		if result.Preview != "" {
 			x.Preview = result.Preview
 		}
@@ -1443,6 +1461,7 @@ func (p *Project) refreshPRs(key string) (open, ok bool) {
 				x.HeadSHA = head.HeadSHA
 				x.HeadAt = &now
 				x.ChecksReported = ""
+				x.ChecksMissing = nil
 			}
 		})
 	}
