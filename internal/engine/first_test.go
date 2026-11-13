@@ -23,9 +23,8 @@ func TestPriorityJobHoldsNewTurnsAndTasks(t *testing.T) {
 	p.Jobs.SetSpecs([]config.Job{job})
 	p.Jobs.request(job, &jobReq{trigger: "by hand"})
 	waitFor(t, "the hold", func() bool { return strings.Contains(s.JobFirst(), "the refresh job (demo) is running") })
-	if got := JobFirst(s.state); !strings.Contains(got, "refresh") {
-		t.Fatalf("agent task start isn't told: %q", got)
-	}
+	// The note for `agent task start` is written just after the hold is set.
+	waitFor(t, "agent task start to be told", func() bool { return strings.Contains(JobFirst(s.state), "refresh") })
 
 	host.issues["1"] = &core.Issue{Key: "1", Title: "First", Open: true}
 	p.reconcile()
