@@ -795,8 +795,60 @@ func TestMissingRequiredCheckIsNotAPass(t *testing.T) {
 	p.evaluateChecks(sha)
 	waitFor(t, "missing-checks turn", func() bool { return len(agent.turns()) >= 2 })
 	body := agent.turns()[1].Body
-	if !strings.Contains(body, "Required checks never reported on PR #42 at 995bdda: netlify/site/deploy-preview") || strings.Contains(body, "Checks passed") {
+	if !strings.Contains(body, "Required checks haven't reported on PR #42 at 995bdda: netlify/site/deploy-preview") || strings.Contains(body, "Checks passed") {
 		t.Fatalf("checks turn:\n%s", body)
+	}
+}
+
+// A deploy queued behind an earlier build reports late: the agent told it hadn't reported, which ended its turn
+// building, hears when it lands, once.
+func TestLateRequiredCheckReachesTheAgent(t *testing.T) {
+	const sha = "a1b2c3d1234567890"
+	n := 0
+	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+		n++
+		if n == 1 {
+			host.mu.Lock()
+			host.prs[42] = core.PR{ID: 42, State: core.PROpen, Branch: "agent/issue-4", Base: "main", HeadSHA: sha}
+			host.checks[sha] = core.Checks{Complete: true, Any: true, Runs: []core.CheckRun{{Name: "test", State: "success"}}}
+			host.required = []string{"test", "netlify/site/deploy-preview"}
+			host.mu.Unlock()
+		}
+		if n <= 2 {
+			return core.Outcome{OK: true, Status: &core.Status{State: core.Building, Summary: "waiting on the deploy", PRs: []int{42}}}
+		}
+		return review("reported")
+	})
+	host.issues["4"] = &core.Issue{Key: "4", Title: "Four", Open: true}
+	p.reconcile()
+	waitFor(t, "building on the head", func() bool { r := p.Store.Get("4"); return r.State == store.Building && r.HeadSHA == sha })
+	p.Store.Update("4", func(x *store.Record) {
+		old := time.Now().Add(-time.Hour)
+		x.HeadAt = &old
+	})
+	p.evaluateChecks(sha)
+	waitFor(t, "missing-checks turn", func() bool { return len(agent.turns()) >= 2 })
+	waitFor(t, "building again", func() bool {
+		r := p.Store.Get("4")
+		return r.State == store.Building && r.Turns >= 2 && r.LastTurn != nil && r.LastTurn.EndedAt != nil
+	})
+	p.evaluateChecks(sha)
+	time.Sleep(100 * time.Millisecond)
+	if n := len(agent.turns()); n != 2 {
+		t.Fatalf("%d turns: the deploy still hadn't reported, so nothing new should have woken the agent", n)
+	}
+	host.mu.Lock()
+	host.checks[sha] = core.Checks{Complete: true, Any: true, Preview: "https://deploy-preview-42.example.app", Runs: []core.CheckRun{{Name: "test", State: "success"}, {Name: "netlify/site/deploy-preview", State: "success"}}}
+	host.mu.Unlock()
+	p.evaluateChecks(sha)
+	waitFor(t, "late checks turn", func() bool { return len(agent.turns()) >= 3 })
+	if body := agent.turns()[2].Body; !strings.Contains(body, "Checks passed on PR #42 at a1b2c3d") || !strings.Contains(body, "deploy-preview-42") {
+		t.Fatalf("late checks turn:\n%s", body)
+	}
+	p.evaluateChecks(sha)
+	time.Sleep(100 * time.Millisecond)
+	if n := len(agent.turns()); n != 3 {
+		t.Fatalf("%d turns: the late pass was reported more than once", n)
 	}
 }
 
