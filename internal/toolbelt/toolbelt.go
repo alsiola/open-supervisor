@@ -97,6 +97,7 @@ func bind(cfg *config.Config, spec *config.Project) (*engine.Bound, error) {
 		DryRun:  cfg.Settings.DryRun,
 		DataDir: config.DataDir(),
 		HTTP:    &http.Client{Timeout: 60 * time.Second},
+		Retry:   apiRetries,
 	}
 	b, err := engine.Bind(cfg, spec, engine.OpenConnections(cfg, env), config.StateDir())
 	if err != nil {
@@ -365,7 +366,11 @@ func issueCmd(f *flags) *cobra.Command {
 			}
 			ctx, cancel := timeout()
 			defer cancel()
-			url, err := tracker.Comment(ctx, s.key, body, s.mark())
+			url, err := postComment(ctx, body,
+				func(ctx context.Context) (string, error) { return tracker.Comment(ctx, s.key, body, s.mark()) },
+				func(ctx context.Context, since time.Time) ([]core.Comment, error) {
+					return tracker.Comments(ctx, s.key, since)
+				}, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -781,7 +786,11 @@ func prCmd(f *flags) *cobra.Command {
 			}
 			ctx, cancel := timeout()
 			defer cancel()
-			url, err := s.b.Repo.CommentPR(ctx, id, body, s.mark())
+			url, err := postComment(ctx, body,
+				func(ctx context.Context) (string, error) { return s.b.Repo.CommentPR(ctx, id, body, s.mark()) },
+				func(ctx context.Context, since time.Time) ([]core.Comment, error) {
+					return s.b.Repo.PRComments(ctx, id, since)
+				}, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -812,7 +821,13 @@ func prCmd(f *flags) *cobra.Command {
 			}
 			ctx, cancel := timeout()
 			defer cancel()
-			url, err := s.b.Repo.ReplyInline(ctx, id, args[1], body, s.mark())
+			url, err := postComment(ctx, body,
+				func(ctx context.Context) (string, error) {
+					return s.b.Repo.ReplyInline(ctx, id, args[1], body, s.mark())
+				},
+				func(ctx context.Context, since time.Time) ([]core.Comment, error) {
+					return s.b.Repo.PRComments(ctx, id, since)
+				}, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

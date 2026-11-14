@@ -45,6 +45,10 @@ type Env struct {
 	DataDir string
 	// HTTP is the client to use for API calls.
 	HTTP *http.Client
+	// Retry is the pause before each retry of an API call that failed transiently and is safe to send again
+	// (see JSONClient.Retry). The agent commands set it, since an agent can't wait for the next poll; the
+	// supervisor leaves it empty and tries again on its next tick.
+	Retry []time.Duration
 }
 
 // Connection is a configured account on a service. Every connection can say whether it works.

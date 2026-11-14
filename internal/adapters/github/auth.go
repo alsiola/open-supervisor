@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/alsiola/open-supervisor/internal/adapter"
 )
 
 // tokenSource hands out a bearer token for calls on a repo ("" for calls on no repo).
@@ -156,7 +158,11 @@ func (a *appToken) token(ctx context.Context, repo string) (string, error) {
 			ID int64 `json:"id"`
 		}
 		if _, err := client.Do(ctx, http.MethodGet, "/repos/"+repo+"/installation", nil, &inst); err != nil {
-			return "", fmt.Errorf("app %s isn't installed on %s: %w", a.id, repo, err)
+			if adapter.IsStatus(err, http.StatusNotFound) {
+				return "", fmt.Errorf("app %s isn't installed on %s: %w", a.id, repo, err)
+			}
+			// A timeout or a 5xx says nothing about whether the app is installed.
+			return "", fmt.Errorf("looking up app %s's installation on %s: %w", a.id, repo, err)
 		}
 		id = inst.ID
 		a.mu.Lock()

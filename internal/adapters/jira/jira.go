@@ -103,6 +103,7 @@ func open(v adapter.Values, env adapter.Env) (adapter.Connection, error) {
 	}
 	c.api = &adapter.JSONClient{
 		HTTP:    env.HTTP,
+		Retry:   env.Retry,
 		BaseURL: base,
 		Auth: func(r *http.Request) error {
 			if auth == "bearer" {
