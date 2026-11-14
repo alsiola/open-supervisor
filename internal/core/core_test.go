@@ -33,7 +33,7 @@ func TestRender(t *testing.T) {
 		{Type: EvChecks, PR: 5, SHA: "995bdda12", Missing: []string{"netlify/site/deploy-preview"}},
 		{Type: EvMessage, Text: "hi", At: at},
 	})
-	for _, want := range []string{"Required checks never reported on PR #5 at 995bdda: netlify/site/deploy-preview", "Inline comment on PR #4 at a.go:3 by ann", "agent pr reply 4 99", "Checks failed on PR #4 at abcdef1: lint", "Message from the owner"} {
+	for _, want := range []string{"Required checks haven't reported on PR #5 at 995bdda: netlify/site/deploy-preview", "Inline comment on PR #4 at a.go:3 by ann", "agent pr reply 4 99", "Checks failed on PR #4 at abcdef1: lint", "Message from the owner"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}

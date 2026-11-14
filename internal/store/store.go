@@ -66,10 +66,12 @@ type Record struct {
 	// PRClosedAt is when each of ClosedPRs was seen closed, so the reconcile stops reading it an hour on.
 	PRClosedAt map[int]time.Time `json:"prClosedAt,omitempty"`
 	// HeadSHA is the open PR's head; HeadAt is when it was first seen, so a repo with no checks at all isn't
-	// waited on for ever; ChecksReported is the head whose checks were last reported.
+	// waited on for ever; ChecksReported is the head whose checks were last reported, and ChecksMissing the
+	// required checks that hadn't reported on it then, so the agent hears again when they do.
 	HeadSHA        string     `json:"headSha,omitempty"`
 	HeadAt         *time.Time `json:"headAt,omitempty"`
 	ChecksReported string     `json:"checksReported,omitempty"`
+	ChecksMissing  []string   `json:"checksMissing,omitempty"`
 	Preview        string     `json:"preview,omitempty"`
 	// ConflictReported is the PR, head and base heads last reported conflicting ("12 <head> <base>"), so the
 	// agent hears about each conflict once.
