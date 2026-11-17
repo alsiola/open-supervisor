@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"path"
@@ -21,6 +22,13 @@ const attachBranch = "open-supervisor-attachments"
 
 // maxAttachment keeps an upload well under what the contents API takes in one request.
 const maxAttachment = 50 << 20
+
+// attachTries and attachBackoff bound the retries of a PUT the contents API turns down with 409 because the
+// attachments branch moved under it: several uploads in a row, or agents uploading at once, race for its head.
+var (
+	attachTries   = 6
+	attachBackoff = 300 * time.Millisecond
+)
 
 var (
 	_ adapter.Attacher = (*Tracker)(nil)
@@ -64,8 +72,20 @@ func (b *binding) attach(ctx context.Context, write bool, key, file string, data
 		"content": base64.StdEncoding.EncodeToString(data),
 		"branch":  attachBranch,
 	}
-	_, err := b.c.call(ctx, write, b.repo, http.MethodPut, b.path("/contents/%s", file), req, nil)
-	return err
+	var err error
+	for try := 1; ; try++ {
+		_, err = b.c.call(ctx, write, b.repo, http.MethodPut, b.path("/contents/%s", file), req, nil)
+		if !adapter.IsStatus(err, http.StatusConflict) || try == attachTries {
+			return err
+		}
+		// The PUT made no commit; wait for the other upload to land, with jitter so racers spread out.
+		wait := attachBackoff*time.Duration(try) + rand.N(attachBackoff)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
 }
 
 // ensureAttachBranch creates the attachments branch the first time: a commit with a README and no parents.
