@@ -343,9 +343,10 @@ func issueCmd(f *flags) *cobra.Command {
 		},
 	}
 	var upstream bool
+	var editID string
 	comment := &cobra.Command{
-		Use:   "comment <file|->",
-		Short: "Post a comment on the issue (or, with --issue, on another agent's issue; with --upstream, on open-supervisor's)",
+		Use:   "comment [--edit <comment>] <file|->",
+		Short: "Post a comment on the issue (or, with --issue, on another agent's issue; with --upstream, on open-supervisor's); --edit replaces the text of one you posted",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := open(f, true)
@@ -361,11 +362,31 @@ func issueCmd(f *flags) *cobra.Command {
 				return err
 			}
 			if s.dryRun {
-				fmt.Fprintln(cmd.OutOrStdout(), "dry run: would comment on", s.key)
+				what := "comment on"
+				if editID != "" {
+					what = "edit comment " + editID + " on"
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "dry run: would", what, s.key)
 				return nil
 			}
 			ctx, cancel := timeout()
 			defer cancel()
+			if editID != "" {
+				editor, ok := tracker.(adapter.CommentEditor)
+				if !ok {
+					return fmt.Errorf("%s can't edit comments: post a new comment instead", tracker.Describe())
+				}
+				url, err := editComment(ctx, editID, s.own,
+					func(ctx context.Context) ([]core.Comment, error) { return tracker.Comments(ctx, s.key, time.Time{}) },
+					func(ctx context.Context, id string, mark core.AgentMark) (string, error) {
+						return editor.EditComment(ctx, s.key, id, body, mark)
+					})
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), url)
+				return nil
+			}
 			url, err := postComment(ctx, body,
 				func(ctx context.Context) (string, error) { return tracker.Comment(ctx, s.key, body, s.mark()) },
 				func(ctx context.Context, since time.Time) ([]core.Comment, error) {
@@ -472,6 +493,7 @@ func issueCmd(f *flags) *cobra.Command {
 	create.Flags().BoolVar(&all, "all", false, "hold the issue until every --wait condition is met, not just the first")
 	create.Flags().StringVar(&until, "until", "", "hold the issue until this time (an ISO instant), or at most until then with --wait")
 	cmd.PersistentFlags().BoolVar(&upstream, "upstream", false, "act on open-supervisor's own tracker; create prints a link that opens the issue when no project here is open-supervisor")
+	comment.Flags().StringVar(&editID, "edit", "", "replace the text of a comment you posted on the issue (its id or link, as issue view and issue comment print them) instead of posting a new one; it stays marked as yours")
 	cmd.AddCommand(view, comment, list, create)
 	return cmd
 }

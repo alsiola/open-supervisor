@@ -238,6 +238,26 @@ func TestCommentsFilterSinceAndKinds(t *testing.T) {
 	}
 }
 
+func TestEditCommentKeepsTheMarker(t *testing.T) {
+	var got string
+	tr, _ := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/repos/octo/widgets/issues/comments/55" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		got = body["body"]
+		fmt.Fprint(w, `{"html_url":"https://github.com/octo/widgets/issues/7#issuecomment-55"}`)
+	}))
+	url, err := tr.EditComment(context.Background(), "7", "55", "fixed figure\n", core.AgentMark{From: "7"})
+	if err != nil || !strings.HasSuffix(url, "#issuecomment-55") {
+		t.Fatalf("%q %v", url, err)
+	}
+	if got != "fixed figure\n\n<!-- open-supervisor:agent from=7 -->\n" || agentMark(got) == nil || agentMark(got).From != "7" {
+		t.Errorf("body %q", got)
+	}
+}
+
 func TestEditLabelsIgnoresMissing(t *testing.T) {
 	var calls []string
 	tr, _ := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -282,7 +302,7 @@ func TestHTTPSForAnSSHRemote(t *testing.T) {
 		"https://github.com/Oddsworth/supervisor.git":   "",
 		"git@github.com:Oddsworth/other.git":            "",
 		"git@gitlab.com:Oddsworth/supervisor.git":       "",
-		"":                                              "",
+		"": "",
 	} {
 		if got, ok := r.HTTPSFor(remote); got != want || ok != (want != "") {
 			t.Errorf("HTTPSFor(%q) = %q %v", remote, got, ok)

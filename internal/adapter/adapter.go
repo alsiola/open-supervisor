@@ -164,6 +164,12 @@ type Reactor interface {
 	React(ctx context.Context, c core.Comment) error
 }
 
+// CommentEditor is a tracker that can replace the text of a comment on an issue, so an agent can correct what it
+// posted. The comment stays marked as an agent's with mark.
+type CommentEditor interface {
+	EditComment(ctx context.Context, key, id, body string, mark core.AgentMark) (string, error)
+}
+
 // IssueOpener is a tracker that can open issues, for the daily triage to file the causes it finds and for agents
 // to open follow-up work. labels go on as the issue is opened, so it is never seen without them.
 type IssueOpener interface {

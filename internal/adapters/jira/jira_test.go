@@ -176,6 +176,25 @@ func TestCommentsAndMarks(t *testing.T) {
 	}
 }
 
+func TestEditCommentKeepsTheMark(t *testing.T) {
+	var sent map[string]any
+	tr := testTracker(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" || r.URL.Path != "/rest/api/2/issue/PROJ-1/comment/99" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&sent)
+		w.Write([]byte(`{"id":"99"}`))
+	})
+	url, err := tr.EditComment(context.Background(), "PROJ-1", "99", "**fixed**", core.AgentMark{From: "PROJ-1"})
+	if err != nil || !strings.HasSuffix(url, "focusedCommentId=99") {
+		t.Fatalf("%s %v", url, err)
+	}
+	props, _ := json.Marshal(sent["properties"])
+	if sent["body"] != "*fixed*" || string(props) != `[{"key":"open-supervisor","value":{"agent":true,"from":"PROJ-1"}}]` {
+		t.Errorf("sent %v", sent)
+	}
+}
+
 func TestLabels(t *testing.T) {
 	var body string
 	tr := testTracker(t, nil, func(w http.ResponseWriter, r *http.Request) {

@@ -556,6 +556,22 @@ func (t *Tracker) Comment(ctx context.Context, key, body string, mark core.Agent
 	return t.IssueURL(key) + "?focusedCommentId=" + r.ID, nil
 }
 
+// EditComment replaces the text of one of the issue's comments, keeping the property that marks it as an agent's.
+func (t *Tracker) EditComment(ctx context.Context, key, id, body string, mark core.AgentMark) (string, error) {
+	if t.c.dryRun {
+		return "", nil
+	}
+	req := map[string]any{
+		"body":       ToWiki(body),
+		"properties": []map[string]any{{"key": markProperty, "value": markValue{Agent: true, From: mark.From}}},
+	}
+	path := "rest/api/2/issue/" + url.PathEscape(key) + "/comment/" + url.PathEscape(id)
+	if _, err := t.c.api.Do(ctx, "PUT", path, req, nil); err != nil {
+		return "", err
+	}
+	return t.IssueURL(key) + "?focusedCommentId=" + id, nil
+}
+
 // OpenIssue opens a Task in the tracker's first project.
 func (t *Tracker) OpenIssue(ctx context.Context, title, body string, labels []string) (core.Issue, error) {
 	if t.c.dryRun {

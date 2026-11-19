@@ -426,6 +426,21 @@ func (t *Tracker) Comment(ctx context.Context, key, body string, mark core.Agent
 	return t.post(ctx, t.path("/issues/%d/comments", n), withMark(body, mark))
 }
 
+// EditComment replaces the text of one of the issue's comments, marker included.
+func (t *Tracker) EditComment(ctx context.Context, key, id, body string, mark core.AgentMark) (string, error) {
+	if _, err := number(key); err != nil {
+		return "", err
+	}
+	var out struct {
+		HTMLURL string `json:"html_url"`
+	}
+	path := t.path("/issues/comments/%s", url.PathEscape(id))
+	if _, err := t.c.call(ctx, true, t.repo, http.MethodPatch, path, map[string]string{"body": withMark(body, mark)}, &out); err != nil {
+		return "", err
+	}
+	return out.HTMLURL, nil
+}
+
 func (t *Tracker) OpenIssue(ctx context.Context, title, body string, labels []string) (core.Issue, error) {
 	var i rawIssue
 	req := map[string]any{"title": title, "body": body}

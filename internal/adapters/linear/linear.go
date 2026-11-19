@@ -581,6 +581,26 @@ func (t *Tracker) Comment(ctx context.Context, key, body string, mark core.Agent
 	return r.CommentCreate.Comment.URL, nil
 }
 
+// EditComment replaces the text of one of the issue's comments, footer included.
+func (t *Tracker) EditComment(ctx context.Context, key, id, body string, mark core.AgentMark) (string, error) {
+	if t.c.dryRun {
+		return "", nil
+	}
+	var r struct {
+		CommentUpdate struct {
+			Success bool `json:"success"`
+			Comment struct {
+				URL string `json:"url"`
+			} `json:"comment"`
+		} `json:"commentUpdate"`
+	}
+	q := `mutation($id: String!, $input: CommentUpdateInput!) { commentUpdate(id: $id, input: $input) { success comment { url } } }`
+	if err := t.c.query(ctx, q, map[string]any{"id": id, "input": map[string]any{"body": withMark(body, mark)}}, &r); err != nil {
+		return "", err
+	}
+	return r.CommentUpdate.Comment.URL, nil
+}
+
 // OpenIssue opens an issue in the tracker's first team.
 func (t *Tracker) OpenIssue(ctx context.Context, title, body string, labels []string) (core.Issue, error) {
 	if t.c.dryRun {
