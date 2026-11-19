@@ -690,9 +690,17 @@ func prCmd(f *flags) *cobra.Command {
 					return err
 				}
 			}
+			// A PR outside any issue gets one to own it, so its reviews and checks don't wait on nobody.
+			adopt := s.key == ""
 			if s.dryRun {
+				if adopt {
+					fmt.Fprintln(cmd.OutOrStdout(), "dry run: would open an issue to own the PR")
+				}
 				fmt.Fprintf(cmd.OutOrStdout(), "dry run: would open %s → %s\n", head, base)
 				return nil
+			}
+			if adopt {
+				head, body = s.adopt(ctx, title, body, head, cmd.ErrOrStderr())
 			}
 			pr, err := createPR(ctx, s.b.Repo, adapter.PRRequest{Title: title, Body: body, Head: head, Base: base, Draft: draft}, cmd.ErrOrStderr())
 			if err != nil {
@@ -705,7 +713,7 @@ func prCmd(f *flags) *cobra.Command {
 	create.Flags().StringVar(&title, "title", "", "the PR's title")
 	create.Flags().StringVar(&bodyFile, "body-file", "", "a file with the PR's body, or - for stdin")
 	create.Flags().StringVar(&base, "base", "", "the branch to merge into (default the project's base branch)")
-	create.Flags().StringVar(&head, "head", "", "the branch to open it from, for a PR outside an issue (a sweep's or triage's)")
+	create.Flags().StringVar(&head, "head", "", "the branch to open it from, for a PR outside an issue (a sweep's or triage's); it opens an issue to own the PR and moves the branch to that issue's")
 	create.Flags().BoolVar(&draft, "draft", false, "open it as a draft")
 	create.Flags().BoolVar(&partial, "partial", false, "the PR does part of the issue: merging it leaves the issue open")
 	var editTitle, editBody string

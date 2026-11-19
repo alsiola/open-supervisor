@@ -19,7 +19,7 @@ The `area` line in a correction file is a hint, not the answer: a `writing` corr
    - Don't create a new skill in a sweep. If a theme fits none of the homes, put it in the closest one and say so in the report.
 5. Commit only the rule files, with a message listing the rules added or changed and the file each went into. Land it as the message's `Land` line says, on its `Remote`:
    - **push to the main branch**: commit on the main branch and push. If the push is rejected, `git pull --rebase` and push again.
-   - **open a PR**: `git switch -c open-supervisor/sweep-<YYYY-MM-DD>` first, commit there, `git push -u <remote> <branch>`, then `$OPEN_SUPERVISOR agent pr create --head <branch> --title <title> --body-file <file>`, with the same list in the body. Then `git switch <main branch>`, so the checkout is back where it was.
+   - **open a PR**: `git switch -c open-supervisor/sweep-<YYYY-MM-DD>` first, commit there, `git push -u <remote> <branch>`, then `$OPEN_SUPERVISOR agent pr create --head <branch> --title <title> --body-file <file>`, with the same list in the body. Then `git switch <main branch>`, so the checkout is back where it was. The command opens an issue to own the PR and moves the PR onto that issue's branch, so an agent answers its reviews, failed checks and conflicts; you don't need to watch it.
 6. Delete the files you read, and only those, once the push succeeds. If nothing survived deduplication, delete them anyway and don't commit.
 7. Report in one line: how many corrections were read, which rules were added or changed and where, and the PR's link if you opened one.
 
