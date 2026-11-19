@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.9.1](https://github.com/alsiola/open-supervisor/compare/v1.9.0...v1.9.1) (2026-11-19)
+
+### Bug Fixes
+
+* **engine:** wake an agent when a late required check reports, and say a deploy may be queued ([#131](https://github.com/alsiola/open-supervisor/issues/131)) ([5c6613a](https://github.com/alsiola/open-supervisor/commit/5c6613ad4b765ecbb6fed6ba835a870073e882ed)), closes [#128](https://github.com/alsiola/open-supervisor/issues/128)
+* **github:** retry an attachment upload when the attachments branch moved under it ([#133](https://github.com/alsiola/open-supervisor/issues/133)) ([5d1e72a](https://github.com/alsiola/open-supervisor/commit/5d1e72a61ea3437c1b611737b368dbf9e7878268))
+* **toolbelt:** retry agent commands' API calls that fail with a timeout or 5xx ([#130](https://github.com/alsiola/open-supervisor/issues/130)) ([7d98dc0](https://github.com/alsiola/open-supervisor/commit/7d98dc0016420c092a0cd33dbaf75cd2ff4dc126)), closes [#129](https://github.com/alsiola/open-supervisor/issues/129)
+* **worktree:** set up two issues' worktrees at once without one failing on the other's ([#127](https://github.com/alsiola/open-supervisor/issues/127)) ([f9cd244](https://github.com/alsiola/open-supervisor/commit/f9cd244745272a5549ae31c34c19b20412fba263)), closes [#126](https://github.com/alsiola/open-supervisor/issues/126)
+
 ## [1.9.0](https://github.com/alsiola/open-supervisor/compare/v1.8.0...v1.9.0) (2026-11-11)
 
 ### Features
