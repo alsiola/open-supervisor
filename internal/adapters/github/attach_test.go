@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/alsiola/open-supervisor/internal/adapter"
 )
 
 func TestAttachStartsTheBranchThenCommits(t *testing.T) {
@@ -45,6 +48,46 @@ func TestAttachStartsTheBranchThenCommits(t *testing.T) {
 	}
 	if !strings.HasPrefix(link, rp.c.web+"/octo/widgets/blob/"+attachBranch+"/38/") || !strings.HasSuffix(link, "-my-shot-1-.png?raw=true") {
 		t.Fatalf("link: %s", link)
+	}
+}
+
+func TestAttachRetriesWhenTheBranchMoves(t *testing.T) {
+	defer func(d time.Duration) { attachBackoff = d }(attachBackoff)
+	attachBackoff = time.Millisecond
+	puts := 0
+	_, rp := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			if puts++; puts < 3 {
+				w.WriteHeader(http.StatusConflict)
+				w.Write([]byte(`{"message":"is at abc but expected def"}`))
+				return
+			}
+		}
+		w.Write([]byte(`{}`))
+	}))
+	if _, err := rp.Attach(context.Background(), "38", "a.png", []byte("png")); err != nil {
+		t.Fatal(err)
+	}
+	if puts != 3 {
+		t.Fatalf("puts: %d", puts)
+	}
+}
+
+func TestAttachGivesUpOnConflictAfterItsTries(t *testing.T) {
+	defer func(d time.Duration) { attachBackoff = d }(attachBackoff)
+	attachBackoff = time.Millisecond
+	puts := 0
+	_, rp := bound(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			puts++
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	_, err := rp.Attach(context.Background(), "38", "a.png", []byte("png"))
+	if !adapter.IsStatus(err, http.StatusConflict) || puts != attachTries {
+		t.Fatalf("err %v after %d puts", err, puts)
 	}
 }
 
