@@ -18,9 +18,9 @@ The project may use GitHub, Bitbucket, Jira or something else; you don't need to
 | `$OPEN_SUPERVISOR agent context` | the project, issue, branch, worktree, base branch, remote and where the rules are |
 | `$OPEN_SUPERVISOR agent issue view` | the issue and every comment on it |
 <!-- direct -->
-| `$OPEN_SUPERVISOR agent issue comment <file>` | comment on the issue (`--issue <key>` for another agent's issue) |
+| `$OPEN_SUPERVISOR agent issue comment [--edit <comment>] <file>` | comment on the issue (`--issue <key>` for another agent's issue); `--edit` with a comment's id or link replaces the text of one you posted |
 <!-- ambient -->
-| `$OPEN_SUPERVISOR agent issue comment <file>` | comment on the issue |
+| `$OPEN_SUPERVISOR agent issue comment [--edit <comment>] <file>` | comment on the issue; `--edit` with a comment's id or link replaces the text of one you posted |
 <!-- end -->
 | `$OPEN_SUPERVISOR agent issue create --title <t> [--wait <condition>]... [--all] [--until <time>] <file>` | open a new issue; with `--wait` or `--until`, it isn't worked until then (see Waiting) |
 | `$OPEN_SUPERVISOR agent worktree setup` | create or reuse the issue's worktree on its branch; prints the path last |
@@ -41,7 +41,7 @@ The project may use GitHub, Bitbucket, Jira or something else; you don't need to
 | `$OPEN_SUPERVISOR agent problem --kind <kind> <file>` | log a problem you worked around (see Report problems) |
 | `$OPEN_SUPERVISOR agent inflight` | the other issues in flight and what each touches |
 
-A `<file>` can be `-` to read from stdin, e.g. `printf '…' | $OPEN_SUPERVISOR agent issue comment -`. Post every comment this way: it marks the comment as yours, so it is never handed back to you as news. Use `git` itself for commits and pushes.
+A `<file>` can be `-` to read from stdin, e.g. `printf '…' | $OPEN_SUPERVISOR agent issue comment -`. Post every comment this way: it marks the comment as yours, so it is never handed back to you as news. To correct a comment you posted, use `--edit` rather than editing it some other way, which drops that mark. Use `git` itself for commits and pushes.
 
 Every turn starts in the project's main checkout. The project's own rules (`CLAUDE.md`, `AGENTS.md` or wherever `agent context` says) hold what is particular to it: what must pass before a PR, how to run its dev server and database, the checks its PRs get, whether and how to show a change in screenshots. Where they differ from this playbook, they win. A project can also keep additions to this playbook in `.open-supervisor/playbooks/work-issue.md`. The supervisor hands them to you with each turn, under "This project's additions to the playbook". Follow them as well as this playbook, never in place of it.
 

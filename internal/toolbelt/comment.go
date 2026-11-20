@@ -62,3 +62,27 @@ func landed(ctx context.Context, body string, start time.Time, list func(context
 	}
 	return "", false
 }
+
+// editComment replaces the text of a comment an agent posted, keeping the mark it carries so it still never comes
+// back as news. ref is the comment's id or its link, as `agent issue view` and `agent issue comment` print them.
+// Only the agent's own comments can be edited: a person's words, or another agent's, are theirs to change.
+func editComment(ctx context.Context, ref, own string, list func(context.Context) ([]core.Comment, error), edit func(context.Context, string, core.AgentMark) (string, error)) (string, error) {
+	cs, err := list(ctx)
+	if err != nil {
+		return "", err
+	}
+	ref = strings.TrimSpace(ref)
+	for _, c := range cs {
+		if c.ID != ref && (c.URL == "" || c.URL != ref) {
+			continue
+		}
+		if c.Agent == nil {
+			return "", fmt.Errorf("comment %s isn't an agent's, so it can't be edited: post a new comment instead", ref)
+		}
+		if from := strings.TrimPrefix(c.Agent.From, "#"); from != "" && from != strings.TrimPrefix(own, "#") {
+			return "", fmt.Errorf("comment %s is the agent's on %s, not this issue's, so it can't be edited: post a new comment instead", ref, from)
+		}
+		return edit(ctx, c.ID, *c.Agent)
+	}
+	return "", fmt.Errorf("no comment %s on the issue (`agent issue view` lists each comment's id)", ref)
+}

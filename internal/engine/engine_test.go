@@ -1097,17 +1097,18 @@ func TestBuildingWithNothingToWakeIsHelp(t *testing.T) {
 	})
 	host.issues["4"] = &core.Issue{Key: "4", Title: "Four", Open: true}
 	p.reconcile()
-	waitFor(t, "help", func() bool { return state(p, "4") == store.Help })
-	if !host.hasLabel("4", p.Labels.Status("help")) {
-		t.Fatalf("not labelled help: %v", host.labelOps)
+	// The state is stored before the labels and the comment go on, so wait for all three.
+	said := func() bool {
+		for _, c := range host.comments_() {
+			if strings.Contains(c, "nothing would wake it") {
+				return true
+			}
+		}
+		return false
 	}
-	found := false
-	for _, c := range host.comments_() {
-		found = found || strings.Contains(c, "nothing would wake it")
-	}
-	if !found {
-		t.Fatalf("didn't say on the issue why it is help: %q", host.comments_())
-	}
+	waitFor(t, "help, labelled and explained", func() bool {
+		return state(p, "4") == store.Help && host.hasLabel("4", p.Labels.Status("help")) && said()
+	})
 }
 
 func TestBuildingWithATaskStaysBuilding(t *testing.T) {

@@ -195,6 +195,25 @@ func TestMarks(t *testing.T) {
 	}
 }
 
+func TestEditCommentKeepsTheFooter(t *testing.T) {
+	var sent map[string]any
+	f := &fake{answers: map[string]func(map[string]any) any{
+		"commentUpdate": func(vars map[string]any) any {
+			sent = vars
+			return map[string]any{"commentUpdate": map[string]any{"success": true, "comment": map[string]any{"url": "https://linear.app/c/c9"}}}
+		},
+	}}
+	tr := testTracker(t, nil, f)
+	url, err := tr.EditComment(context.Background(), "ENG-4", "c9", "fixed\n", core.AgentMark{From: "ENG-4"})
+	if err != nil || url != "https://linear.app/c/c9" {
+		t.Fatalf("%q %v", url, err)
+	}
+	body, _ := sent["input"].(map[string]any)["body"].(string)
+	if sent["id"] != "c9" || tr.comment(rawComment{Body: body}).Agent == nil {
+		t.Errorf("sent %v", sent)
+	}
+}
+
 func sign(secret string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
