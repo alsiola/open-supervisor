@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/alsiola/open-supervisor/compare/v1.9.1...v1.10.0) (2026-11-20)
+
+### Features
+
+* **toolbelt:** give a PR opened outside an issue an issue to own it ([#135](https://github.com/alsiola/open-supervisor/issues/135)) ([13c5b9f](https://github.com/alsiola/open-supervisor/commit/13c5b9ff7d03e2cf42ab604030394ab0cff31f68))
+* **toolbelt:** let an agent edit a comment it posted with agent issue comment --edit ([#137](https://github.com/alsiola/open-supervisor/issues/137)) ([dc1e5a2](https://github.com/alsiola/open-supervisor/commit/dc1e5a25f3371e0ca1b53bb427ba74eca5d92f2d)), closes [#136](https://github.com/alsiola/open-supervisor/issues/136)
+
 ## [1.9.1](https://github.com/alsiola/open-supervisor/compare/v1.9.0...v1.9.1) (2026-11-19)
 
 ### Bug Fixes
