@@ -180,6 +180,9 @@ func Render(events []Event) string {
 				parts = append(parts, fmt.Sprintf("### Required checks haven't reported on PR #%d at %s: %s\n%s", e.PR, short(e.SHA), strings.Join(e.Missing, ", "), missingAdvice))
 			default:
 				s := fmt.Sprintf("### Checks failed on PR #%d at %s: %s\nSee `$OPEN_SUPERVISOR agent checks %d` for links to each.", e.PR, short(e.SHA), strings.Join(e.Failed, ", "), e.PR)
+				if e.Preview != "" {
+					s += "\nPreview: " + e.Preview
+				}
 				if len(e.Missing) > 0 {
 					s += fmt.Sprintf("\nThese required checks haven't reported either: %s. %s", strings.Join(e.Missing, ", "), missingAdvice)
 				}

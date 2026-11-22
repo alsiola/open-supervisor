@@ -852,6 +852,68 @@ func TestLateRequiredCheckReachesTheAgent(t *testing.T) {
 	}
 }
 
+// A check can fail while a deploy is still queued. The agent is told it will hear when the deploy reports, so it
+// does, once; if it has since moved to review, the failure it already knows about doesn't wake it.
+func TestLateRequiredCheckBesideAFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state core.AgentState
+		turns int
+	}{
+		{"building hears the deploy", core.Building, 3},
+		{"review isn't woken for a known failure", core.Review, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const sha = "b1b2c3d1234567890"
+			failed := core.CheckRun{Name: "banner", State: "failure"}
+			n := 0
+			_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
+				n++
+				if n == 1 {
+					host.mu.Lock()
+					host.prs[42] = core.PR{ID: 42, State: core.PROpen, Branch: "agent/issue-4", Base: "main", HeadSHA: sha}
+					host.checks[sha] = core.Checks{Complete: true, Any: true, Failed: []string{"banner"}, Runs: []core.CheckRun{failed}}
+					host.required = []string{"netlify/site/deploy-preview"}
+					host.mu.Unlock()
+					return core.Outcome{OK: true, Status: &core.Status{State: core.Building, Summary: "pushed", PRs: []int{42}}}
+				}
+				if n == 2 {
+					return core.Outcome{OK: true, Status: &core.Status{State: tc.state, Summary: "deploy is queued", PRs: []int{42}}}
+				}
+				return review("reported")
+			})
+			host.issues["4"] = &core.Issue{Key: "4", Title: "Four", Open: true}
+			p.reconcile()
+			waitFor(t, "building on the head", func() bool { r := p.Store.Get("4"); return r.State == store.Building && r.HeadSHA == sha })
+			p.evaluateChecks(sha)
+			waitFor(t, "failed-checks turn", func() bool { return len(agent.turns()) >= 2 })
+			if body := agent.turns()[1].Body; !strings.Contains(body, "Checks failed on PR #42") || !strings.Contains(body, "haven't reported either: netlify/site/deploy-preview") {
+				t.Fatalf("failed-checks turn:\n%s", body)
+			}
+			waitFor(t, "second turn ended", func() bool {
+				r := p.Store.Get("4")
+				return r.Turns >= 2 && r.LastTurn != nil && r.LastTurn.EndedAt != nil && string(r.State) == string(tc.state)
+			})
+			host.mu.Lock()
+			host.checks[sha] = core.Checks{Complete: true, Any: true, Failed: []string{"banner"}, Preview: "https://deploy-preview-42.example.app", Runs: []core.CheckRun{failed, {Name: "netlify/site/deploy-preview", State: "success"}}}
+			host.mu.Unlock()
+			p.evaluateChecks(sha)
+			if tc.turns > 2 {
+				waitFor(t, "late deploy turn", func() bool { return len(agent.turns()) >= tc.turns })
+				if body := agent.turns()[2].Body; !strings.Contains(body, "Checks failed on PR #42") || !strings.Contains(body, "deploy-preview-42") || strings.Contains(body, "haven't reported") {
+					t.Fatalf("late deploy turn:\n%s", body)
+				}
+				waitFor(t, "late turn ended", func() bool { return state(p, "4") == store.Review })
+			}
+			p.evaluateChecks(sha)
+			time.Sleep(100 * time.Millisecond)
+			if got := len(agent.turns()); got != tc.turns {
+				t.Fatalf("%d turns, want %d", got, tc.turns)
+			}
+		})
+	}
+}
+
 func TestFailedChecksReachAnIssueInReview(t *testing.T) {
 	const sha = "c0ffee1234567890"
 	_, p := setup(t, func(spec adapter.TurnSpec, _ *fakeTurn) core.Outcome {
