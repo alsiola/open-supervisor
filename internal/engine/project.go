@@ -1185,7 +1185,7 @@ func (p *Project) applyState(key string, state core.AgentState) core.AgentState 
 	case state == core.Finished:
 		path := p.WorktreePath(key)
 		if tasks := TasksWithin(p.StateDir, path); len(tasks) > 0 {
-			p.logf("%s: keeping the worktree until the tasks running from it end (%s)", p.ref(key), TaskNames(tasks))
+			p.logf("%s: keeping the worktree for the tasks that need it (%s)", p.ref(key), TaskNames(tasks))
 		} else if _, err := os.Stat(path); err == nil {
 			if err := worktree.Remove(worktree.Spec{Root: p.Root, Path: path}); err != nil {
 				p.logf("%s: couldn't remove the worktree: %s", p.ref(key), logx.ErrText(err))

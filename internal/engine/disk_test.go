@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,8 @@ func TestParkedWorktrees(t *testing.T) {
 		return &store.Turn{StartedAt: at.Add(-time.Minute), EndedAt: &at}
 	}
 	// 1 and 2 are up for review with a PR open, 2 used longer ago; 3 asks for help; 4 is running; 5 is building;
-	// 6's PRs have all landed, so it is spare, not parked; 7 has a task running from it.
+	// 6's PRs have all landed, so it is spare, not parked; 7 has a task running from it; 8 has one held
+	// for a person to start again.
 	set := map[string]func(r *store.Record){
 		"1": func(r *store.Record) { r.State, r.PRs, r.LastTurn = store.Review, []int{10}, ended(time.Hour) },
 		"2": func(r *store.Record) { r.State, r.PRs, r.LastTurn = store.Review, []int{20}, ended(48*time.Hour) },
@@ -29,6 +31,7 @@ func TestParkedWorktrees(t *testing.T) {
 		"5": func(r *store.Record) { r.State, r.PRs = store.Building, []int{50} },
 		"6": func(r *store.Record) { r.State, r.PRs, r.ClosedPRs = store.Review, []int{60}, []int{60} },
 		"7": func(r *store.Record) { r.State = store.Done },
+		"8": func(r *store.Record) { r.State = store.Help },
 	}
 	for key, f := range set {
 		st.Create(key, "t", "", "s"+key)
@@ -38,6 +41,14 @@ func TestParkedWorktrees(t *testing.T) {
 	task := Task{Name: "fill", Issue: "7", Dir: worktree.Dir(data, "web", "7"), PID: os.Getpid(), StartedAt: time.Now().UTC(), Outcome: "running"}
 	if err := SaveTask(TaskFile(stateDir, "7", "fill"), task); err != nil {
 		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	heldTask := Task{Name: "engage", Issue: "8", Dir: worktree.Dir(data, "web", "8"), StartedAt: now, EndedAt: &now, Outcome: "held", Reported: true}
+	if err := SaveTask(TaskFile(stateDir, "8", "engage"), heldTask); err != nil {
+		t.Fatal(err)
+	}
+	if _, spare := IssueWorktrees(data, stateDir, "web", st); slices.ContainsFunc(spare, func(w SpareWorktree) bool { return w.Key == "8" }) {
+		t.Error("a worktree with a held task counts as spare")
 	}
 	var keys []string
 	for _, w := range ParkedWorktrees(data, stateDir, "web", st) {
@@ -95,6 +106,16 @@ func TestEvictParked(t *testing.T) {
 	}
 	if err := exec.Command("git", "-C", root, "show-ref", "--verify", "-q", "refs/heads/agent/issue-4").Run(); err != nil {
 		t.Error("the evicted worktree's branch went with it")
+	}
+	// What's left that may go is 5 alone (1 isn't pushed, 2 has its cache, 3 is busy, 4 has gone).
+	size := worktree.Size(parked[4].Path)
+	left := parked[:3:3]
+	left = append(left, parked[4])
+	if !CanFree(root, "origin", left, still, size) {
+		t.Error("CanFree says no to what 5 alone would free")
+	}
+	if CanFree(root, "origin", left, still, size+1) {
+		t.Error("CanFree says yes to more than the worktrees that may go hold")
 	}
 	if got := BigScratches([]string{parked[1].Path, parked[2].Path}); len(got) != 1 || got[0] != "issue-2 (2 KB)" {
 		t.Errorf("BigScratches = %v, want issue-2 alone", got)

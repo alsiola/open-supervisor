@@ -179,11 +179,12 @@ func Tasks(stateDir string) []Task {
 	return out
 }
 
-// TasksWithin are the tasks going now, or waiting to start, from the directory or under it.
+// TasksWithin are the tasks that still need the directory or something under it: going now, waiting to start, or
+// held for a person to start again. A held task's record expires after keepTasks, so it can't keep a worktree for good.
 func TasksWithin(stateDir, dir string) []Task {
 	var out []Task
 	for _, t := range Tasks(stateDir) {
-		if t.Live() && within(t.Dir, dir) {
+		if (t.Live() || t.Held()) && within(t.Dir, dir) {
 			out = append(out, t)
 		}
 	}
