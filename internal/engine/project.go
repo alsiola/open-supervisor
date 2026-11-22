@@ -1338,7 +1338,12 @@ func (p *Project) evaluateChecks(sha string) {
 			x.HeadAt = &now
 		})
 	}
-	if result.Any && !result.Complete || r.State != store.Building && len(result.Failed) == 0 {
+	// On a late look, the failures the agent was already told about aren't news: only a watched check failing is.
+	failures := result.Failed
+	if late {
+		failures = slices.DeleteFunc(slices.Clone(failures), func(name string) bool { return !slices.Contains(r.ChecksMissing, name) })
+	}
+	if result.Any && !result.Complete || r.State != store.Building && len(failures) == 0 {
 		return
 	}
 	if late && len(result.Missing(r.ChecksMissing)) > 0 {
@@ -1381,9 +1386,9 @@ func (p *Project) evaluateChecks(sha string) {
 	sha = r.HeadSHA
 	p.Store.Update(r.Key, func(x *store.Record) {
 		x.ChecksReported = sha
-		// After a failure the agent pushes a fix, a new head; only checks that were all it was told about are watched.
+		// Watched even beside a failure, since the agent is told it will hear. A conflict's checks start on a new head.
 		x.ChecksMissing = nil
-		if len(result.Failed) == 0 && !conflicts {
+		if !conflicts {
 			x.ChecksMissing = missing
 		}
 		if result.Preview != "" {
