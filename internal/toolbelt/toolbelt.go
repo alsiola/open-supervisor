@@ -1070,7 +1070,8 @@ func (s *session) spare() (all []string, spare []engine.SpareWorktree) {
 
 // makeRoom removes the spare worktrees that can go without losing work, for a disk too full for another, then
 // the parked ones (issues up for review, asking for help, done or waiting, with everything pushed) least
-// recently used first while the disk is still too full for this one. It reports whether it removed any.
+// recently used first while the disk is still too full for this one. When all of them together couldn't free
+// enough, it leaves them be. It reports whether it removed any.
 func (s *session) makeRoom(noRoom *worktree.NoRoom, log io.Writer) bool {
 	logf := func(format string, args ...any) { fmt.Fprintf(log, format+"\n", args...) }
 	_, spare := s.spare()
@@ -1093,6 +1094,13 @@ func (s *session) makeRoom(noRoom *worktree.NoRoom, log io.Writer) bool {
 		}
 		r := fresh.Get(key)
 		return r != nil && key != s.key && engine.Parked(r.State)
+	}
+	if d, err := host.DiskAt(noRoom.Path); err == nil && d.Free < noRoom.Need+noRoom.Keep {
+		short := noRoom.Need + noRoom.Keep - d.Free
+		if !engine.CanFree(s.b.Root, s.b.Git.RemoteName(), parked, still, short) {
+			logf("left the parked worktrees alone: removing them all wouldn't free the %s still needed", worktree.Bytes(short))
+			return removed > 0
+		}
 	}
 	evicted := engine.EvictParked(s.b.Root, s.b.Git.RemoteName(), parked, still, full, logf)
 	if len(evicted) > 0 {
@@ -1181,7 +1189,7 @@ func worktreeCmd(f *flags) *cobra.Command {
 			}
 			spec := s.worktreeSpec(cmd.ErrOrStderr())
 			if tasks := engine.TasksWithin(s.b.StateDir, spec.Path); len(tasks) > 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "leaving the worktree while the tasks running from it go on (%s); the supervisor removes it when the last ends, once the issue is finished\n", engine.TaskNames(tasks))
+				fmt.Fprintf(cmd.OutOrStdout(), "leaving the worktree for the tasks running from it, waiting to start or held (%s); the supervisor removes it once they have ended or been dropped with agent task stop and the issue is finished\n", engine.TaskNames(tasks))
 				return nil
 			}
 			return worktree.Remove(spec)

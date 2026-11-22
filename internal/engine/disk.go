@@ -42,7 +42,7 @@ func Parked(s store.State) bool {
 }
 
 // ParkedWorktrees lists a project's parked issue worktrees, least recently used first. Spare ones (see
-// IssueWorktrees) and those an agent task runs from are left out.
+// IssueWorktrees) and those an agent task runs from, is waiting to start from or is held for are left out.
 func ParkedWorktrees(dataDir, stateDir, project string, st *store.Store) []ParkedWorktree {
 	all, spare := IssueWorktrees(dataDir, stateDir, project, st)
 	skip := map[string]bool{}
@@ -86,10 +86,7 @@ func EvictParked(root, remote string, parked []ParkedWorktree, still func(key st
 			continue
 		}
 		spec := worktree.Spec{Root: root, Remote: remote, Path: w.Path}
-		if lost, err := worktree.Unpushed(spec); err != nil || lost != "" {
-			continue
-		}
-		if worktree.Size(filepath.Join(w.Path, worktree.Scratch)) > BigScratch {
+		if !evictable(spec) {
 			continue
 		}
 		if err := worktree.Remove(spec); err != nil {
@@ -99,6 +96,30 @@ func EvictParked(root, remote string, parked []ParkedWorktree, still func(key st
 		removed = append(removed, w.Key)
 	}
 	return removed
+}
+
+// evictable reports whether a parked worktree can go: everything on it is pushed and its scratch folder is small.
+func evictable(spec worktree.Spec) bool {
+	if lost, err := worktree.Unpushed(spec); err != nil || lost != "" {
+		return false
+	}
+	return worktree.Size(filepath.Join(spec.Path, worktree.Scratch)) <= BigScratch
+}
+
+// CanFree reports whether removing the parked worktrees that may go would free at least need bytes, so a disk
+// that eviction can't rescue loses none of them. Files shared with other worktrees count in full, so it can say
+// yes and fall short, but a no is reliable.
+func CanFree(root, remote string, parked []ParkedWorktree, still func(key string) bool, need uint64) bool {
+	var total uint64
+	for _, w := range parked {
+		if !still(w.Key) || !evictable(worktree.Spec{Root: root, Remote: remote, Path: w.Path}) {
+			continue
+		}
+		if total += worktree.Size(w.Path); total >= need {
+			return true
+		}
+	}
+	return false
 }
 
 // BigScratches names the worktrees whose scratch folders hold more than BigScratch, largest first:
