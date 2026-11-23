@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,6 +62,49 @@ func TestHoldIn(t *testing.T) {
 		back, ok := HoldIn("<!-- " + h.Spec() + " -->")
 		if !ok || back.Spec() != h.Spec() {
 			t.Errorf("%q doesn't read back: %+v", h.Spec(), back)
+		}
+	}
+}
+
+func TestHoldWithASpacedJobName(t *testing.T) {
+	h, ok := HoldIn("<!-- waitFor: all job:automated bets reconcile pr:12 job:club/nightly  sync; until 2026-11-23T06:00Z -->")
+	if !ok || !h.All || len(h.Conds) != 3 || h.Until == nil {
+		t.Fatalf("got %+v %v", h, ok)
+	}
+	if h.Conds[0].Ref != "automated bets reconcile" || h.Conds[1].Ref != "12" || h.Conds[2] != (Cond{Kind: CondJob, Project: "club", Ref: "nightly  sync"}) {
+		t.Errorf("conditions: %+v", h.Conds)
+	}
+	if !h.Conds[0].Meets(Fact{Kind: CondJob, Project: "p", Ref: "automated bets reconcile", On: "ok"}, "p") {
+		t.Error("the job's run doesn't meet the wait")
+	}
+	for _, spec := range []Hold{{Conds: h.Conds[:1], Until: h.Until}, {Conds: h.Conds, All: true}} {
+		if err := spec.Readable(); err != nil {
+			t.Errorf("%q: %v", spec.Spec(), err)
+		}
+	}
+	if got := HoldProblems("<!-- waitFor: job:automated bets reconcile; until 2026-11-23T06:00Z -->"); len(got) != 0 {
+		t.Errorf("problems: %v", got)
+	}
+}
+
+func TestUnreadableHoldKeepsItsTimeAndSaysWhy(t *testing.T) {
+	body := "<!-- waitFor: pr:1 nonsense; until 2026-11-23T06:00Z -->"
+	h, ok := HoldIn(body)
+	if !ok || len(h.Conds) != 0 || h.Until == nil {
+		t.Fatalf("got %+v %v", h, ok)
+	}
+	if got := HoldProblems(body); len(got) != 1 || !strings.Contains(got[0], "only its time") {
+		t.Errorf("problems: %v", got)
+	}
+	if got := HoldProblems("<!-- waitFor: nonsense -->"); len(got) != 1 || !strings.Contains(got[0], "ignored") {
+		t.Errorf("no time: %v", got)
+	}
+	if _, ok := HoldIn("<!-- waitFor: issue:12 stray -->"); ok {
+		t.Error("a stray word after an issue was accepted")
+	}
+	for _, name := range []string{"a;b", "a]b", "a>b", "reconcile pr:1"} {
+		if err := (Hold{Conds: []Cond{{Kind: CondJob, Ref: name}}}).Readable(); err == nil {
+			t.Errorf("job %q passed as readable", name)
 		}
 	}
 }
