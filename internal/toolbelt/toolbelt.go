@@ -371,6 +371,7 @@ func issueCmd(f *flags) *cobra.Command {
 			}
 			ctx, cancel := timeout()
 			defer cancel()
+			s.warnHold(ctx, body, !upstream, cmd.ErrOrStderr())
 			if editID != "" {
 				editor, ok := tracker.(adapter.CommentEditor)
 				if !ok {

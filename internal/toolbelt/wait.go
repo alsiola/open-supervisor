@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strconv"
 	"strings"
@@ -150,7 +151,29 @@ func (s *session) holdFor(ctx context.Context, conds []string, all bool, until s
 	if len(h.Conds) == 0 && h.Until == nil {
 		return h, errors.New("say what to wait for: a condition, --until <time>, or both")
 	}
+	if err := h.Readable(); err != nil {
+		return h, err
+	}
 	return h, nil
+}
+
+// warnHold tells the agent when a comment carries a wait the supervisor won't act on as written.
+func (s *session) warnHold(ctx context.Context, body string, checkJobs bool, w io.Writer) {
+	for _, why := range core.HoldProblems(body) {
+		fmt.Fprintln(w, "warning:", why)
+	}
+	h, ok := core.HoldIn(body)
+	if !ok || !checkJobs {
+		return
+	}
+	for _, c := range h.Conds {
+		if c.Kind != core.CondJob {
+			continue
+		}
+		if err := s.checkCond(ctx, c); err != nil {
+			fmt.Fprintln(w, "warning:", err)
+		}
+	}
 }
 
 // alreadyMet is the error for a condition that has already been met.

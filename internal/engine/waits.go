@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alsiola/open-supervisor/internal/core"
@@ -83,6 +84,7 @@ func setHold(x *store.Record, h core.Hold, commentID string) {
 // noteHold: a hold marker in a new issue comment (the agent's or anyone's) holds the issue's next turn until
 // then, or drops the hold it had.
 func (p *Project) noteHold(key, commentID, body string) {
+	p.warnBadHold(key, commentID, body)
 	h, ok := core.HoldIn(body)
 	r := p.Store.Get(key)
 	if !ok || r == nil || commentID == r.ScheduledBy {
@@ -132,11 +134,29 @@ func (p *Project) noteHold(key, commentID, body string) {
 	}
 }
 
-// warnUnknown logs the conditions on projects the supervisor doesn't run, which only the time can end.
+// warnBadHold logs each hold marker in a comment that can't be read in full, once.
+func (p *Project) warnBadHold(key, commentID, body string) {
+	for _, why := range core.HoldProblems(body) {
+		if _, seen := p.badHolds.LoadOrStore(key+"\x00"+commentID+"\x00"+why, true); !seen {
+			p.logf("%s: %s", p.ref(key), why)
+		}
+	}
+}
+
+// warnUnknown logs the conditions only the time can end: on a project the supervisor doesn't run, or a job
+// that project doesn't have.
 func (p *Project) warnUnknown(h core.Hold) {
 	for _, c := range h.Conds {
-		if name := c.In(p.Name); name != p.Name && p.hub.peer(name) == nil {
-			p.logf("waits on %s, but no project here is called %s", c, name)
+		name := c.In(p.Name)
+		owner := p
+		if name != p.Name {
+			if owner = p.hub.peer(name); owner == nil {
+				p.logf("waits on %s, but no project here is called %s", c, name)
+				continue
+			}
+		}
+		if c.Kind == core.CondJob && !slices.ContainsFunc(JobNames(owner.Spec), func(j string) bool { return strings.EqualFold(j, c.Ref) }) {
+			p.logf("waits on %s, but %s has no job called %s", c, name, c.Ref)
 		}
 	}
 }

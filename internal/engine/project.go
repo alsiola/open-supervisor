@@ -71,6 +71,8 @@ type Project struct {
 	Store     *store.Store
 	Jobs      *Jobs
 
+	badHolds sync.Map // the unreadable hold markers already logged
+
 	// repoConn is the name of the repo's connection, for routing webhooks.
 	repoConn    string
 	fingerprint string
@@ -1633,6 +1635,7 @@ func (p *Project) readComments(ctx context.Context, r *store.Record) {
 	latest := ""
 	for _, c := range comments {
 		if c.Kind == core.OnIssue && c.At.After(r.Since) {
+			p.warnBadHold(r.Key, c.ID, c.Body)
 			if _, ok := core.HoldIn(c.Body); ok {
 				latest = c.ID
 			}

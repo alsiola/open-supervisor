@@ -62,6 +62,9 @@ func ParseCond(s string) (Cond, error) {
 		}
 	case CondIssue:
 		c.Ref = strings.TrimPrefix(c.Ref, "#")
+		if strings.ContainsAny(c.Ref, " \t\r\n") {
+			return Cond{}, fmt.Errorf("%q: %q isn't an issue key", s, c.Ref)
+		}
 		if c.On == "" {
 			c.On = "closed"
 		}
@@ -264,20 +267,74 @@ func CondsText(cs []Cond, all bool) string {
 // `[runAt: …]` or `[waitFor: …]` (for trackers whose comments can't hide anything).
 var holdRe = regexp.MustCompile(`(?:<!--\s*(runAt|waitFor)[:(\s]\s*([^>]*?)\s*\)?\s*-->|\[(runAt|waitFor):\s*([^\]]*?)\s*\])`)
 
-// HoldIn returns the last valid hold marker in a body.
+// HoldIn returns the last valid hold marker in a body. A marker with a condition that can't be read still
+// counts for its time, so the issue has that to wake it.
 func HoldIn(body string) (Hold, bool) {
 	var found Hold
 	ok := false
 	for _, m := range holdRe.FindAllStringSubmatch(body, -1) {
-		kind, v := m[1], m[2]
-		if kind == "" {
-			kind, v = m[3], m[4]
-		}
-		if h, err := parseHold(kind, v); err == nil {
+		kind, v := holdParts(m)
+		if h, err := parseHold(kind, v); err == nil || h.Until != nil {
 			found, ok = h, true
 		}
 	}
 	return found, ok
+}
+
+// HoldProblems says what is wrong with each hold marker in a body that can't be read in full.
+func HoldProblems(body string) []string {
+	var problems []string
+	for _, m := range holdRe.FindAllStringSubmatch(body, -1) {
+		kind, v := holdParts(m)
+		h, err := parseHold(kind, v)
+		if err == nil {
+			continue
+		}
+		what := "it is ignored"
+		if h.Until != nil {
+			what = "only its time, " + h.Until.UTC().Format("2006-01-02T15:04Z") + ", counts"
+		}
+		problems = append(problems, fmt.Sprintf("can't read the wait %q (%v): %s", kind+": "+v, err, what))
+	}
+	return problems
+}
+
+// Readable fails a hold whose marker wouldn't read back the same, in either form a tracker writes it.
+func (h Hold) Readable() error {
+	for _, marker := range []string{"<!-- " + h.Spec() + " -->", "[" + h.Spec() + "]"} {
+		if back, ok := HoldIn(marker); !ok || back.Spec() != h.Spec() || len(HoldProblems(marker)) > 0 {
+			return fmt.Errorf("the supervisor couldn't read a wait on %s: a name can't contain ; ] or >, or a word like pr:1", h.Describe())
+		}
+	}
+	return nil
+}
+
+func holdParts(m []string) (kind, v string) {
+	if m[1] != "" {
+		return m[1], m[2]
+	}
+	return m[3], m[4]
+}
+
+// condStartRe finds where a condition starts in a marker. What follows, up to the next one, is its text: a
+// job's name can have spaces in it.
+var condStartRe = regexp.MustCompile(`(?i)(?:^|\s)(?:pr|issue|job):`)
+
+// splitConds splits a marker's conditions.
+func splitConds(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var parts []string
+	from := 0
+	for _, m := range condStartRe.FindAllStringIndex(s, -1) {
+		if m[0] > from {
+			parts = append(parts, strings.TrimSpace(s[from:m[0]]))
+			from = m[0]
+		}
+	}
+	return append(parts, strings.TrimSpace(s[from:]))
 }
 
 func parseHold(kind, v string) (Hold, error) {
@@ -294,14 +351,16 @@ func parseHold(kind, v string) (Hold, error) {
 	}
 	var h Hold
 	conds, until, _ := strings.Cut(v, ";")
-	fields := strings.Fields(conds)
-	if len(fields) > 0 && strings.EqualFold(fields[0], "all") {
-		h.All, fields = true, fields[1:]
+	conds = strings.TrimSpace(conds)
+	if f := strings.Fields(conds); len(f) > 0 && strings.EqualFold(f[0], "all") {
+		h.All, conds = true, strings.TrimSpace(conds[len(f[0]):])
 	}
-	for _, f := range fields {
+	var condErr error
+	for _, f := range splitConds(conds) {
 		c, err := ParseCond(f)
 		if err != nil {
-			return Hold{}, err
+			condErr = err
+			break
 		}
 		h.Conds = append(h.Conds, c)
 	}
@@ -311,6 +370,10 @@ func parseHold(kind, v string) (Hold, error) {
 			return Hold{}, err
 		}
 		h.Until = &t
+	}
+	if condErr != nil {
+		// The time is still good: the caller can hold to it rather than lose the wait altogether.
+		return Hold{Until: h.Until}, condErr
 	}
 	if len(h.Conds) == 0 && h.Until == nil {
 		return Hold{}, fmt.Errorf("an empty wait")
